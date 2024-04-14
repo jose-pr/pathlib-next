@@ -47,11 +47,11 @@ class SftpBackend(BaseSftpBackend):
         return self.transport(source).open_sftp_client()
 
 
-def _getcachedclient(backend: BaseSftpBackend, source: UriSource, thread_id: int):
+def _create_sftpclient(backend: BaseSftpBackend, source: UriSource, thread_id: int):
     return backend.client(source)
 
 
-_CACHED_CLIENTS = _utils.LRU(_getcachedclient, maxsize=128)
+_CACHED_CLIENTS = _utils.LRU(_create_sftpclient, maxsize=128)
 
 
 class SftpPath(Uri):
