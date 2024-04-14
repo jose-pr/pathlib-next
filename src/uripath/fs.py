@@ -1,6 +1,6 @@
 import stat as _stat
 from . import utils as _utils
-from io import *
+
 
 class FileStat:
     __slots__ = (
@@ -51,8 +51,16 @@ class FileStat:
             yield key, getattr(self, key)
 
     def __repr__(self):
-        return "<FileStat mode=%o, size=%s, mtime=%d>" % (
+        return "<%s mode=%o, size=%s, mtime=%d>" % (
+            type(self).__name__,
             self.st_mode,
             _utils.sizeof_fmt(self.st_size),
             self.st_mtime,
+        )
+    
+    def __str__(self):
+        props = [f"{k}={v}" for k,v in self.items()]
+        return "<%s %s>" % (
+            type(self).__name__,
+            ', '.join(props)
         )

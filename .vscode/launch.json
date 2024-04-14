@@ -5,10 +5,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: Current File",
+            "name": "Example",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
+            "program": "${workspaceFolder}/src/example.py",
             "console": "integratedTerminal"
         }
     ]

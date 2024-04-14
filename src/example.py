@@ -1,13 +1,10 @@
-from uripath.uri import PureUriPath, UriPath
-from uripath.http import HttpPath
-from uripath.sftp import SftpPath
-from uripath.file import LocalPath
+from uripath.uri import Uri
+from uripath.schemes import *
 
-from pathlib import PurePosixPath, Path
+dest = Uri('file:./_keys')
+uri = dest.as_uri()
 
-dest = UriPath('file:./keys')
-
-sftp_root = UriPath('sftp://root@sftpexample/')
+sftp_root = Uri('sftp://root@sftpexample/')
 
 print(list(sftp_root.iterdir()))
 
