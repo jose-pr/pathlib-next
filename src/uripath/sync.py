@@ -12,7 +12,8 @@ class SyncEvent(_enum.Enum):
 
 
 class PathSync(object):
-    __slots__ = ("checksum","_hook", "remove_missing")
+    __slots__ = ("checksum", "_hook", "remove_missing")
+    EVENT_LOG_FORMAT = "[{event}] Source:{source} Target:{target} DryRun:{dry_run}"
 
     def __init__(
         self,
@@ -25,12 +26,19 @@ class PathSync(object):
         self.remove_missing = remove_missing
         self._hook = hook
 
+    def log(self, msg: str, **kwargs: str):
+        print(msg.format_map(kwargs))
 
-    def hook(self, source:Uri, target:Uri, event:SyncEvent, dry_run:bool):
+    def hook(self, source: Uri, target: Uri, event: SyncEvent, dry_run: bool):
         if self._hook:
             self._hook(source, target, event, dry_run)
-        print(f"[{event}] Source:{source} Target:{target} DryRun:{dry_run}")
-        
+        self.log(
+            self.EVENT_LOG_FORMAT,
+            event=event,
+            source=source,
+            target=target,
+            dry_run=dry_run,
+        )
 
     def sync(self, source: Uri, target: Uri, /, dry_run: bool = False):
         source, target = source._src_dest(target)
@@ -55,8 +63,9 @@ class PathSync(object):
                 self.hook(source, target, SyncEvent.Copy, dry_run)
         else:
             if target.is_file():
-                target.unlink()
-            
+                if not dry_run:
+                    target.unlink()
+
             if not target.exists():
                 if not dry_run:
                     target.mkdir()
