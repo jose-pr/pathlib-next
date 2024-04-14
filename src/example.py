@@ -12,3 +12,5 @@ authkeys = sftp_root / 'root/.ssh/authorized_keys'
 
 authkeys.copy(dest, overwrite=True)
 print((sftp_root / 'root/.ssh/authorized_keys').read_text())
+
+print(Uri('http://httpredir.debian.org/debian/README').read_text())

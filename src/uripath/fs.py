@@ -1,4 +1,5 @@
 import stat as _stat
+
 from . import utils as _utils
 
 
@@ -57,10 +58,7 @@ class FileStat:
             _utils.sizeof_fmt(self.st_size),
             self.st_mtime,
         )
-    
+
     def __str__(self):
-        props = [f"{k}={v}" for k,v in self.items()]
-        return "<%s %s>" % (
-            type(self).__name__,
-            ', '.join(props)
-        )
+        props = [f"{k}={v}" for k, v in self.items()]
+        return "<%s %s>" % (type(self).__name__, ", ".join(props))

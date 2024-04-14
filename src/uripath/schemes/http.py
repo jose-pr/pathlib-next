@@ -1,10 +1,19 @@
 from ..uri import Uri
 from .. import fs, utils as _utils
 import io as _io
-import posixpath as _posix
 import requests as _req
 import typing as _ty
+import bs4 as _bs4
+import time as _time
 
+from htmllistparse import parse as _htmlparse
+
+
+class _FileEntry(_ty.NamedTuple):
+    name: str
+    modified: _ty.Optional[_time.struct_time]
+    size: _ty.Optional[int]
+    description: _ty.Optional[str]
 
 class HttpBackend(_ty.NamedTuple):
     session: _req.Session
@@ -12,9 +21,8 @@ class HttpBackend(_ty.NamedTuple):
 
     def request(self, method, uri: "HttpPath", **kwargs):
         return self.session.request(
-            method, **self.requests_args, url=uri.as_uri(), **kwargs
+            method, **self.requests_args, url=str(uri), **kwargs
         )
-
 
 class HttpPath(Uri):
     _SCHEMES_ = ["http", "https"]
@@ -27,13 +35,15 @@ class HttpPath(Uri):
     def _initbackend(self):
         return HttpBackend(_req.Session(), {})
 
-    def _dirls_(self):
-        return _utils.ls(
-            self.as_uri(), self.backend.session, **self.backend.requests_args
-        )
+    def _ls(self) -> list[_FileEntry]:
+        req = self.backend.session.request('GET', self)
+        req.raise_for_status()
+        soup = _bs4.BeautifulSoup(req.content, "html5lib")
+        _, listing = _htmlparse(soup)
+        return listing
 
     def iterdir(self):
-        for child in self._dirls_():
+        for child in self._ls():
             path = self / child.name
             path._isdir = child.name.endswith("/")
             yield path
@@ -70,7 +80,7 @@ class HttpPath(Uri):
                     entry = next(
                         filter(
                             lambda p: p.name == self.name,
-                            parent._dirls_(),
+                            parent.ls(),
                         )
                     )
                     if entry and entry.modified:
