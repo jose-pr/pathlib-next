@@ -1,16 +1,15 @@
 from uripath.uri import Uri
 from uripath.schemes import *
+from uripath.sync import PathSync
 
-dest = Uri('file:./_keys')
+dest = Uri('file:./_ssh')
 uri = dest.as_uri()
 
 sftp_root = Uri('sftp://root@sftpexample/')
-
-print(list(sftp_root.iterdir()))
-
 authkeys = sftp_root / 'root/.ssh/authorized_keys'
 
-authkeys.copy(dest, overwrite=True)
-print((sftp_root / 'root/.ssh/authorized_keys').read_text())
-
-print(Uri('http://httpredir.debian.org/debian/README').read_text())
+def checksum(uri:Uri):
+    stat = uri.stat()
+    return hash(stat.st_size)
+syncer =PathSync(checksum, remove_missing=False)
+syncer.sync((sftp_root / 'root/.ssh'), dest, dry_run=False)
