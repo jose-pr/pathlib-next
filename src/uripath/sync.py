@@ -61,8 +61,15 @@ class PathSync(object):
                 if not dry_run:
                     target.mkdir()
                 self.hook(source, target, SyncEvent.CreatedDirectory, dry_run)
-
+            childs = []
             for child in source.iterdir():
                 self.sync(child, target / child.name, dry_run)
+                childs.append(child.name)
+            if self.remove_missing:
+                for child in target.iterdir():
+                    if child.name not in childs:
+                        if not dry_run:
+                            child.rm(recursive=True)
+                        self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
 
         self.hook(source, target, SyncEvent.Synced, dry_run)
