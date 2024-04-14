@@ -15,6 +15,7 @@ class _FileEntry(_ty.NamedTuple):
     size: _ty.Optional[int]
     description: _ty.Optional[str]
 
+
 class HttpBackend(_ty.NamedTuple):
     session: _req.Session
     requests_args: dict
@@ -23,6 +24,7 @@ class HttpBackend(_ty.NamedTuple):
         return self.session.request(
             method, **self.requests_args, url=str(uri), **kwargs
         )
+
 
 class HttpPath(Uri):
     _SCHEMES_ = ["http", "https"]
@@ -36,7 +38,7 @@ class HttpPath(Uri):
         return HttpBackend(_req.Session(), {})
 
     def _ls(self) -> list[_FileEntry]:
-        req = self.backend.session.request('GET', self)
+        req = self.backend.session.request("GET", self)
         req.raise_for_status()
         soup = _bs4.BeautifulSoup(req.content, "html5lib")
         _, listing = _htmlparse(soup)
@@ -48,31 +50,37 @@ class HttpPath(Uri):
             path._isdir = child.name.endswith("/")
             yield path
 
+    def _is_dir(self, resp: _req.Response):
+        return (
+            resp.status_code in (301, 302)
+            or resp.url.endswith("/")
+            or resp.url.endswith("/..")
+            or resp.url.endswith("/.")
+        )
+
     def stat(self):
         session = self.backend.session
         url = self.as_uri()
-        req = session.head(
+        resp = session.head(
             url.rstrip("/"), **self.backend.requests_args, allow_redirects=False
         )
-        req.close()
+        resp.close()
         entry = None
-        if getattr(self, "_isdir", None) is None:
-            self._isdir = (
-                req.status_code in (301, 302)
-                or url.endswith("/")
-                or url.endswith("/..")
-                or url.endswith("/.")
-            )
-        if req.status_code == 404:
+
+        if resp.status_code == 404:
             raise FileNotFoundError(url)
-        elif req.status_code == 403:
+        elif resp.status_code == 403:
             raise PermissionError(url)
-        elif req.status_code in (301, 302):
+        elif resp.status_code in (301, 302):
             pass
         else:
-            req.raise_for_status()
-        st_size = int(req.headers.get("Content-Length", 0))
-        lm = req.headers.get("Last-Modified")
+            resp.raise_for_status()
+
+        if self._isdir is None:
+            self._isdir = self._is_dir(resp)
+
+        st_size = int(resp.headers.get("Content-Length", 0))
+        lm = resp.headers.get("Last-Modified")
         if lm is None:
             parent = self.parent
             if self.path.parts[-1] != parent.path.parts[-1]:
@@ -80,7 +88,7 @@ class HttpPath(Uri):
                     entry = next(
                         filter(
                             lambda p: p.name == self.name,
-                            parent.ls(),
+                            parent._ls(),
                         )
                     )
                     if entry and entry.modified:
