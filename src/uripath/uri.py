@@ -241,6 +241,11 @@ class PureUri(object):
     @property
     def stem(self):
         return self.path.stem
+    
+    def _rawpath(self):
+        last_path = (self.path._raw_paths or [""])[-1]
+        suffix = "/" if last_path != "/" and last_path.endswith("/") else ""
+        return self.path.as_posix() + suffix
 
     def with_(self, **kwargs):
         rm = [k for k in kwargs if kwargs[k] is None]

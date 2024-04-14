@@ -20,9 +20,12 @@ class HttpBackend(_ty.NamedTuple):
     session: _req.Session
     requests_args: dict
 
-    def request(self, method, uri: "HttpPath", **kwargs):
+    def request(self, method, uri: "HttpPath|str", **kwargs):
         return self.session.request(
-            method, **self.requests_args, url=str(uri), **kwargs
+            **self.requests_args,
+            **kwargs,
+            method=method,
+            url=uri if isinstance(str) else uri.as_uri(False)
         )
 
 
@@ -52,34 +55,34 @@ class HttpPath(Uri):
 
     def _is_dir(self, resp: _req.Response):
         return (
-            resp.status_code in (301, 302)
+            resp.is_redirect
             or resp.url.endswith("/")
             or resp.url.endswith("/..")
             or resp.url.endswith("/.")
         )
 
     def stat(self):
-        session = self.backend.session
-        url = self.as_uri()
-        resp = session.head(
-            url.rstrip("/"), **self.backend.requests_args, allow_redirects=False
-        )
-        resp.close()
-        entry = None
-
-        if resp.status_code == 404:
-            raise FileNotFoundError(url)
-        elif resp.status_code == 403:
-            raise PermissionError(url)
-        elif resp.status_code in (301, 302):
-            pass
-        else:
-            resp.raise_for_status()
+        path = self._rawpath()
+        check = [self.with_path(path), self] if path.endswith("/") else [self]
+        for uri in check:
+            resp = self.backend.request("HEAD", uri, allow_redirects=False)
+            resp.close()
+            if resp.status_code < 400:
+                break
 
         if self._isdir is None:
             self._isdir = self._is_dir(resp)
 
-        st_size = int(resp.headers.get("Content-Length", 0))
+        if resp.is_redirect:
+            resp = self.backend.request("HEAD", uri)
+        if resp.status_code == 404:
+            raise FileNotFoundError(self)
+        elif resp.status_code == 403:
+            raise PermissionError(self)
+        else:
+            resp.raise_for_status()
+
+        st_size = 0 if self._isdir else int(resp.headers.get("Content-Length", 0))
         lm = resp.headers.get("Last-Modified")
         if lm is None:
             parent = self.parent
@@ -104,8 +107,9 @@ class HttpPath(Uri):
         self,
         mode="r",
         buffering=-1,
-        encoding=None,
     ):
+        if mode != "r":
+            raise NotImplementedError(mode)
         buffer_size = _io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering
         req = self.backend.request("GET", self.as_uri(), stream=True)
         return (
@@ -115,12 +119,12 @@ class HttpPath(Uri):
         )
 
     def is_dir(self):
-        if getattr(self, "_isdir", None) is None:
+        if self._isdir is None:
             self.stat()
-        return self._isdir
+        return self._is_dir is not None and self._isdir
 
     def is_file(self):
-        return not self.is_dir()
+        return self.is_dir is not None and not self.is_dir()
 
     def with_session(self, session: _req.Session, **requests_args):
         return self.__class__(self, backend=HttpBackend(session, requests_args))
