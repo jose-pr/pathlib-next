@@ -1,0 +1,3 @@
+Path operations for URIs based on pathutils.Path
+Goal is to acccess path from diferrent sources such as http, sftp, tftp ... 
+Or any other custom source by associating a scheme with UriPath
