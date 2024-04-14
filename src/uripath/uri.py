@@ -20,7 +20,7 @@ _UriParsedResult = uritools.SplitResult
 class UriSource(_ty.NamedTuple):
     scheme: str
     userinfo: str
-    host: str|_IPAddress
+    host: str | _IPAddress
     port: int
 
     def __bool__(self):
@@ -56,7 +56,7 @@ class _UriPathParents(_ty.Sequence):
 
     def __init__(self, path: "PureUri"):
         self._path = path
-        self._parents = path.path.parents
+        self._parents = path.posixpath.parents
 
     def __len__(self):
         return len(self._parents)
@@ -64,7 +64,7 @@ class _UriPathParents(_ty.Sequence):
     def __getitem__(self, idx):
         if isinstance(idx, slice):
             return tuple(self[i] for i in range(*idx.indices(len(self))))
-        return self._path.with_path(self._parents[idx])
+        return self._path.with_path(self._parents[idx].as_posix())
 
     def __repr__(self):
         return "<{}.parents>".format(type(self._path).__name__)
@@ -72,12 +72,11 @@ class _UriPathParents(_ty.Sequence):
 
 class PureUri(object):
 
-    _PATH_CLS: type[_PurePath] = Path
-
     __slots__ = (
         "_raw_uris",
         "_source",
         "_path",
+        "_posixpath",
         "_query",
         "_fragment",
         "_uri",
@@ -109,12 +108,12 @@ class PureUri(object):
         return type(self)(*pathsegments)
 
     @classmethod
-    def _parse_path(cls, path: str) -> tuple[UriSource, Path, str, str]:
+    def _parse_path(cls, path: str) -> tuple[UriSource, str, str, str]:
         parsed = uritools.urisplit(path)
         source = UriSource.from_uri_parsed_result(parsed)
         return (
             source,
-            cls._PATH_CLS(parsed.getpath()),
+            parsed.getpath(),
             parsed.getquery(),
             parsed.getfragment(),
         )
@@ -131,11 +130,22 @@ class PureUri(object):
                 paths = [path]
             else:
                 paths.append(path)
+        _path = ""
+        for path in reversed(paths):
+            if path == "/":
+                _path = f"/{_path}"
+            elif _path != '':
+                _path = f"{path}/{_path}"
+            else:
+                _path = path
+            if _path.startswith("/"):
+                break
 
         self._source = source
-        self._path = self._PATH_CLS(*paths)
+        self._path = _path
         self._query = query
         self._fragment = fragment
+        self._posixpath = Path(_path)
 
     def _from_parsed_parts(self, source, path, query, fragment):
         path_str = self._format_parsed_parts(source, path, query, fragment)
@@ -151,16 +161,14 @@ class PureUri(object):
     def _format_parsed_parts(
         cls,
         source: UriSource,
-        path: Path,
+        path,
         query,
         fragment,
         /,
         sanitize=True,
     ) -> str:
-        last_path = (path._raw_paths or [""])[-1]
-        suffix = "/" if last_path != "/" and last_path.endswith("/") else ""
         parts = {
-            "path": path.as_posix() + suffix,
+            "path": path,
         }
         if query:
             parts["query"] = query
@@ -229,25 +237,28 @@ class PureUri(object):
             return self._fragment
 
     @property
+    def posixpath(self):
+        if self._posixpath is not None:
+            return self._posixpath
+        else:
+            self._load_parts()
+            return self._posixpath
+
+    @property
     def name(self):
-        return self.path.name
+        return self._posixpath.name
 
     @property
     def suffix(self):
-        return self.path.suffix
+        return self._posixpath.suffix
 
     @property
     def suffixes(self):
-        return self.path.suffixes
+        return self._posixpath.suffixes
 
     @property
     def stem(self):
-        return self.path.stem
-    
-    def _rawpath(self):
-        last_path = (self.path._raw_paths or [""])[-1]
-        suffix = "/" if last_path != "/" and last_path.endswith("/") else ""
-        return self.path.as_posix() + suffix
+        return self._posixpath.stem
 
     def with_(self, **kwargs):
         rm = [k for k in kwargs if kwargs[k] is None]
@@ -266,7 +277,7 @@ class PureUri(object):
 
     def with_path(self, path):
         return self._from_parsed_parts(
-            self.source, self._PATH_CLS(path), self.query, self.fragment
+            self.source, str(path), self.query, self.fragment
         )
 
     def with_query(self, query: str):
@@ -277,7 +288,10 @@ class PureUri(object):
 
     def with_name(self, name):
         return self._from_parsed_parts(
-            self.source, self.path.with_name(name), self.query, self.fragment
+            self.source,
+            self.posixpath.with_name(name).as_posix(),
+            self.query,
+            self.fragment,
         )
 
     def with_stem(self, stem):
@@ -285,7 +299,10 @@ class PureUri(object):
 
     def with_suffix(self, suffix):
         return self._from_parsed_parts(
-            self.source, self.path.with_suffix(suffix), self.query, self.fragment
+            self.source,
+            self.posixpath.with_suffix(suffix).as_posix(),
+            self.query,
+            self.fragment,
         )
 
     @property
@@ -315,10 +332,10 @@ class PureUri(object):
     @property
     def parent(self):
         """The logical parent of the path."""
-        parent = self.path.parent
-        if parent == self.path:
+        parent = self.posixpath.parent
+        if parent == self.posixpath:
             return self
-        return self.with_path(parent)
+        return self.with_path(parent.as_posix())
 
     @property
     def parents(self):
@@ -327,7 +344,7 @@ class PureUri(object):
     def is_absolute(self):
         """True if the path is absolute (has both a root and, if applicable,
         a drive)."""
-        return bool(self.source) and self.path.is_absolute()
+        return bool(self.source) and self.posixpath.is_absolute()
 
     def is_relative_to(self, other):
         """Return True if the path is relative to another path or False."""
@@ -339,10 +356,10 @@ class PureUri(object):
         if (self.source and other.source) and other.source != self.source:
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
         try:
-            relpath = self.path.relative_to(other.path, walk_up)
+            relpath = self.posixpath.relative_to(other.path, walk_up)
         except ValueError:
-            relpath = self.path
-        return self._from_parsed_parts(_NOSOURCE, relpath, self.query, self.fragment)
+            relpath = self.posixpath
+        return self._from_parsed_parts(_NOSOURCE, relpath.as_posix(), self.query, self.fragment)
 
 
 class Uri(PureUri):
@@ -623,7 +640,7 @@ class Uri(PureUri):
 
         if target.source == src.source:
             try:
-                return src._rename(target.path)
+                return src._rename(target.posixpath)
             except NotImplementedError:
                 pass
 

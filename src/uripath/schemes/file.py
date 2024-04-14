@@ -26,7 +26,7 @@ class FileUri(Uri):
     
     def iterdir(self):
         for path in self.filepath.iterdir():
-            return self.__class__(path)
+            yield type(self)(path)
 
     def stat(self, *, follow_symlinks=True):
         return self.filepath.stat(follow_symlinks=follow_symlinks)

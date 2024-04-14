@@ -57,7 +57,7 @@ _CACHED_CLIENTS = _utils.LRU(_create_sftpclient, maxsize=128)
 class SftpPath(Uri):
 
     _SCHEMES_ = ["sftp"]
-    __slots__ = ("_remote_path",)
+    __slots__ = ()
 
     if _ty.TYPE_CHECKING:
         backend: BaseSftpBackend
@@ -65,11 +65,7 @@ class SftpPath(Uri):
     def _initbackend(self):
         return SftpBackend({}, _paramiko.MissingHostKeyPolicy)
 
-    @property
-    def remote_path(self):
-        if self._remote_path is None:
-            self._remote_path = self.path.as_posix()
-        return self._remote_path
+
 
     @property
     def _sftpclient(self):
@@ -80,28 +76,28 @@ class SftpPath(Uri):
         return client
 
     def iterdir(self) -> _ty.Iterable["SftpPath"]:
-        for path in self._sftpclient.listdir(self.remote_path):
+        for path in self._sftpclient.listdir(self.path):
             yield self / path
 
     def stat(self):
-        return self._sftpclient.stat(self.remote_path)
+        return self._sftpclient.stat(self.path)
 
     def _open(self, mode="r", buffering=-1):
-        return self._sftpclient.open(self.remote_path, mode, buffering)
+        return self._sftpclient.open(self.path, mode, buffering)
 
     def _mkdir(self, mode):
-        return self._sftpclient.mkdir(self.remote_path, mode)
+        return self._sftpclient.mkdir(self.path, mode)
 
     def chmod(self, mode):
-        return self._sftpclient.chmod(self.remote_path, mode)
+        return self._sftpclient.chmod(self.path, mode)
 
     def unlink(self, missing_ok=False):
         if missing_ok and not self.exists():
             return
-        return self._sftpclient.remove(self.remote_path)
+        return self._sftpclient.remove(self.path)
 
     def rmdir(self):
-        return self._sftpclient.rmdir(self.remote_path)
+        return self._sftpclient.rmdir(self.path)
 
     def _rename(self, target):
-        return self._sftpclient.rename(self.remote_path, target.as_posix())
+        return self._sftpclient.rename(self.path, target.as_posix())
