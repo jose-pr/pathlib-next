@@ -77,3 +77,17 @@ def notimplemented(method):
         raise NotImplementedError(f"Not implement method  {method.__name__}")
 
     return _notimplemented
+
+import socket as _socket
+import ipaddress as _ip
+
+def get_machine_ips():
+    ips:list[_ip.IPv4Address|_ip.IPv6Address] = list()
+    for item in _socket.getaddrinfo(_socket.gethostname(), None):
+        protocol, *_, (ip, *_) = item
+        if protocol == _socket.AddressFamily.AF_INET:
+            ips.append(_ip.ip_address(ip))
+        elif protocol == _socket.AddressFamily.AF_INET6:
+            ips.append(_ip.ip_address(ip))
+
+    return ips

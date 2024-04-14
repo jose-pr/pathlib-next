@@ -9,16 +9,18 @@ if _ty.TYPE_CHECKING:
     from typing import Self
 
 from . import fs as _fs, utils as _utils
+import ipaddress as _ip
 import io as _io
 
 
+_IPAddress = _ip.IPv4Address | _ip.IPv6Address
 _UriParsedResult = uritools.SplitResult
 
 
 class UriSource(_ty.NamedTuple):
     scheme: str
     userinfo: str
-    host: str
+    host: str|_IPAddress
     port: int
 
     def __bool__(self):
@@ -38,7 +40,7 @@ class UriSource(_ty.NamedTuple):
         return UriSource(
             parsed.getscheme(),
             parsed.getuserinfo(),
-            str(parsed.gethost() or ""),
+            parsed.gethost() or "",
             parsed.getport(),
         )
 
