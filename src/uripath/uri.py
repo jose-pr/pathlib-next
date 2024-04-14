@@ -81,7 +81,7 @@ class PureUri(object):
         "_uri",
     )
 
-    def __init__(self, *args):
+    def __init__(self, *args, **_kwargs):
         paths: list[str] = []
         for arg in args:
             if isinstance(arg, PureUri):
@@ -183,7 +183,7 @@ class PureUri(object):
         return self.as_uri()
 
     def __repr__(self):
-        return "{}({!r})".format(self.__class__.__name__, self.as_uri())
+        return "{}({!r})".format(type(self).__name__, self.as_uri())
 
     def as_uri(self, /, sanitize=True):
         if self._uri is not None:
@@ -380,7 +380,7 @@ class Uri(PureUri):
         r = super().with_segments(*pathsegments)
         backend = None
         for p in reversed(pathsegments):
-            if isinstance(p, r.__class__) and p._backend is not None:
+            if isinstance(p, type(r)) and p._backend is not None:
                 backend = p._backend
                 break
         r._backend = backend
@@ -458,7 +458,7 @@ class Uri(PureUri):
 
     def write_text(self, data, encoding=None, errors=None, newline=None):
         if not isinstance(data, str):
-            raise TypeError("data must be str, not %s" % data.__class__.__name__)
+            raise TypeError("data must be str, not %s" % type(data).__name__)
         encoding = _io.text_encoding(encoding)
         with self.open(
             mode="w", encoding=encoding, errors=errors, newline=newline
