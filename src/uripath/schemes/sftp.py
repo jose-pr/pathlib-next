@@ -1,24 +1,23 @@
 import typing as _ty
 from ..uri import Uri, UriSource
 from .. import utils as _utils
-
+import threading as _thread
 import paramiko as _paramiko
 
 
 class BaseSftpBackend(object):
     __slots__ = ()
+
     @_utils.notimplemented
     def client(self, source: UriSource) -> _paramiko.SFTPClient: ...
 
 
 class SftpBackend(BaseSftpBackend):
-    __slots__ = ("_client", "connect_opts", "hostkeypolicy")
-    _client: _paramiko.SFTPClient
+    __slots__ = ("connect_opts", "hostkeypolicy")
     connect_opts: dict[str, str]
     hostkeypolicy: _paramiko.MissingHostKeyPolicy
 
     def __init__(self, connect_opts, hostkeypolicy) -> None:
-        self._client = None
         self.connect_opts = connect_opts
         self.hostkeypolicy = hostkeypolicy
 
@@ -45,9 +44,14 @@ class SftpBackend(BaseSftpBackend):
         return transport
 
     def client(self, source: UriSource):
-        if self._client is None or not self._client.sock.active:
-            self._client = self.transport(source).open_sftp_client()
-        return self._client
+        return self.transport(source).open_sftp_client()
+
+
+def _getcachedclient(backend: BaseSftpBackend, source: UriSource, thread_id: int):
+    return backend.client(source)
+
+
+_CACHED_CLIENTS = _utils.LRU(_getcachedclient, maxsize=128)
 
 
 class SftpPath(Uri):
@@ -69,7 +73,11 @@ class SftpPath(Uri):
 
     @property
     def _sftpclient(self):
-        return self.backend.client(self.source)
+        thead_id = _thread.get_ident()
+        client = _CACHED_CLIENTS(self.backend, self.source, thead_id)
+        if client is None or not client.sock.active:
+            client = _CACHED_CLIENTS.invalidate(self.backend, self.source, thead_id)
+        return client
 
     def iterdir(self) -> _ty.Iterable["SftpPath"]:
         for path in self._sftpclient.listdir(self.remote_path):
