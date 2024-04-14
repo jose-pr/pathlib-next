@@ -62,8 +62,7 @@ class HttpPath(Uri):
         )
 
     def stat(self):
-        path = self._rawpath()
-        check = [self.with_path(path), self] if path.endswith("/") else [self]
+        check = [self.with_path(self.path.removesuffix('/')), self] if self.path.endswith("/") else [self]
         for uri in check:
             resp = self.backend.request("HEAD", uri, allow_redirects=False)
             resp.close()
@@ -86,7 +85,7 @@ class HttpPath(Uri):
         lm = resp.headers.get("Last-Modified")
         if lm is None:
             parent = self.parent
-            if self.path.parts[-1] != parent.path.parts[-1]:
+            if self != parent:
                 try:
                     entry = next(
                         filter(
