@@ -11,7 +11,7 @@ class SyncEvent(_enum.Enum):
     CreatedDirectory = 4
 
 
-class PathSync(object):
+class UriSyncer(object):
     __slots__ = ("checksum", "_hook", "remove_missing")
     EVENT_LOG_FORMAT = "[{event}] Source:{source} Target:{target} DryRun:{dry_run}"
 
