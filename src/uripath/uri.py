@@ -102,7 +102,6 @@ class PureUri(object):
                     )
                 paths.append(path)
         self._raw_uris = paths
-        self._load_parts()
 
     def with_segments(self, *pathsegments):
         return type(self)(*pathsegments)
