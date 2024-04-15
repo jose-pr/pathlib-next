@@ -1,5 +1,5 @@
 import os
-from pathlib import PurePosixPath as Path, PurePath as _PurePath, _ignore_error
+from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath, _ignore_error
 import typing as _ty
 import uritools
 import stat as _stat
@@ -96,7 +96,10 @@ class PureUri(object):
             if isinstance(arg, PureUri):
                 paths.append(arg.as_uri(False))
             elif isinstance(arg, _PurePath):
-                paths.append(arg.as_posix())
+                if arg.is_absolute():
+                    paths.append(uritools.uriencode(arg.as_posix()).decode())
+                else:
+                    paths.append(arg.as_uri())
             else:
                 try:
                     path = os.fspath(arg)
@@ -108,7 +111,7 @@ class PureUri(object):
                         "object where __fspath__ returns a str, "
                         f"not {type(path).__name__!r}"
                     )
-                paths.append(path)
+                paths.append(uritools.uriencode(path).decode())
         self._raw_uris = paths
 
     def with_segments(self, *pathsegments):
@@ -152,25 +155,26 @@ class PureUri(object):
         self._path = _path
         self._query = query
         self._fragment = fragment
-        self._posixpath = Path(_path)
 
-    def _from_parsed_parts(self, source, path, query, fragment):
-        path_str = self._format_parsed_parts(source, path, query, fragment)
-        path = self.with_segments(path_str)
-  #      path._uri = path_str or "."
-        path._source = source
-        path._path = path
-        path._query = query
-        path._fragment = fragment
-        return path
+    def _from_parsed_parts(
+        self, source: UriSource, path: str, query: str, fragment: str
+    ):
+        uri_str = self._format_parsed_parts(source, path, query, fragment)
+        uri = self.with_segments(uri_str)
+        uri._uri = uri_str or "."
+        uri._source = source
+        uri._path = path
+        uri._query = query
+        uri._fragment = fragment
+        return uri
 
     @classmethod
     def _format_parsed_parts(
         cls,
         source: UriSource,
-        path,
-        query,
-        fragment,
+        path: str,
+        query: str,
+        fragment: str,
         /,
         sanitize=True,
     ) -> str:
@@ -197,18 +201,20 @@ class PureUri(object):
         return self.as_uri()
 
     def __fspath__(self):
-        return self.as_uri()
+        return self.path
 
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self.as_uri())
 
     def as_uri(self, /, sanitize=True):
-        if self._uri is not None:
-            return self._uri
-        else:
-            self._uri = self._format_parsed_parts(
+        if self._uri is None or not sanitize:
+            uri = self._format_parsed_parts(
                 self.source, self.path, self.query, self.fragment, sanitize=sanitize
             )
+            if sanitize:
+                self._uri = uri
+            return uri
+        else:
             return self._uri
 
     @property
@@ -238,7 +244,7 @@ class PureUri(object):
     @property
     def posixpath(self):
         if self._posixpath is None:
-            self._load_parts()
+            self._posixpath = PosixPath(self.path)
         return self._posixpath
 
     @property
@@ -575,7 +581,7 @@ class Uri(PureUri):
                 raise
 
     @_utils.notimplemented
-    def _rename(self, target: Path): ...
+    def _rename(self, target: PosixPath): ...
 
     def _src_dest(self, target):
         target = Uri(target) if not isinstance(target, Uri) else target
