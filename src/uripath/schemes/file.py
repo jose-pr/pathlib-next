@@ -1,5 +1,6 @@
 from pathlib import Path as _Path
 import typing as _ty
+import os as _os
 from ..uri import Uri
 from .. import utils as _utils
 
@@ -21,7 +22,12 @@ class FileUri(Uri):
                 if not host.is_loopback:
                     if host not in _utils.get_machine_ips():
                         raise FileNotFoundError(self)
-            self._filepath = _Path(self.path)
+            path = self.path
+            if _os.name == 'nt' and path and path[0] == '/':
+                root, *_ = path.split('/', maxsplit=1)
+                if root[-1] ==':':
+                   path = path.removeprefix("/")
+            self._filepath = _Path(path)
         return self._filepath
     
     def iterdir(self):

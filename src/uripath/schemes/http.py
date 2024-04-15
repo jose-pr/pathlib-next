@@ -25,7 +25,7 @@ class HttpBackend(_ty.NamedTuple):
             **self.requests_args,
             **kwargs,
             method=method,
-            url=uri if isinstance(str) else uri.as_uri(False)
+            url=uri if isinstance(uri, str) else uri.as_uri(False)
         )
 
 
