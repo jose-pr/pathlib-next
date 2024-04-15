@@ -82,6 +82,14 @@ class PureUri(object):
         "_uri",
     )
 
+    def __new__(cls, *args, **kwargs):
+        inst = object.__new__(cls)
+        for cls in cls.__mro__:
+            for slot in getattr(cls, "__slots__", ()):
+                if not hasattr(inst, slot):
+                    setattr(inst, slot, None)
+        return inst
+
     def __init__(self, *args, **_kwargs):
         paths: list[str] = []
         for arg in args:
@@ -131,9 +139,9 @@ class PureUri(object):
                 paths.append(path)
         _path = ""
         for path in reversed(paths):
-            if path == "/":
-                _path = f"/{_path}"
-            elif _path != '':
+            if path.endswith("/"):
+                _path = f"{path}{_path}"
+            elif _path != "":
                 _path = f"{path}/{_path}"
             else:
                 _path = path
@@ -149,7 +157,7 @@ class PureUri(object):
     def _from_parsed_parts(self, source, path, query, fragment):
         path_str = self._format_parsed_parts(source, path, query, fragment)
         path = self.with_segments(path_str)
-        path._uri = path_str or "."
+  #      path._uri = path_str or "."
         path._source = source
         path._path = path
         path._query = query
@@ -199,49 +207,39 @@ class PureUri(object):
             return self._uri
         else:
             self._uri = self._format_parsed_parts(
-                self._source, self._path, self._query, self._fragment, sanitize=sanitize
+                self.source, self.path, self.query, self.fragment, sanitize=sanitize
             )
             return self._uri
 
     @property
     def source(self):
-        if self._source is not None:
-            return self._source
-        else:
+        if self._source is None:
             self._load_parts()
-            return self._source
+        return self._source
 
     @property
     def path(self):
-        if self._path is not None:
-            return self._path
-        else:
+        if self._path is None:
             self._load_parts()
-            return self._path
+        return self._path
 
     @property
     def query(self):
-        if self.query is not None:
-            return self._query
-        else:
+        if self._query is None:
             self._load_parts()
-            return self._query
+        return self._query
 
     @property
     def fragment(self):
-        if self.fragment is not None:
-            return self._fragment
-        else:
+        if self._fragment is None:
             self._load_parts()
-            return self._fragment
+        return self._fragment
 
     @property
     def posixpath(self):
-        if self._posixpath is not None:
-            return self._posixpath
-        else:
+        if self._posixpath is None:
             self._load_parts()
-            return self._posixpath
+        return self._posixpath
 
     @property
     def name(self):
@@ -358,7 +356,9 @@ class PureUri(object):
             relpath = self.posixpath.relative_to(other.path, walk_up)
         except ValueError:
             relpath = self.posixpath
-        return self._from_parsed_parts(_NOSOURCE, relpath.as_posix(), self.query, self.fragment)
+        return self._from_parsed_parts(
+            _NOSOURCE, relpath.as_posix(), self.query, self.fragment
+        )
 
 
 class Uri(PureUri):
@@ -374,15 +374,8 @@ class Uri(PureUri):
                         cls = scls
                         break
 
-        inst = object.__new__(cls)
-        backend = kwargs.get("backend", None)
-        inst._backend = backend
-
-        for cls in cls.__mro__:
-            for slot in getattr(cls, "__slots__", ()):
-                if not hasattr(inst, slot):
-                    setattr(inst, slot, None)
-
+        inst = PureUri.__new__(cls, *args, **kwargs)
+        inst._backend = kwargs.get("backend", None)
         return inst
 
     def _initbackend(self):
@@ -593,7 +586,7 @@ class Uri(PureUri):
             else:
                 raise FileNotFoundError(src)
 
-        if not target._source:
+        if not target.source:
             target = target.with_source(self.source)
 
         if target.source == src.source and target.path == src.path:
