@@ -246,19 +246,19 @@ class PureUri(object):
 
     @property
     def name(self):
-        return self._posixpath.name
+        return self.posixpath.name
 
     @property
     def suffix(self):
-        return self._posixpath.suffix
+        return self.posixpath.suffix
 
     @property
     def suffixes(self):
-        return self._posixpath.suffixes
+        return self.posixpath.suffixes
 
     @property
     def stem(self):
-        return self._posixpath.stem
+        return self.posixpath.stem
 
     def with_(self, **kwargs):
         rm = [k for k in kwargs if kwargs[k] is None]
