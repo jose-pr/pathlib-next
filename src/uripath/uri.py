@@ -54,6 +54,10 @@ class _UriPathParents(_ty.Sequence[_U]):
     def __len__(self):
         return len(self._parents)
 
+    @_ty.overload
+    def __getitem__(self, idx: slice) -> tuple[_U]: ...
+    @_ty.overload
+    def __getitem__(self, idx: int) -> _U: ...
     def __getitem__(self, idx: int | slice) -> tuple[_U] | _U:
         if isinstance(idx, slice):
             return tuple(self[i] for i in range(*idx.indices(len(self))))
@@ -381,9 +385,9 @@ class Uri(PureUri):
             schemesmap.update(scls._get_schemesmap())
         return schemesmap
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args, **kwargs) -> "Uri":
         uri = PureUri(*args, **kwargs)
-        schemesmap = kwargs.pop("schemesmap", None)
+        schemesmap: dict[str, type[Uri]] = kwargs.pop("schemesmap", None)
         if cls is Uri:
             if uri.source and uri.source.scheme:
                 if schemesmap is None:
