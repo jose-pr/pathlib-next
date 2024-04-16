@@ -46,13 +46,13 @@ class HttpPath(Uri):
         soup = _bs4.BeautifulSoup(req.content, "html5lib")
         _, listing = _htmlparse(soup)
         return listing
-
+    
     def iterdir(self):
         _self = self.path.removesuffix("/")
-        for child in self._ls():
-            path = self.with_path(f"{_self}/{child.name}")
-            path._isdir = child.name.endswith("/")
-            yield path
+        for path in self._ls():
+            inst = type(self).__new__(self.__class__, backend=self.backend)
+            inst._init(self.source, f"{_self}/{path.name}", "", "")
+            yield inst
 
     def _is_dir(self, resp: _req.Response):
         return (

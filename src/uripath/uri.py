@@ -14,6 +14,7 @@ import io as _io
 
 
 _IPAddress = _ip.IPv4Address | _ip.IPv6Address
+UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
 
 
 class UriSource(_ty.NamedTuple):
@@ -82,16 +83,20 @@ class PureUri(object):
                     setattr(inst, slot, None)
         return inst
 
-    def __init__(self, *uris: str | "PureUri" | os.PathLike, **options):
+    def __init__(self, *uris: UriLike, **options):
         _uris: list[str | PureUri] = []
         for uri in uris:
             if isinstance(uri, PureUri):
-                _uris.extend(uri)
+                _uris.append(uri)
             elif isinstance(uri, _PurePath):
                 if uri.is_absolute():
                     _uris.append(uritools.uriencode(uri.as_posix()).decode())
                 else:
                     _uris.append(uri.as_uri())
+            elif isinstance(uri, str):
+                _uris.append(uri)
+            elif isinstance(uri, bytes):
+                _uris.append(uri.decode())
             else:
                 try:
                     path = os.fspath(uri)
@@ -149,8 +154,11 @@ class PureUri(object):
             if _path.startswith("/"):
                 break
 
+        self._init(source, _path, query, fragment)
+
+    def _init(self, source: UriSource, path: str, query: str, fragment: str, **kwargs):
         self._source = source
-        self._path = _path
+        self._path = path
         self._query = query
         self._fragment = fragment
 
@@ -160,10 +168,7 @@ class PureUri(object):
         uri_str = self._format_parsed_parts(source, path, query, fragment)
         uri = self.with_segments(uri_str)
         uri._uri = uri_str or "."
-        uri._source = source
-        uri._path = path
-        uri._query = query
-        uri._fragment = fragment
+        self._init(source, path, query, fragment)
         return uri
 
     @classmethod
@@ -301,7 +306,7 @@ class PureUri(object):
     def parts(self):
         return self.source, self.path, self.query, self.fragment
 
-    def joinpath(self, *pathsegments: str | _PurePath | "PureUri"):
+    def joinpath(self, *pathsegments: UriLike):
         """Combine this path with one or several arguments, and return a
         new path representing either a subpath (if all arguments are relative
         paths) or a totally different path (if one of the arguments is
@@ -309,13 +314,13 @@ class PureUri(object):
         """
         return self.with_segments(self, *pathsegments)
 
-    def __truediv__(self, key:str | _PurePath | "PureUri"):
+    def __truediv__(self, key: UriLike):
         try:
             return self.joinpath(key)
         except TypeError:
             return NotImplemented
 
-    def __rtruediv__(self, key:str | _PurePath | "PureUri"):
+    def __rtruediv__(self, key: UriLike):
         try:
             return self.with_segments(key, self)
         except TypeError:
@@ -338,12 +343,12 @@ class PureUri(object):
         a drive)."""
         return bool(self.source) and self.posixpath.is_absolute()
 
-    def is_relative_to(self, other:str | _PurePath | "PureUri"):
+    def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
         other = self.with_segments(other)
         return other == self or other in self.parents
 
-    def relative_to(self, other:str | _PurePath | "PureUri", /, walk_up=False):
+    def relative_to(self, other: UriLike, /, walk_up=False):
         other = self.with_segments(other)
         if (self.source and other.source) and other.source != self.source:
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
@@ -368,7 +373,6 @@ class Uri(PureUri):
                     if uri.source.scheme in scls._SCHEMES_:
                         cls = scls
                         break
-
         inst = PureUri.__new__(cls, *args, **kwargs)
         inst._backend = kwargs.get("backend", None)
         return inst
@@ -398,7 +402,13 @@ class Uri(PureUri):
         return r
 
     @_utils.notimplemented
-    def iterdir(self) -> "_ty.Iterable[Self]": ...
+    def _ls(self) -> "_ty.Iterable[str]": ...
+
+    def iterdir(self) -> "_ty.Iterable[Self]":
+        for path in self._ls():
+            inst = type(self).__new__(self.__class__, backend=self.backend)
+            inst._init(self.source, f"{self.path}/{path}", "", "")
+            yield inst
 
     @_utils.notimplemented
     def stat(self) -> _fs.FileStat: ...
@@ -458,16 +468,16 @@ class Uri(PureUri):
         with self.open(mode="rb") as f:
             return f.read()
 
-    def read_text(self, encoding=None, errors=None) -> str:
+    def read_text(self, encoding: str = None, errors=None) -> str:
         with self.open(mode="r", encoding=encoding, errors=errors) as f:
             return f.read()
 
-    def write_bytes(self, data):
+    def write_bytes(self, data: bytes):
         view = memoryview(data)
         with self.open(mode="wb") as f:
             return f.write(view)
 
-    def write_text(self, data, encoding=None, errors=None, newline=None):
+    def write_text(self, data: str, encoding: str = None, errors=None, newline=None):
         if not isinstance(data, str):
             raise TypeError("data must be str, not %s" % type(data).__name__)
         encoding = _io.text_encoding(encoding)
@@ -521,7 +531,7 @@ class Uri(PureUri):
             paths += [path / d for d in reversed(dirnames)]
 
     @_utils.notimplemented
-    def _mkdir(self, mode): ...
+    def _mkdir(self, mode:int): ...
 
     def mkdir(self, mode=0o777, parents=False, exist_ok=False):
         """
@@ -541,7 +551,7 @@ class Uri(PureUri):
                 raise
 
     @_utils.notimplemented
-    def chmod(self, mode): ...
+    def chmod(self, mode: int): ...
 
     @_utils.notimplemented
     def unlink(self, missing_ok=False): ...
@@ -572,7 +582,7 @@ class Uri(PureUri):
     @_utils.notimplemented
     def _rename(self, target: PosixPath): ...
 
-    def _src_dest(self, target):
+    def _src_dest(self, target: UriLike) -> "tuple[Uri,Uri]":
         target = Uri(target) if not isinstance(target, Uri) else target
         src = self
         if not src.source:
@@ -589,7 +599,7 @@ class Uri(PureUri):
 
         return src, target
 
-    def copy(self, target, *, overwrite=False):
+    def copy(self, target: UriLike, *, overwrite=False):
         src, target = self._src_dest(target)
         if src is None:
             return
@@ -614,7 +624,7 @@ class Uri(PureUri):
             except NotImplementedError:
                 pass
 
-    def move(self, target, *, overwrite=False):
+    def move(self, target: UriLike, *, overwrite=False):
         src, target = self._src_dest(target)
         if src is None:
             return

@@ -30,9 +30,9 @@ class FileUri(Uri):
             self._filepath = _Path(path)
         return self._filepath
     
-    def iterdir(self):
+    def _ls(self):
         for path in self.filepath.iterdir():
-            yield type(self)(path)
+            yield path.name
 
     def stat(self, *, follow_symlinks=True):
         return self.filepath.stat(follow_symlinks=follow_symlinks)

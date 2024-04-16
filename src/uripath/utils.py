@@ -73,7 +73,7 @@ def sizeof_fmt(num: _ty.Union[int, float]):
 
 def notimplemented(method):
     @_functools.wraps(method)
-    def _notimplemented(method):
+    def _notimplemented(*args, **kwargs):
         raise NotImplementedError(f"Not implement method  {method.__name__}")
 
     return _notimplemented

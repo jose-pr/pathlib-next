@@ -75,9 +75,9 @@ class SftpPath(Uri):
             client = _CACHED_CLIENTS.invalidate(self.backend, self.source, thead_id)
         return client
 
-    def iterdir(self) -> _ty.Iterable["SftpPath"]:
+    def _ls(self):
         for path in self._sftpclient.listdir(self.path):
-            yield self / path
+            yield path
 
     def stat(self):
         return self._sftpclient.stat(self.path)
