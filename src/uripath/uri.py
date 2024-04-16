@@ -84,6 +84,8 @@ class PureUri(object):
         return inst
 
     def __init__(self, *uris: UriLike, **options):
+        if self._raw_uris:
+            return
         _uris: list[str | PureUri] = []
         for uri in uris:
             if isinstance(uri, PureUri):
@@ -364,21 +366,53 @@ class PureUri(object):
 class Uri(PureUri):
     __slots__ = ("_backend",)
     _SCHEMES_: list[str] = []
+    _SCHEMESMAP_: dict[str, type["Self"]] = {}
+
+    @classmethod
+    def schemesmap(cls, reload=False):
+        if reload or not cls._SCHEMESMAP_:
+            cls._SCHEMESMAP_ = cls._get_schemesmap()
+        return cls._SCHEMESMAP_
+
+    @classmethod
+    def _get_schemesmap(cls):
+        schemesmap = {scheme: cls for scheme in cls._SCHEMES_}
+        for scls in cls.__subclasses__():
+            schemesmap.update(scls._get_schemesmap())
+        return schemesmap
 
     def __new__(cls, *args, **kwargs):
+        uri = PureUri(*args, **kwargs)
+        schemesmap = kwargs.pop("schemesmap", None)
         if cls is Uri:
-            uri = PureUri(*args, **kwargs)
             if uri.source and uri.source.scheme:
-                for scls in Uri.__subclasses__():
-                    if uri.source.scheme in scls._SCHEMES_:
-                        cls = scls
-                        break
+                if schemesmap is None:
+                    schemesmap = cls.schemesmap()
+                _cls = schemesmap.get(uri.source.scheme, None)
+                if _cls:
+                    cls = _cls
+
         inst = PureUri.__new__(cls, *args, **kwargs)
-        inst._backend = kwargs.get("backend", None)
+        inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
         return inst
 
     def _initbackend(self):
         return None
+
+    def _init(
+        self,
+        source: UriSource,
+        path: str,
+        query: str,
+        fragment: str,
+        /,
+        backend=None,
+        **kwargs,
+    ):
+        backend = kwargs.pop("backend", None)
+        if backend is not None:
+            self._backend = backend
+        super()._init(source, path, query, fragment, **kwargs)
 
     @property
     def backend(self):
@@ -531,7 +565,7 @@ class Uri(PureUri):
             paths += [path / d for d in reversed(dirnames)]
 
     @_utils.notimplemented
-    def _mkdir(self, mode:int): ...
+    def _mkdir(self, mode: int): ...
 
     def mkdir(self, mode=0o777, parents=False, exist_ok=False):
         """
