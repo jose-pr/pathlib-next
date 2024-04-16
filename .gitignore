@@ -1,2 +1,4 @@
-**/__pycache__
+__pycache__
 /_*
+[a-zA-Z]*__
+[a-zA-Z]*__.*
