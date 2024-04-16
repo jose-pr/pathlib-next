@@ -14,7 +14,6 @@ import io as _io
 
 
 _IPAddress = _ip.IPv4Address | _ip.IPv6Address
-_UriParsedResult = uritools.SplitResult
 
 
 class UriSource(_ty.NamedTuple):
@@ -35,33 +34,26 @@ class UriSource(_ty.NamedTuple):
         parts = parts + ["", ""]
         return parts[0], parts[1]
 
-    @staticmethod
-    def from_uri_parsed_result(parsed: _UriParsedResult):
-        return UriSource(
-            parsed.getscheme(),
-            parsed.getuserinfo(),
-            parsed.gethost() or "",
-            parsed.getport(),
-        )
-
 
 _NOSOURCE = UriSource(None, None, None, None)
 
+_U = _ty.TypeVar("_U", bound="PureUri")
 
-class _UriPathParents(_ty.Sequence):
+
+class _UriPathParents(_ty.Sequence[_U]):
     """This object provides sequence-like access to the logical ancestors
     of a path.  Don't try to construct it yourself."""
 
     __slots__ = ("_path", "_parents")
 
-    def __init__(self, path: "PureUri"):
+    def __init__(self, path: _U):
         self._path = path
         self._parents = path.posixpath.parents
 
     def __len__(self):
         return len(self._parents)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int | slice) -> tuple[_U] | _U:
         if isinstance(idx, slice):
             return tuple(self[i] for i in range(*idx.indices(len(self))))
         return self._path.with_path(self._parents[idx].as_posix())
@@ -82,7 +74,7 @@ class PureUri(object):
         "_uri",
     )
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *uris, **options):
         inst = object.__new__(cls)
         for cls in cls.__mro__:
             for slot in getattr(cls, "__slots__", ()):
@@ -90,39 +82,43 @@ class PureUri(object):
                     setattr(inst, slot, None)
         return inst
 
-    def __init__(self, *args, **_kwargs):
-        paths: list[str] = []
-        for arg in args:
-            if isinstance(arg, PureUri):
-                paths.append(arg.as_uri(False))
-            elif isinstance(arg, _PurePath):
-                if arg.is_absolute():
-                    paths.append(uritools.uriencode(arg.as_posix()).decode())
+    def __init__(self, *uris: str | "PureUri" | os.PathLike, **options):
+        _uris: list[str | PureUri] = []
+        for uri in uris:
+            if isinstance(uri, PureUri):
+                _uris.extend(uri)
+            elif isinstance(uri, _PurePath):
+                if uri.is_absolute():
+                    _uris.append(uritools.uriencode(uri.as_posix()).decode())
                 else:
-                    paths.append(arg.as_uri())
+                    _uris.append(uri.as_uri())
             else:
                 try:
-                    path = os.fspath(arg)
+                    path = os.fspath(uri)
                 except TypeError:
-                    path = arg
+                    path = uri
                 if not isinstance(path, str):
                     raise TypeError(
                         "argument should be a str or an os.PathLike "
                         "object where __fspath__ returns a str, "
                         f"not {type(path).__name__!r}"
                     )
-                paths.append(uritools.uriencode(path).decode())
-        self._raw_uris = paths
+                _uris.append(uritools.uriencode(path).decode())
+        self._raw_uris = _uris
 
     def with_segments(self, *pathsegments):
         return type(self)(*pathsegments)
 
     @classmethod
-    def _parse_path(cls, path: str) -> tuple[UriSource, str, str, str]:
-        parsed = uritools.urisplit(path)
-        source = UriSource.from_uri_parsed_result(parsed)
+    def _parse_uri(cls, uri: str) -> tuple[UriSource, str, str, str]:
+        parsed = uritools.urisplit(uri)
         return (
-            source,
+            UriSource(
+                parsed.getscheme(),
+                parsed.getuserinfo(),
+                parsed.gethost() or "",
+                parsed.getport(),
+            ),
             parsed.getpath(),
             parsed.getquery(),
             parsed.getfragment(),
@@ -134,7 +130,9 @@ class PureUri(object):
         paths = []
 
         for _uri in uris or [""]:
-            src, path, query, fragment = self._parse_path(_uri)
+            src, path, query, fragment = (
+                _uri.parts if isinstance(_uri, PureUri) else self._parse_uri(_uri)
+            )
             if src:
                 source = src
                 paths = [path]
@@ -144,7 +142,7 @@ class PureUri(object):
         for path in reversed(paths):
             if path.endswith("/"):
                 _path = f"{path}{_path}"
-            elif _path != "":
+            elif _path:
                 _path = f"{path}/{_path}"
             else:
                 _path = path
@@ -218,31 +216,31 @@ class PureUri(object):
             return self._uri
 
     @property
-    def source(self):
+    def source(self) -> UriSource:
         if self._source is None:
             self._load_parts()
         return self._source
 
     @property
-    def path(self):
+    def path(self) -> str:
         if self._path is None:
             self._load_parts()
         return self._path
 
     @property
-    def query(self):
+    def query(self) -> str:
         if self._query is None:
             self._load_parts()
         return self._query
 
     @property
-    def fragment(self):
+    def fragment(self) -> str:
         if self._fragment is None:
             self._load_parts()
         return self._fragment
 
     @property
-    def posixpath(self):
+    def posixpath(self) -> PosixPath:
         if self._posixpath is None:
             self._posixpath = PosixPath(self.path)
         return self._posixpath
@@ -263,24 +261,15 @@ class PureUri(object):
     def stem(self):
         return self.posixpath.stem
 
-    def with_(self, **kwargs):
-        rm = [k for k in kwargs if kwargs[k] is None]
-        for k in rm:
-            del kwargs[k]
-
-        return self._from_parsed_parts(
-            kwargs.get("source", self.source),
-            kwargs.get("path", self.path),
-            kwargs.get("query", self.query),
-            kwargs.get("fragment", self.fragment),
-        )
-
-    def with_source(self, source):
+    def with_source(self, source: UriSource):
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
 
-    def with_path(self, path):
+    def with_path(self, path: str | _PurePath):
         return self._from_parsed_parts(
-            self.source, str(path), self.query, self.fragment
+            self.source,
+            path.as_posix() if isinstance(path, _PurePath) else path,
+            self.query,
+            self.fragment,
         )
 
     def with_query(self, query: str):
@@ -289,7 +278,7 @@ class PureUri(object):
     def with_fragment(self, fragment: str):
         return self._from_parsed_parts(self.source, self.path, self.query, fragment)
 
-    def with_name(self, name):
+    def with_name(self, name: str):
         return self._from_parsed_parts(
             self.source,
             self.posixpath.with_name(name).as_posix(),
@@ -297,10 +286,10 @@ class PureUri(object):
             self.fragment,
         )
 
-    def with_stem(self, stem):
+    def with_stem(self, stem: str):
         return self.with_name(stem + self.suffix)
 
-    def with_suffix(self, suffix):
+    def with_suffix(self, suffix: str):
         return self._from_parsed_parts(
             self.source,
             self.posixpath.with_suffix(suffix).as_posix(),
@@ -312,7 +301,7 @@ class PureUri(object):
     def parts(self):
         return self.source, self.path, self.query, self.fragment
 
-    def joinpath(self, *pathsegments):
+    def joinpath(self, *pathsegments: str | _PurePath | "PureUri"):
         """Combine this path with one or several arguments, and return a
         new path representing either a subpath (if all arguments are relative
         paths) or a totally different path (if one of the arguments is
@@ -320,13 +309,13 @@ class PureUri(object):
         """
         return self.with_segments(self, *pathsegments)
 
-    def __truediv__(self, key):
+    def __truediv__(self, key:str | _PurePath | "PureUri"):
         try:
             return self.joinpath(key)
         except TypeError:
             return NotImplemented
 
-    def __rtruediv__(self, key):
+    def __rtruediv__(self, key:str | _PurePath | "PureUri"):
         try:
             return self.with_segments(key, self)
         except TypeError:
@@ -349,12 +338,12 @@ class PureUri(object):
         a drive)."""
         return bool(self.source) and self.posixpath.is_absolute()
 
-    def is_relative_to(self, other):
+    def is_relative_to(self, other:str | _PurePath | "PureUri"):
         """Return True if the path is relative to another path or False."""
         other = self.with_segments(other)
         return other == self or other in self.parents
 
-    def relative_to(self, other, /, walk_up=False):
+    def relative_to(self, other:str | _PurePath | "PureUri", /, walk_up=False):
         other = self.with_segments(other)
         if (self.source and other.source) and other.source != self.source:
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")

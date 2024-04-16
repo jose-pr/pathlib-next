@@ -25,7 +25,7 @@ class HttpBackend(_ty.NamedTuple):
             **self.requests_args,
             **kwargs,
             method=method,
-            url=uri if isinstance(uri, str) else uri.as_uri(False)
+            url=uri if isinstance(uri, str) else uri.as_uri(False),
         )
 
 
@@ -48,8 +48,9 @@ class HttpPath(Uri):
         return listing
 
     def iterdir(self):
+        _self = self.path.removesuffix("/")
         for child in self._ls():
-            path = self / child.name
+            path = self.with_path(f"{_self}/{child.name}")
             path._isdir = child.name.endswith("/")
             yield path
 
@@ -62,7 +63,11 @@ class HttpPath(Uri):
         )
 
     def stat(self):
-        check = [self.with_path(self.path.removesuffix('/')), self] if self.path.endswith("/") else [self]
+        check = (
+            [self.with_path(self.path.removesuffix("/")), self]
+            if self.path.endswith("/")
+            else [self]
+        )
         for uri in check:
             resp = self.backend.request("HEAD", uri, allow_redirects=False)
             resp.close()
@@ -126,4 +131,4 @@ class HttpPath(Uri):
         return self.is_dir is not None and not self.is_dir()
 
     def with_session(self, session: _req.Session, **requests_args):
-        return self.__class__(self, backend=HttpBackend(session, requests_args))
+        return type(self)(self, backend=HttpBackend(session, requests_args))
