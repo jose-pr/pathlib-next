@@ -30,7 +30,7 @@ class HttpBackend(_ty.NamedTuple):
 
 
 class HttpPath(Uri):
-    _SCHEMES_ = ["http", "https"]
+    __SCHEMES = ("http", "https")
     __slots__ = ("_isdir", "_session", "_requests_args")
     _isdir: bool
 
@@ -46,7 +46,7 @@ class HttpPath(Uri):
         soup = _bs4.BeautifulSoup(req.content, "html5lib")
         _, listing = _htmlparse(soup)
         return listing
-    
+
     def iterdir(self):
         _self = self.path.removesuffix("/")
         for path in self._ls():

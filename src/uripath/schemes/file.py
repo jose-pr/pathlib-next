@@ -8,14 +8,15 @@ import ipaddress as _ipaddress
 
 import socket as _socket
 
+
 class FileUri(Uri):
-    _SCHEMES_ = ["file"]
-    __slots__ = ('_filepath',)
+    __SCHEMES = ("file",)
+    __slots__ = ("_filepath",)
 
     @property
     def filepath(self):
         if self._filepath is None:
-            if self.source.host and self.source.host != 'localhost':
+            if self.source.host and self.source.host != "localhost":
                 host = self.source.host
                 if isinstance(host, str):
                     host = _ipaddress.ip_address(_socket.gethostbyname(host))
@@ -23,13 +24,13 @@ class FileUri(Uri):
                     if host not in _utils.get_machine_ips():
                         raise FileNotFoundError(self)
             path = self.path
-            if _os.name == 'nt' and path and path[0] == '/':
-                root, *_ = path.split('/', maxsplit=1)
-                if root[-1] ==':':
-                   path = path.removeprefix("/")
+            if _os.name == "nt" and path and path[0] == "/":
+                root, *_ = path.split("/", maxsplit=1)
+                if root[-1] == ":":
+                    path = path.removeprefix("/")
             self._filepath = _Path(path)
         return self._filepath
-    
+
     def _ls(self):
         for path in self.filepath.iterdir():
             yield path.name
@@ -37,9 +38,7 @@ class FileUri(Uri):
     def stat(self, *, follow_symlinks=True):
         return self.filepath.stat(follow_symlinks=follow_symlinks)
 
-    def open(
-        self, mode="r", buffering=-1, encoding=None, errors=None, newline=None
-    ):
+    def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
         return self.filepath.open(mode, buffering, encoding, errors, newline)
 
     def mkdir(self, mode=511, parents=False, exist_ok=False):
@@ -53,6 +52,6 @@ class FileUri(Uri):
 
     def rmdir(self):
         return self.filepath.rmdir()
-    
+
     def _rename(self, target):
         return self.filepath.rename(target)

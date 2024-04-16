@@ -369,29 +369,45 @@ class PureUri(object):
 
 class Uri(PureUri):
     __slots__ = ("_backend",)
-    _SCHEMES_: list[str] = []
-    _SCHEMESMAP_: dict[str, type["Self"]] = {}
+    __SCHEMES: _ty.Sequence[str] = ()
+    __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
 
     @classmethod
-    def schemesmap(cls, reload=False):
-        if reload or not cls._SCHEMESMAP_:
-            cls._SCHEMESMAP_ = cls._get_schemesmap()
-        return cls._SCHEMESMAP_
+    def _schemesmap(cls, reload=False) -> _ty.Mapping[str, type["Self"]]:
+        _propname = f"_{cls.__name__}__SCHEMESMAP"
+        if not reload:
+            try:
+                schemesmap = getattr(cls, _propname)
+                if schemesmap is not None:
+                    return schemesmap
+            except AttributeError:
+                pass
+        schemesmap = cls._get_schemesmap()
+        setattr(cls, _propname, schemesmap)
+        return schemesmap
+
+    @classmethod
+    def _schemes(cls) -> _ty.Sequence[str]:
+        try:
+            return getattr(cls, f"_{cls.__name__}__SCHEMES")
+        except AttributeError as _e:
+            return ()
 
     @classmethod
     def _get_schemesmap(cls):
-        schemesmap = {scheme: cls for scheme in cls._SCHEMES_}
+        schemesmap = {scheme: cls for scheme in cls._schemes()}
         for scls in cls.__subclasses__():
             schemesmap.update(scls._get_schemesmap())
         return schemesmap
 
-    def __new__(cls, *args, **kwargs) -> "Uri":
+    def __new__(
+        cls, *args, schemesmap: dict[str, type["Self"]] = None, **kwargs
+    ) -> "Uri":
         uri = PureUri(*args, **kwargs)
-        schemesmap: dict[str, type[Uri]] = kwargs.pop("schemesmap", None)
         if cls is Uri:
             if uri.source and uri.source.scheme:
                 if schemesmap is None:
-                    schemesmap = cls.schemesmap()
+                    schemesmap = cls._schemesmap()
                 _cls = schemesmap.get(uri.source.scheme, None)
                 if _cls:
                     cls = _cls

@@ -56,7 +56,7 @@ _CACHED_CLIENTS = _utils.LRU(_create_sftpclient, maxsize=128)
 
 class SftpPath(Uri):
 
-    _SCHEMES_ = ["sftp"]
+    __SCHEMES = ("sftp",)
     __slots__ = ()
 
     if _ty.TYPE_CHECKING:
@@ -64,8 +64,6 @@ class SftpPath(Uri):
 
     def _initbackend(self):
         return SftpBackend({}, _paramiko.MissingHostKeyPolicy)
-
-
 
     @property
     def _sftpclient(self):
