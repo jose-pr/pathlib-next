@@ -425,9 +425,13 @@ class Uri(PureUri):
         return schemesmap
 
     def __new__(
-        cls, *args, schemesmap: dict[str, type["Self"]] = None, **kwargs
+        cls,
+        *args,
+        schemesmap: dict[str, type["Self"]] = None,
+        findclass=False,
+        **kwargs,
     ) -> "Uri":
-        if cls is Uri:
+        if cls is Uri or findclass:
             uri = PureUri(*args, **kwargs)
             cls: type[Uri] = uri.source.get_scheme_cls(schemesmap)
             if cls is Uri:
@@ -480,7 +484,7 @@ class Uri(PureUri):
                     break
 
     def joinpaths(self, *pathsegments: UriLike):
-        return Uri(self, *pathsegments)
+        return type(self)(self, *pathsegments, findclass=True)
 
     def with_source(self, source: UriSource):
         cls = type(self)
@@ -676,7 +680,11 @@ class Uri(PureUri):
     def _rename(self, target: PosixPath): ...
 
     def _src_dest(self, target: UriLike) -> "tuple[Uri,Uri]":
-        target = Uri(target) if not isinstance(target, Uri) else target
+        target = (
+            type(self)(target, findclass=True)
+            if not isinstance(target, Uri)
+            else target
+        )
         src = self
         if not src.source:
             if target.source:
