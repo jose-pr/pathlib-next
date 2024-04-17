@@ -43,7 +43,7 @@ class UriSource(_ty.NamedTuple):
             _cls = schemesmap.get(self.scheme, None)
             return _cls if _cls else Uri
         return Uri
-    
+
     def is_local(self):
         host = self.host
         if not host or host == "localhost":
@@ -389,6 +389,7 @@ class PureUri(object):
     def is_local(self):
         return self.source.is_local()
 
+
 class Uri(PureUri):
     __slots__ = ("_backend",)
     __SCHEMES: _ty.Sequence[str] = ()
@@ -447,7 +448,6 @@ class Uri(PureUri):
         backend=None,
         **kwargs,
     ):
-        backend = kwargs.pop("backend", None)
         if backend is not None:
             self._backend = backend
         super()._init(source, path, query, fragment, **kwargs)
