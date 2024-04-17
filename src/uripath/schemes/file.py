@@ -1,13 +1,6 @@
 from pathlib import Path as _Path
-import typing as _ty
 import os as _os
-from ..uri import Uri
-from .. import utils as _utils
-
-import ipaddress as _ipaddress
-
-import socket as _socket
-
+from ..uri import Uri, UriSource
 
 class FileUri(Uri):
     __SCHEMES = ("file",)
@@ -16,20 +9,26 @@ class FileUri(Uri):
     @property
     def filepath(self):
         if self._filepath is None:
-            if self.source.host and self.source.host != "localhost":
-                host = self.source.host
-                if isinstance(host, str):
-                    host = _ipaddress.ip_address(_socket.gethostbyname(host))
-                if not host.is_loopback:
-                    if host not in _utils.get_machine_ips():
-                        raise FileNotFoundError(self)
-            path = self.path
-            if _os.name == "nt" and path and path[0] == "/":
-                root, *_ = path.split("/", maxsplit=1)
-                if root[-1] == ":":
-                    path = path.removeprefix("/")
-            self._filepath = _Path(path)
+            if not self.is_local():
+                raise FileNotFoundError(self)
+            self._filepath = _Path(self.path)
         return self._filepath
+    
+    def _init(
+        self,
+        source: UriSource,
+        path: str,
+        query: str,
+        fragment: str,
+        /,
+        **kwargs,
+    ):
+        if _os.name == "nt" and path and path[0] == "/":
+            root, *_ = path.split("/", maxsplit=1)
+            if root[-1] == ":":
+                path = path.removeprefix("/")
+        super()._init(source, path, query, fragment, **kwargs)
+
 
     def _ls(self):
         for path in self.filepath.iterdir():

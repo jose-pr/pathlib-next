@@ -11,6 +11,7 @@ if _ty.TYPE_CHECKING:
 from . import fs as _fs, utils as _utils
 import ipaddress as _ip
 import io as _io
+import socket as _socket
 
 
 _IPAddress = _ip.IPv4Address | _ip.IPv6Address
@@ -34,6 +35,22 @@ class UriSource(_ty.NamedTuple):
             parts = self.userinfo.split(":", maxsplit=1)
         parts = parts + ["", ""]
         return parts[0], parts[1]
+
+    def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["Uri"]] = None):
+        if self.scheme:
+            if schemesmap is None:
+                schemesmap = Uri._schemesmap()
+            _cls = schemesmap.get(self.scheme, None)
+            return _cls if _cls else Uri
+        return Uri
+    
+    def is_local(self):
+        host = self.host
+        if not host or host == "localhost":
+            return True
+        if isinstance(host, str):
+            host = _ip.ip_address(_socket.gethostbyname(host))
+        return host.is_loopback or host in _utils.get_machine_ips()
 
 
 _NOSOURCE = UriSource(None, None, None, None)
@@ -77,6 +94,7 @@ class PureUri(object):
         "_query",
         "_fragment",
         "_uri",
+        "_initiated",
     )
 
     def __new__(cls, *uris, **options):
@@ -88,14 +106,14 @@ class PureUri(object):
         return inst
 
     def __init__(self, *uris: UriLike, **options):
-        if self._raw_uris:
+        if self._raw_uris or self._initiated:
             return
         _uris: list[str | PureUri] = []
         for uri in uris:
             if isinstance(uri, PureUri):
                 _uris.append(uri)
             elif isinstance(uri, _PurePath):
-                if uri.is_absolute():
+                if not uri.is_absolute():
                     _uris.append(uritools.uriencode(uri.as_posix()).decode())
                 else:
                     _uris.append(uri.as_uri())
@@ -163,18 +181,20 @@ class PureUri(object):
         self._init(source, _path, query, fragment)
 
     def _init(self, source: UriSource, path: str, query: str, fragment: str, **kwargs):
+        if self._initiated:
+            raise Exception(f"Uri._init should only be called once")
+        self._initiated = True
         self._source = source
         self._path = path
         self._query = query
         self._fragment = fragment
 
     def _from_parsed_parts(
-        self, source: UriSource, path: str, query: str, fragment: str
+        self, source: UriSource, path: str, query: str, fragment: str, /, **kwargs
     ):
-        uri_str = self._format_parsed_parts(source, path, query, fragment)
-        uri = self.with_segments(uri_str)
-        uri._uri = uri_str or "."
-        self._init(source, path, query, fragment)
+        cls = type(self)
+        uri = cls.__new__(cls)
+        uri._init(source, path, query, fragment, **kwargs)
         return uri
 
     @classmethod
@@ -228,25 +248,25 @@ class PureUri(object):
 
     @property
     def source(self) -> UriSource:
-        if self._source is None:
+        if not self._initiated:
             self._load_parts()
         return self._source
 
     @property
     def path(self) -> str:
-        if self._path is None:
+        if not self._initiated:
             self._load_parts()
         return self._path
 
     @property
     def query(self) -> str:
-        if self._query is None:
+        if not self._initiated:
             self._load_parts()
         return self._query
 
     @property
     def fragment(self) -> str:
-        if self._fragment is None:
+        if not self._initiated:
             self._load_parts()
         return self._fragment
 
@@ -366,6 +386,8 @@ class PureUri(object):
             _NOSOURCE, relpath.as_posix(), self.query, self.fragment
         )
 
+    def is_local(self):
+        return self.source.is_local()
 
 class Uri(PureUri):
     __slots__ = ("_backend",)
@@ -403,17 +425,13 @@ class Uri(PureUri):
     def __new__(
         cls, *args, schemesmap: dict[str, type["Self"]] = None, **kwargs
     ) -> "Uri":
-        uri = PureUri(*args, **kwargs)
         if cls is Uri:
-            if uri.source and uri.source.scheme:
-                if schemesmap is None:
-                    schemesmap = cls._schemesmap()
-                _cls = schemesmap.get(uri.source.scheme, None)
-                if _cls:
-                    cls = _cls
-
-        inst = PureUri.__new__(cls, *args, **kwargs)
-        inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
+            uri = PureUri(*args, **kwargs)
+            cls: type[Uri] = uri.source.get_scheme_cls(schemesmap)
+            inst = cls.__new__(cls, *args, **kwargs)
+            inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
+        else:
+            inst = PureUri.__new__(cls, *args, **kwargs)
         return inst
 
     def _initbackend(self):
@@ -446,7 +464,7 @@ class Uri(PureUri):
         return uri
 
     def with_segments(self, *pathsegments):
-        r = super().with_segments(*pathsegments)
+        r = Uri(*pathsegments)
         backend = None
         for p in reversed(pathsegments):
             if isinstance(p, type(r)) and p._backend is not None:
@@ -455,12 +473,24 @@ class Uri(PureUri):
         r._backend = backend
         return r
 
+    def with_source(self, source: UriSource):
+        cls = type(self)
+        if not source:
+            inst = PureUri.__new__(Uri)
+        elif source.scheme not in cls._schemes():
+            inst = Uri.__new__(Uri, source.scheme + ":")
+        else:
+            inst = cls.__new__(cls, backend=self._backend)
+        inst._init(source, self.path, self.query, self.fragment)
+        return inst
+
     @_utils.notimplemented
     def _ls(self) -> "_ty.Iterable[str]": ...
 
     def iterdir(self) -> "_ty.Iterable[Self]":
+        cls = type(self)
         for path in self._ls():
-            inst = type(self).__new__(self.__class__, backend=self.backend)
+            inst = cls.__new__(cls, backend=self._backend)
             inst._init(self.source, f"{self.path}/{path}", "", "")
             yield inst
 
@@ -592,7 +622,7 @@ class Uri(PureUri):
         Create a new directory at this given path.
         """
         try:
-            self._mkdir(self, mode)
+            self._mkdir(mode)
         except FileNotFoundError:
             if not parents or self.parent == self:
                 raise

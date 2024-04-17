@@ -21,5 +21,4 @@ syncer.sync((sftp_root / 'root/.ssh'), dest, dry_run=True)
 rocky_repo = Uri('http://dl.rockylinux.org/pub')
 
 print(rocky_repo.is_dir())
-for child in rocky_repo.iterdir():
-    print(list(child.iterdir()))
+print(list(rocky_repo.iterdir()))
