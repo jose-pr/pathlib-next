@@ -137,9 +137,6 @@ class PureUri(object):
                 _uris.append(uritools.uriencode(path).decode())
         self._raw_uris = _uris
 
-    def with_segments(self, *pathsegments):
-        return type(self)(*pathsegments)
-
     @classmethod
     def _parse_uri(cls, uri: str) -> tuple[UriSource, str, str, str]:
         parsed = uritools.urisplit(uri)
@@ -166,15 +163,15 @@ class PureUri(object):
         elif len(uris) == 1 and isinstance(uris[0], PureUri):
             source, _path, query, fragment = uris[0].parts
         else:
+            paths: list[str] = []
             for _uri in uris:
                 src, path, query, fragment = (
                     _uri.parts if isinstance(_uri, PureUri) else self._parse_uri(_uri)
                 )
                 if src:
                     source = src
-                    paths = [path]
-                else:
-                    paths.append(path)
+                paths.append(path)
+
             for path in reversed(paths):
                 if path.endswith("/"):
                     _path = f"{path}{_path}"
@@ -182,15 +179,13 @@ class PureUri(object):
                     _path = f"{path}/{_path}"
                 else:
                     _path = path
-                if _path.startswith("/"):
-                    break
 
         self._init(source, _path, query, fragment)
 
     def _init(self, source: UriSource, path: str, query: str, fragment: str, **kwargs):
         if self._initiated:
             pass
-            #raise Exception(f"Uri._init should only be called once")
+            # raise Exception(f"Uri._init should only be called once")
         self._initiated = True
         self._source = source
         self._path = path
@@ -346,17 +341,11 @@ class PureUri(object):
         paths) or a totally different path (if one of the arguments is
         anchored).
         """
-        return self.with_segments(self, *pathsegments)
+        return type(self)(self, *pathsegments)
 
     def __truediv__(self, key: UriLike):
         try:
             return self.joinpath(key)
-        except TypeError:
-            return NotImplemented
-
-    def __rtruediv__(self, key: UriLike):
-        try:
-            return self.with_segments(key, self)
         except TypeError:
             return NotImplemented
 
@@ -379,11 +368,11 @@ class PureUri(object):
 
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
-        other = self.with_segments(other)
+        other = other if isinstance(other, PureUri) else PureUri(self, _ROOT, other)
         return other == self or other in self.parents
 
     def relative_to(self, other: UriLike):
-        other = self.with_segments(other)
+        other = other if isinstance(other, PureUri) else PureUri(other)
         if (self.source and other.source) and other.source != self.source:
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
         try:
@@ -396,6 +385,10 @@ class PureUri(object):
 
     def is_local(self):
         return self.source.is_local()
+
+    def __eq__(self, other):
+        other = other if isinstance(other, PureUri) else PureUri(other)
+        return self.parts == other.parts
 
 
 class Uri(PureUri):
@@ -474,15 +467,20 @@ class Uri(PureUri):
         uri._backend = backend
         return uri
 
-    def with_segments(self, *pathsegments):
-        r = Uri(*pathsegments)
-        backend = None
-        for p in reversed(pathsegments):
-            if isinstance(p, type(r)) and p._backend is not None:
-                backend = p._backend
-                break
-        r._backend = backend
-        return r
+    def _load_parts(self):
+        super()._load_parts()
+        if self.source and self.source.scheme:
+            for uri in reversed(self._raw_uris):
+                if (
+                    isinstance(uri, Uri)
+                    and uri.source.scheme == self.source.scheme
+                    and uri._backend
+                ):
+                    self._backend = uri._backend
+                    break
+
+    def joinpaths(self, *pathsegments: UriLike):
+        return Uri(self, *pathsegments)
 
     def with_source(self, source: UriSource):
         cls = type(self)
@@ -738,3 +736,6 @@ class Uri(PureUri):
 
         src.copy(target)
         src.unlink()
+
+
+_ROOT = PureUri("/")
