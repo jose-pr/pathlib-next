@@ -374,12 +374,12 @@ class PureUri(object):
         other = self.with_segments(other)
         return other == self or other in self.parents
 
-    def relative_to(self, other: UriLike, /, walk_up=False):
+    def relative_to(self, other: UriLike):
         other = self.with_segments(other)
         if (self.source and other.source) and other.source != self.source:
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
         try:
-            relpath = self.posixpath.relative_to(other.path, walk_up)
+            relpath = self.posixpath.relative_to(other.path)
         except ValueError:
             relpath = self.posixpath
         return self._from_parsed_parts(
