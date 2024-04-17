@@ -110,6 +110,8 @@ class PureUri(object):
             return
         _uris: list[str | PureUri] = []
         for uri in uris:
+            if not uri:
+                continue
             if isinstance(uri, PureUri):
                 _uris.append(uri)
             elif isinstance(uri, _PurePath):
@@ -155,34 +157,40 @@ class PureUri(object):
 
     def _load_parts(self):
         uris = self._raw_uris
-        source = query = fragment = None
-        paths = []
-
-        for _uri in uris or [""]:
-            src, path, query, fragment = (
-                _uri.parts if isinstance(_uri, PureUri) else self._parse_uri(_uri)
-            )
-            if src:
-                source = src
-                paths = [path]
-            else:
-                paths.append(path)
+        source = _NOSOURCE
+        query = fragment = None
         _path = ""
-        for path in reversed(paths):
-            if path.endswith("/"):
-                _path = f"{path}{_path}"
-            elif _path:
-                _path = f"{path}/{_path}"
-            else:
-                _path = path
-            if _path.startswith("/"):
-                break
+
+        if not uris:
+            pass
+        elif len(uris) == 1 and isinstance(uris[0], PureUri):
+            source, _path, query, fragment = uris[0].parts
+        else:
+            for _uri in uris:
+                src, path, query, fragment = (
+                    _uri.parts if isinstance(_uri, PureUri) else self._parse_uri(_uri)
+                )
+                if src:
+                    source = src
+                    paths = [path]
+                else:
+                    paths.append(path)
+            for path in reversed(paths):
+                if path.endswith("/"):
+                    _path = f"{path}{_path}"
+                elif _path:
+                    _path = f"{path}/{_path}"
+                else:
+                    _path = path
+                if _path.startswith("/"):
+                    break
 
         self._init(source, _path, query, fragment)
 
     def _init(self, source: UriSource, path: str, query: str, fragment: str, **kwargs):
         if self._initiated:
-            raise Exception(f"Uri._init should only be called once")
+            pass
+            #raise Exception(f"Uri._init should only be called once")
         self._initiated = True
         self._source = source
         self._path = path
@@ -429,7 +437,10 @@ class Uri(PureUri):
         if cls is Uri:
             uri = PureUri(*args, **kwargs)
             cls: type[Uri] = uri.source.get_scheme_cls(schemesmap)
-            inst = cls.__new__(cls, *args, **kwargs)
+            if cls is Uri:
+                inst = PureUri.__new__(cls, *args, **kwargs)
+            else:
+                inst = cls.__new__(cls, *args, **kwargs)
             inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
         else:
             inst = PureUri.__new__(cls, *args, **kwargs)

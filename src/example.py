@@ -3,6 +3,8 @@ from uripath.schemes import *
 from uripath.sync import UriSyncer
 
 dest = Uri('file:./_ssh')
+dest = Uri(dest)
+empty = Uri()
 uri = dest.as_uri()
 
 print(list(dest.iterdir()))
