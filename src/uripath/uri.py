@@ -18,6 +18,42 @@ _IPAddress = _ip.IPv4Address | _ip.IPv6Address
 UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
 
 
+class UriQuery(str):
+    SEPARATOR = "&"
+    ENCODING = "utf-8"
+
+    def __new__(
+        cls,
+        query: (
+            str
+            | _ty.Sequence[tuple[str, str | None]]
+            | _ty.Mapping[str, str | None | _ty.Sequence[str | None]]
+        ),
+    ):
+        if isinstance(query, str):
+            pass
+        else:
+            if isinstance(query, _ty.Mapping):
+                query: str = uritools._querydict(
+                    query, cls.SEPARATOR, cls.ENCODING
+                ).decode()
+            else:
+                query = uritools._querylist(query, cls.SEPARATOR, cls.ENCODING).decode()
+
+        return str.__new__(cls, query)
+
+    def decode(query) -> list[tuple[str, str | None]]:
+        return uritools.SplitResultString("", "", "", str(query), "").getquerylist(
+            query.SEPARATOR, query.ENCODING
+        )
+
+    def to_dict(query):
+        query_: dict[str, list[str | None]] = {}
+        for k, v in query.decode():
+            query_.setdefault(k, []).append(v)
+        return query_
+
+
 class UriSource(_ty.NamedTuple):
     scheme: str
     userinfo: str
@@ -28,6 +64,11 @@ class UriSource(_ty.NamedTuple):
         if not self.scheme:
             return False
         return True
+
+    def __str__(self) -> str:
+        return uritools.uricompose(
+            scheme=self.scheme, userinfo=self.userinfo, host=self.host, port=self.port
+        )
 
     def parsed_userinfo(self):
         parts = []
@@ -138,7 +179,7 @@ class PureUri(object):
         self._raw_uris = _uris
 
     @classmethod
-    def _parse_uri(cls, uri: str) -> tuple[UriSource, str, str, str]:
+    def _parse_uri(cls, uri: str) -> tuple[UriSource, str, UriQuery, str]:
         parsed = uritools.urisplit(uri)
         return (
             UriSource(
@@ -148,8 +189,8 @@ class PureUri(object):
                 parsed.getport(),
             ),
             parsed.getpath(),
-            parsed.getquery(),
-            parsed.getfragment(),
+            UriQuery(parsed.getquery() or ""),
+            parsed.getfragment() or "",
         )
 
     def _load_parts(self):
@@ -309,6 +350,8 @@ class PureUri(object):
         )
 
     def with_query(self, query: str):
+        if not isinstance(query, UriQuery):
+            query = UriQuery(query)
         return self._from_parsed_parts(self.source, self.path, query, self.fragment)
 
     def with_fragment(self, fragment: str):
