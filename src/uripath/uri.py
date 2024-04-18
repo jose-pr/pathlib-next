@@ -179,6 +179,8 @@ class PureUri(object):
                     _path = f"{path}/{_path}"
                 else:
                     _path = path
+                if _path.startswith("/"):
+                    break
 
         self._init(source, _path, query, fragment)
 
@@ -483,7 +485,7 @@ class Uri(PureUri):
                     self._backend = uri._backend
                     break
 
-    def joinpaths(self, *pathsegments: UriLike):
+    def joinpath(self, *pathsegments: UriLike):
         return type(self)(self, *pathsegments, findclass=True)
 
     def with_source(self, source: UriSource):

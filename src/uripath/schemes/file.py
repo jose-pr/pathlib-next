@@ -10,8 +10,10 @@ class FileUri(Uri):
     def filepath(self):
         if self._filepath is None:
             if not self.is_local():
-                raise FileNotFoundError(self)
-            self._filepath = _Path(self.path)
+                path = self.path if self.path.startswith('/') else f"/{self.path}"
+                self._filepath = _Path(f"//{self.source.host}{path}")
+            else:
+                self._filepath = _Path(self.path)
         return self._filepath
     
     def _init(
@@ -24,8 +26,8 @@ class FileUri(Uri):
         **kwargs,
     ):
         if _os.name == "nt" and path and path[0] == "/":
-            root, *_ = path.split("/", maxsplit=1)
-            if root[-1] == ":":
+            root, *_ = path[1:].split("/", maxsplit=1)
+            if root and root[-1] == ":":
                 path = path.removeprefix("/")
         super()._init(source, path, query, fragment, **kwargs)
 
