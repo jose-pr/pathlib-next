@@ -49,8 +49,9 @@ class HttpPath(Uri):
 
     def iterdir(self):
         _self = self.path.removesuffix("/")
+        cls = type(self)
         for path in self._ls():
-            inst = type(self).__new__(self.__class__, backend=self.backend)
+            inst = type(self).__new__(cls, backend=self.backend)
             inst._init(self.source, f"{_self}/{path.name}", "", "")
             yield inst
 
@@ -94,7 +95,7 @@ class HttpPath(Uri):
                 try:
                     entry = next(
                         filter(
-                            lambda p: p.name == self.name,
+                            lambda p: p.name.removesuffix("/") == self.name,
                             parent._ls(),
                         )
                     )

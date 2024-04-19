@@ -545,6 +545,10 @@ class Uri(PureUri):
     @_utils.notimplemented
     def _ls(self) -> "_ty.Iterable[str]": ...
 
+    
+    def __iter__(self):
+        return self.iterdir()
+    
     def iterdir(self) -> "_ty.Iterable[Self]":
         cls = type(self)
         for path in self._ls():
@@ -635,7 +639,7 @@ class Uri(PureUri):
         except FileNotFoundError:
             return False
 
-    def walk(self, top_down=True, on_error=None, follow_symlinks=False):
+    def walk(self, top_down=True, on_error=None):
         """Walk the directory tree from this directory, similar to os.walk()."""
         paths: "list[Uri|tuple[Uri, list[str], list[str]]]" = [self]
 
@@ -655,7 +659,7 @@ class Uri(PureUri):
             filenames: "list[str]" = []
             for entry in scandir_it:
                 try:
-                    is_dir = entry.is_dir(follow_symlinks=follow_symlinks)
+                    is_dir = entry.is_dir()
                 except OSError:
                     # Carried over from os.path.isdir().
                     is_dir = False
