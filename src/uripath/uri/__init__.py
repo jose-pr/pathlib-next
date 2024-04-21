@@ -8,92 +8,16 @@ import shutil as _shutil
 if _ty.TYPE_CHECKING:
     from typing import Self
 
-from . import fs as _fs, utils as _utils
+from .. import fs as _fs, utils as _utils
+from .query import Query
+from .source import Source
 import ipaddress as _ip
 import io as _io
 import socket as _socket
 
-_IPAddress = _ip.IPv4Address | _ip.IPv6Address
 UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
 
-
-class UriQuery(str):
-    SEPARATOR = "&"
-    ENCODING = "utf-8"
-
-    def __new__(
-        cls,
-        query: (
-            str
-            | _ty.Sequence[tuple[str, str | None]]
-            | _ty.Mapping[str, str | None | _ty.Sequence[str | None]]
-        ),
-    ):
-        if isinstance(query, str):
-            pass
-        else:
-            if isinstance(query, _ty.Mapping):
-                query: str = uritools._querydict(
-                    query, cls.SEPARATOR, cls.ENCODING
-                ).decode()
-            else:
-                query = uritools._querylist(query, cls.SEPARATOR, cls.ENCODING).decode()
-
-        return str.__new__(cls, query)
-
-    def decode(query) -> list[tuple[str, str | None]]:
-        return uritools.SplitResultString("", "", "", str(query), "").getquerylist(
-            query.SEPARATOR, query.ENCODING
-        )
-
-    def to_dict(query):
-        query_: dict[str, list[str | None]] = {}
-        for k, v in query.decode():
-            query_.setdefault(k, []).append(v)
-        return query_
-
-
-class UriSource(_ty.NamedTuple):
-    scheme: str
-    userinfo: str
-    host: str | _IPAddress
-    port: int
-
-    def __bool__(self):
-        if not self.scheme:
-            return False
-        return True
-
-    def __str__(self) -> str:
-        return uritools.uricompose(
-            scheme=self.scheme, userinfo=self.userinfo, host=self.host, port=self.port
-        )
-
-    def parsed_userinfo(self):
-        parts = []
-        if self.userinfo:
-            parts = self.userinfo.split(":", maxsplit=1)
-        parts = parts + ["", ""]
-        return parts[0], parts[1]
-
-    def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["Uri"]] = None):
-        if self.scheme:
-            if schemesmap is None:
-                schemesmap = Uri._schemesmap()
-            _cls = schemesmap.get(self.scheme, None)
-            return _cls if _cls else Uri
-        return Uri
-
-    def is_local(self):
-        host = self.host
-        if not host or host == "localhost":
-            return True
-        if isinstance(host, str):
-            host = _ip.ip_address(_socket.gethostbyname(host))
-        return host.is_loopback or host in _utils.get_machine_ips()
-
-
-_NOSOURCE = UriSource(None, None, None, None)
+_NOSOURCE = Source(None, None, None, None)
 
 _U = _ty.TypeVar("_U", bound="PureUri")
 
@@ -178,17 +102,17 @@ class PureUri(object):
         self._raw_uris = _uris
 
     @classmethod
-    def _parse_uri(cls, uri: str) -> tuple[UriSource, str, UriQuery, str]:
+    def _parse_uri(cls, uri: str) -> tuple[Source, str, Query, str]:
         parsed = uritools.urisplit(uri)
         return (
-            UriSource(
+            Source(
                 parsed.getscheme(),
                 parsed.getuserinfo(),
                 parsed.gethost() or "",
                 parsed.getport(),
             ),
             parsed.getpath(),
-            UriQuery(parsed.getquery() or ""),
+            Query(parsed.getquery() or ""),
             parsed.getfragment() or "",
         )
 
@@ -226,7 +150,7 @@ class PureUri(object):
 
         self._init(source, _path, query, fragment)
 
-    def _init(self, source: UriSource, path: str, query: str, fragment: str, **kwargs):
+    def _init(self, source: Source, path: str, query: str, fragment: str, **kwargs):
         if self._initiated:
             pass
             # raise Exception(f"Uri._init should only be called once")
@@ -237,7 +161,7 @@ class PureUri(object):
         self._fragment = fragment
 
     def _from_parsed_parts(
-        self, source: UriSource, path: str, query: str, fragment: str, /, **kwargs
+        self, source: Source, path: str, query: str, fragment: str, /, **kwargs
     ):
         cls = type(self)
         uri = cls.__new__(cls)
@@ -247,7 +171,7 @@ class PureUri(object):
     @classmethod
     def _format_parsed_parts(
         cls,
-        source: UriSource,
+        source: Source,
         path: str,
         query: str,
         fragment: str,
@@ -294,7 +218,7 @@ class PureUri(object):
             return self._uri
 
     @property
-    def source(self) -> UriSource:
+    def source(self) -> Source:
         if not self._initiated:
             self._load_parts()
         return self._source
@@ -339,7 +263,7 @@ class PureUri(object):
     def stem(self):
         return self.posixpath.stem
 
-    def with_source(self, source: UriSource):
+    def with_source(self, source: Source):
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
 
     def with_path(self, path: str | _PurePath):
@@ -351,8 +275,8 @@ class PureUri(object):
         )
 
     def with_query(self, query: str):
-        if not isinstance(query, UriQuery):
-            query = UriQuery(query)
+        if not isinstance(query, Query):
+            query = Query(query)
         return self._from_parsed_parts(self.source, self.path, query, self.fragment)
 
     def with_fragment(self, fragment: str):
@@ -494,7 +418,7 @@ class Uri(PureUri):
 
     def _init(
         self,
-        source: UriSource,
+        source: Source,
         path: str,
         query: str,
         fragment: str,
@@ -532,7 +456,7 @@ class Uri(PureUri):
     def joinpath(self, *pathsegments: UriLike):
         return type(self)(self, *pathsegments, findclass=True)
 
-    def with_source(self, source: UriSource):
+    def with_source(self, source: Source):
         cls = type(self)
         if not source:
             inst = PureUri.__new__(Uri)

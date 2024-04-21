@@ -1,6 +1,6 @@
 from pathlib import Path as _Path
 import os as _os
-from ..uri import Uri, UriSource
+from ..uri import Uri, Source
 
 class FileUri(Uri):
     __SCHEMES = ("file",)
@@ -18,7 +18,7 @@ class FileUri(Uri):
     
     def _init(
         self,
-        source: UriSource,
+        source: Source,
         path: str,
         query: str,
         fragment: str,

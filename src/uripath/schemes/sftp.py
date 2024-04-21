@@ -1,5 +1,5 @@
 import typing as _ty
-from ..uri import Uri, UriSource
+from ..uri import Uri, Source
 from .. import utils as _utils
 import threading as _thread
 import paramiko as _paramiko
@@ -9,7 +9,7 @@ class BaseSftpBackend(object):
     __slots__ = ()
 
     @_utils.notimplemented
-    def client(self, source: UriSource) -> _paramiko.SFTPClient: ...
+    def client(self, source: Source) -> _paramiko.SFTPClient: ...
 
 
 class SftpBackend(BaseSftpBackend):
@@ -21,7 +21,7 @@ class SftpBackend(BaseSftpBackend):
         self.connect_opts = connect_opts
         self.hostkeypolicy = hostkeypolicy
 
-    def opts(self, source: UriSource):
+    def opts(self, source: Source):
         connect_ops = {
             **self.connect_opts,
             "hostname": str(source.host),
@@ -34,7 +34,7 @@ class SftpBackend(BaseSftpBackend):
             connect_ops["password"] = password
         return connect_ops
 
-    def transport(self, source: UriSource) -> _paramiko.Transport:
+    def transport(self, source: Source) -> _paramiko.Transport:
         client = _paramiko.SSHClient()
         client.set_missing_host_key_policy(self.hostkeypolicy)
         client.connect(**self.opts(source))
@@ -43,11 +43,11 @@ class SftpBackend(BaseSftpBackend):
             raise Exception()
         return transport
 
-    def client(self, source: UriSource):
+    def client(self, source: Source):
         return self.transport(source).open_sftp_client()
 
 
-def _create_sftpclient(backend: BaseSftpBackend, source: UriSource, thread_id: int):
+def _create_sftpclient(backend: BaseSftpBackend, source: Source, thread_id: int):
     return backend.client(source)
 
 

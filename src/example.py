@@ -1,10 +1,10 @@
-from uripath.uri import Uri, UriQuery
+from uripath.uri import Uri, Query
 from uripath.schemes import *
 from uripath.sync import UriSyncer
 from uripath import glob
 
-query = UriQuery({'test':'://$#!1', 'test2&': [1,2]})
-q2 =  UriQuery(str(query)).to_dict()
+query = Query({'test':'://$#!1', 'test2&': [1,2]})
+q2 =  Query(str(query)).to_dict()
 dest = Uri('file:./_ssh')
 dest = Uri(dest)
 test_ = Uri('file:') / 'test'
