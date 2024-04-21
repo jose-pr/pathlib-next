@@ -213,6 +213,8 @@ class PureUri(object):
                 paths.append(path)
 
             for path in reversed(paths):
+                if  not path:
+                    continue
                 if path.endswith("/"):
                     _path = f"{path}{_path}"
                 elif _path:

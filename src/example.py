@@ -7,6 +7,7 @@ query = UriQuery({'test':'://$#!1', 'test2&': [1,2]})
 q2 =  UriQuery(str(query)).to_dict()
 dest = Uri('file:./_ssh')
 dest = Uri(dest)
+test_ = Uri('file:') / 'test'
 empty = Uri()
 uri = dest.as_uri()
 
