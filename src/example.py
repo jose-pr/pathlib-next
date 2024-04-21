@@ -25,9 +25,9 @@ syncer.sync((sftp_root / 'root/.ssh'), dest, dry_run=True)
 
 rocky_repo = Uri('http://dl.rockylinux.org/pub')
 
-glob_test = rocky_repo / '*/*'
+glob_test = Uri("file:./**/*.py")
 
-for path in glob.iglob(glob_test):
+for path in glob.iglob(glob_test, recursive=True):
     print(path)
 
 print(rocky_repo.is_dir())

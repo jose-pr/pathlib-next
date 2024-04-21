@@ -120,7 +120,7 @@ def _iglob(
     pathname = os.fspath(path)
     _dironly = pathname.endswith("/")
     parent = path.parent
-    parent = path.parent if parent != path else None
+    parent = parent if parent != path and parent else None
     if not has_glob_wildard(pathname):
         assert not dironly
         if not _dironly:
@@ -155,13 +155,13 @@ def _iglob(
     else:
         glob_in_dir = _glob_exact_match
     for parent in dirs:
-        for name in glob_in_dir(
-            _join(root_dir, parent),
+        for _path in glob_in_dir(
+            parent,
             path.name,
             dironly,
             include_hidden=include_hidden,
         ):
-            yield parent / name
+            yield _path
 
 
 # These 2 helper functions non-recursively glob inside a literal directory.
@@ -182,20 +182,21 @@ def _glob_with_pattern(
         def _filter(p: str):
             return True
 
-    for name in _iterdir(parent, dironly):
-        if _filter(name) and fnmatch.fnmatchcase(name, pattern):
-            yield name
+    for path in _iterdir(parent, dironly):
+        if _filter(path.name) and fnmatch.fnmatchcase(path.name, pattern):
+            yield path
 
 
 def _glob_exact_match(
     parent: _Globable, basename: str, dironly: bool, include_hidden=False
 ):
+    path = _join(parent, basename)
     if basename:
-        if _join(parent, basename).exists():
-            return [basename]
+        if path.exists():
+            return [path]
     else:
         if parent.is_dir():
-            return [basename]
+            return [path]
     return []
 
 
@@ -207,8 +208,8 @@ def _glob_recursive(
     parent: _Globable, pattern: str, dironly: bool, include_hidden=False
 ):
     assert pattern == RECURSIVE
-    if not parent or parent.is_dir():
-        yield ""
+    if parent and parent.is_dir():
+        yield parent
     yield from _rlistdir(parent, dironly, include_hidden=include_hidden)
 
 
@@ -218,17 +219,15 @@ def _iterdir(path: _Globable, dironly: bool):
     for entry in path:
         try:
             if not dironly or entry.is_dir():
-                yield entry.name
+                yield entry
         except OSError:
             pass
 
 
 # Recursively yields relative pathnames inside a literal directory.
 def _rlistdir(dirname: _Globable, dironly: bool, include_hidden=False):
-    names = _iterdir(dirname, dironly)
-    for x in names:
-        if include_hidden or not _ishidden(x):
-            yield x
-            path = _join(dirname, x) if dirname else x
+    for path in _iterdir(dirname, dironly):
+        if include_hidden or not _ishidden(path.name):
+            yield path
             for y in _rlistdir(path, dironly, include_hidden=include_hidden):
-                yield _join(x, y)
+                yield y
