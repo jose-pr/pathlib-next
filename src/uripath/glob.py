@@ -1,15 +1,12 @@
-# Based on glob built in on python modified to work with Uri/anything that implemetns fspath/iterdir
+# Based on glob built-in on python modified to work with Uri/anything that implemetns fspath/iterdir that is similar to pathlib.Path
 
 
 """Filename globbing utility."""
 
-import contextlib
 import os
 import re
 import fnmatch
 import itertools
-import stat
-import posixpath
 import typing as _ty
 
 RECURSIVE = "**"
