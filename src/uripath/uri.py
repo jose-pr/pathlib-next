@@ -13,7 +13,6 @@ import ipaddress as _ip
 import io as _io
 import socket as _socket
 
-
 _IPAddress = _ip.IPv4Address | _ip.IPv6Address
 UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
 
@@ -543,13 +542,13 @@ class Uri(PureUri):
         return inst
 
     @_utils.notimplemented
-    def _ls(self) -> "_ty.Iterable[str]": ...
+    def _ls(self) -> "_ty.Iterator[str]": ...
 
     
     def __iter__(self):
         return self.iterdir()
     
-    def iterdir(self) -> "_ty.Iterable[Self]":
+    def iterdir(self) -> "_ty.Iterator[Self]":
         cls = type(self)
         for path in self._ls():
             inst = cls.__new__(cls, backend=self._backend)

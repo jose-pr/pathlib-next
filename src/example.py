@@ -1,6 +1,7 @@
 from uripath.uri import Uri, UriQuery
 from uripath.schemes import *
 from uripath.sync import UriSyncer
+from uripath import glob
 
 query = UriQuery({'test':'://$#!1', 'test2&': [1,2]})
 q2 =  UriQuery(str(query)).to_dict()
@@ -23,6 +24,11 @@ syncer =UriSyncer(checksum, remove_missing=False)
 syncer.sync((sftp_root / 'root/.ssh'), dest, dry_run=True)
 
 rocky_repo = Uri('http://dl.rockylinux.org/pub')
+
+glob_test = rocky_repo / '*/*'
+
+for path in glob.iglob(glob_test):
+    print(path)
 
 print(rocky_repo.is_dir())
 print(list(rocky_repo.iterdir()))
