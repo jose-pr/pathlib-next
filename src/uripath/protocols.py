@@ -147,21 +147,21 @@ class PathProtocol(PurePathProtocol):
     def _st_mode(self, *, follow_symlinks=True):
         try:
             return self.stat().st_mode
+        except FileNotFoundError:
+            return None
         except OSError as e:
             if not _ignore_error(e):
                 raise
-            return 0
-        except FileNotFoundError:
-            return 0
+            return None
         except ValueError:
-            return 0
+            return None
 
     # Convenience functions for querying the stat results
     def exists(self, *, follow_symlinks=True):
         """
         Whether this path exists.
         """
-        return self._st_mode(follow_symlinks=follow_symlinks) != 0
+        return self._st_mode(follow_symlinks=follow_symlinks) != None
 
     def is_hidden(self):
         return self.name.startswith(".")
@@ -170,44 +170,44 @@ class PathProtocol(PurePathProtocol):
         """
         Whether this path is a directory.
         """
-        return _stat.S_ISDIR(self._st_mode())
+        return _stat.S_ISDIR(self._st_mode() or 0)
 
     def is_file(self):
         """
         Whether this path is a regular file (also True for symlinks pointing
         to regular files).
         """
-        return _stat.S_ISREG(self._st_mode())
+        return _stat.S_ISREG(self._st_mode() or 0)
 
     def is_symlink(self):
         """
         Whether this path is a symbolic link.
         """
-        return _stat.S_ISLNK(self._st_mode(follow_symlinks=True))
+        return _stat.S_ISLNK(self._st_mode(follow_symlinks=True) or 0)
 
     def is_block_device(self):
         """
         Whether this path is a block device.
         """
-        return _stat.S_ISBLK(self._st_mode())
+        return _stat.S_ISBLK(self._st_mode() or 0)
 
     def is_char_device(self):
         """
         Whether this path is a character device.
         """
-        return _stat.S_ISCHR(self._st_mode())
+        return _stat.S_ISCHR(self._st_mode() or 0)
 
     def is_fifo(self):
         """
         Whether this path is a FIFO.
         """
-        return _stat.S_ISFIFO(self._st_mode())
+        return _stat.S_ISFIFO(self._st_mode() or 0)
 
     def is_socket(self):
         """
         Whether this path is a socket.
         """
-        return _stat.S_ISSOCK(self._st_mode())
+        return _stat.S_ISSOCK(self._st_mode() or 0)
 
     @_utils.notimplemented
     def samefile(self, other_path):
