@@ -5,8 +5,6 @@ paths with operations that have semantics appropriate for different
 operating systems.
 """
 
-import io
-import os
 import re as _re
 import stat as _stat
 from pathlib import _ignore_error
@@ -251,7 +249,6 @@ class PathProtocol(PurePathProtocol):
         """
         Open the file in text mode, read it, and close the file.
         """
-        encoding = io.text_encoding(encoding)
         with self.open(mode="r", encoding=encoding, errors=errors) as f:
             return f.read()
 
@@ -270,7 +267,6 @@ class PathProtocol(PurePathProtocol):
         """
         if not isinstance(data, str):
             raise TypeError("data must be str, not %s" % data.__class__.__name__)
-        encoding = io.text_encoding(encoding)
         with self.open(
             mode="w", encoding=encoding, errors=errors, newline=newline
         ) as f:
@@ -359,11 +355,12 @@ class PathProtocol(PurePathProtocol):
             if self.exists():
                 return
 
-        flags = os.O_CREAT | os.O_WRONLY
-        if not exist_ok:
-            flags |= os.O_EXCL
         with self.open("w"):
             ...
+        try:
+            self.chmod(mode)
+        except NotImplementedError:
+            pass
 
     @_utils.notimplemented
     def _mkdir(self, mode: int): ...
