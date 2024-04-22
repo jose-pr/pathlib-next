@@ -2,15 +2,12 @@ import os
 from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath
 import typing as _ty
 import uritools
-import stat as _stat
-import shutil as _shutil
-import io as _io
 
 
 if _ty.TYPE_CHECKING:
     from typing import Self
 
-from .. import fs as _fs, utils as _utils
+from .. import utils as _utils
 from .query import Query
 from .source import Source
 
