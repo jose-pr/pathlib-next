@@ -16,7 +16,7 @@ RECURSIVE = "**"
 WILCARD_PATTERN = re.compile("([*?[])")
 
 if _ty.TYPE_CHECKING:
-    from .protocols import PathProtocol as _Globable
+    from .protocols import P as _Globable
 else:
 
     class _Globable(_ty.Protocol): ...
@@ -74,11 +74,11 @@ def glob(
 def iglob(
     path: _Globable,
     *,
-    root_dir: _Globable = None,
-    recursive=False,
-    include_hidden=False,
-    case_sensitive: bool = None
-):
+    root_dir: _Globable | None = None,
+    recursive: bool = False,
+    include_hidden: bool = False,
+    case_sensitive: bool | None = None
+) -> _ty.Iterable[_Globable]:
     """Return an iterator which yields the paths matching a pathname pattern.
 
     The pattern may contain simple shell-style wildcards a la
@@ -117,7 +117,7 @@ def _iglob(
     dironly: bool,
     include_hidden=False,
     case_sensitive: bool = None,
-):
+) -> _ty.Iterable[_Globable]:
     pathname = os.fspath(path)
     _dironly = pathname.endswith("/")
     parent = path.parent
@@ -172,12 +172,7 @@ def _iglob(
         glob_in_dir = _glob_with_pattern
 
     for parent in dirs:
-        for _path in glob_in_dir(
-            parent,
-            pattern,
-            dironly,
-            include_hidden
-        ):
+        for _path in glob_in_dir(parent, pattern, dironly, include_hidden):
             yield _path
 
 
@@ -228,9 +223,11 @@ def _iterdir(path: _Globable, dironly: bool):
 
 
 # Recursively yields relative pathnames inside a literal directory.
-def _rlistdir(dirname: _Globable, dironly: bool, include_hidden=False):
+def _rlistdir(
+    dirname: _Globable, dironly: bool, include_hidden=False
+) -> _ty.Iterable[_Globable]:
     for path in _iterdir(dirname, dironly):
         if include_hidden or not path.is_hidden():
             yield path
-            for y in _rlistdir(path, dironly, include_hidden=include_hidden):
+            for y in _rlistdir(path, dironly, include_hidden):
                 yield y

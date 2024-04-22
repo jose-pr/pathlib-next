@@ -10,16 +10,16 @@ import os
 import re as _re
 import stat as _stat
 from pathlib import _ignore_error
-import sys
 import typing as _ty
 import abc as _abc
 import io as _io
 import shutil as _shutil
 
 from . import utils as _utils
-from . import glob
+from . import glob as _glob
 
 _P = _ty.TypeVar("_P")
+P = _ty.TypeVar("P", bound="PathProtocol")
 
 
 class FileStatProtocol(_ty.Protocol):
@@ -125,7 +125,7 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
         if not isinstance(path_pattern, _re.Pattern):
             if isinstance(str, path_pattern):
                 path_pattern = type(self)(path_pattern).__fspath__()
-            path_pattern = glob.compile_pattern(path_pattern, case_sensitive)
+            path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
         return path_pattern.match(path) is not None
 
 
@@ -288,26 +288,29 @@ class PathProtocol(PurePathProtocol):
         """
         ...
 
-    def glob(self, pattern, *, case_sensitive=None, ignore_hidden=False):
+    def glob(
+        self, pattern: str, *, case_sensitive: bool = None, include_hidden: bool = False
+    ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
         """
-        sys.audit("pathlib.Path.glob", self, pattern)
-        yield from glob.iglob(
-            self / pattern, case_sensitive=case_sensitive, ignore_hidden=ignore_hidden
+        yield from _glob.iglob(
+            self / pattern,
+            case_sensitive=case_sensitive,
+            include_hidden=include_hidden,
+            recursive=False,
         )
 
-    def rglob(self, pattern, *, case_sensitive=None, ignore_hidden=False):
+    def rglob(self, pattern: str, *, case_sensitive=None, include_hidden=False):
         """Recursively yield all existing files (of any kind, including
         directories) matching the given relative pattern, anywhere in
         this subtree.
         """
-        sys.audit("pathlib.Path.rglob", self, pattern)
-        yield from glob.iglob(
+        yield from _glob.iglob(
             self / pattern,
             case_sensitive=case_sensitive,
-            recursive=True,
-            ignore_hidden=ignore_hidden,
+            include_hidden=include_hidden,
+            recursive=False,
         )
 
     def walk(self, top_down=True, on_error=None, follow_symlinks=False):
