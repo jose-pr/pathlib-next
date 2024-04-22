@@ -1,9 +1,11 @@
 import os
-from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath, _ignore_error
+from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath
 import typing as _ty
 import uritools
 import stat as _stat
 import shutil as _shutil
+import io as _io
+
 
 if _ty.TYPE_CHECKING:
     from typing import Self
@@ -11,9 +13,8 @@ if _ty.TYPE_CHECKING:
 from .. import fs as _fs, utils as _utils
 from .query import Query
 from .source import Source
-import ipaddress as _ip
-import io as _io
-import socket as _socket
+
+from ..protocols import PathProtocol, PurePathProtocol
 
 UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
 
@@ -48,7 +49,7 @@ class _UriPathParents(_ty.Sequence[_U]):
         return "<{}.parents>".format(type(self._path).__name__)
 
 
-class PureUri(object):
+class PureUri(PurePathProtocol):
 
     __slots__ = (
         "_raw_uris",
@@ -290,9 +291,6 @@ class PureUri(object):
             self.fragment,
         )
 
-    def with_stem(self, stem: str):
-        return self.with_name(stem + self.suffix)
-
     def with_suffix(self, suffix: str):
         return self._from_parsed_parts(
             self.source,
@@ -361,7 +359,7 @@ class PureUri(object):
         return self.parts == other.parts
 
 
-class Uri(PureUri):
+class Uri(PureUri, PathProtocol):
     __slots__ = ("_backend",)
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
@@ -470,254 +468,13 @@ class Uri(PureUri):
     @_utils.notimplemented
     def _ls(self) -> "_ty.Iterator[str]": ...
 
-    
-    def __iter__(self):
-        return self.iterdir()
-    
+       
     def iterdir(self) -> "_ty.Iterator[Self]":
         cls = type(self)
         for path in self._ls():
             inst = cls.__new__(cls, backend=self._backend)
             inst._init(self.source, f"{self.path}/{path}", "", "")
             yield inst
-
-    @_utils.notimplemented
-    def stat(self) -> _fs.FileStat: ...
-
-    def is_dir(self):
-        """
-        Whether this path is a directory.
-        """
-        try:
-            return _stat.S_ISDIR(self.stat().st_mode)
-        except OSError as e:
-            if not _ignore_error(e):
-                raise
-            return False
-        except ValueError:
-            return False
-
-    def is_file(self):
-        """
-        Whether this path is a regular file (also True for symlinks pointing
-        to regular files).
-        """
-        try:
-            return _stat.S_ISREG(self.stat().st_mode)
-        except OSError as e:
-            if not _ignore_error(e):
-                raise
-            return False
-        except ValueError:
-            return False
-
-    @_utils.notimplemented
-    def _open(
-        self,
-        mode="r",
-        buffering=-1,
-    ) -> _io.IOBase:
-        """
-        All operations should be binary
-        To be used only by UriPath.open() to obtain binary stream
-        """
-        ...
-
-    def open(
-        self, mode="r", buffering=-1, encoding=None, errors=None, newline=None
-    ) -> _io.IOBase:
-        fh = self._open(mode.replace("b", ""), buffering)
-        if "b" not in mode:
-            encoding = _io.text_encoding(encoding)
-            fh = _io.TextIOWrapper(fh, encoding, errors, newline)
-        return fh
-
-    def read_bytes(self) -> bytes:
-        """
-        Open the file in bytes mode, read it, and close the file.
-        """
-        with self.open(mode="rb") as f:
-            return f.read()
-
-    def read_text(self, encoding: str = None, errors=None) -> str:
-        with self.open(mode="r", encoding=encoding, errors=errors) as f:
-            return f.read()
-
-    def write_bytes(self, data: bytes):
-        view = memoryview(data)
-        with self.open(mode="wb") as f:
-            return f.write(view)
-
-    def write_text(self, data: str, encoding: str = None, errors=None, newline=None):
-        if not isinstance(data, str):
-            raise TypeError("data must be str, not %s" % type(data).__name__)
-        encoding = _io.text_encoding(encoding)
-        with self.open(
-            mode="w", encoding=encoding, errors=errors, newline=newline
-        ) as f:
-            return f.write(data)
-
-    def exists(self) -> bool:
-        try:
-            self.stat()
-            return True
-        except FileNotFoundError:
-            return False
-
-    def walk(self, top_down=True, on_error=None):
-        """Walk the directory tree from this directory, similar to os.walk()."""
-        paths: "list[Uri|tuple[Uri, list[str], list[str]]]" = [self]
-
-        while paths:
-            path = paths.pop()
-            if isinstance(path, tuple):
-                yield path
-                continue
-            try:
-                scandir_it = path.iterdir()
-            except OSError as error:
-                if on_error is not None:
-                    on_error(error)
-                continue
-
-            dirnames: "list[str]" = []
-            filenames: "list[str]" = []
-            for entry in scandir_it:
-                try:
-                    is_dir = entry.is_dir()
-                except OSError:
-                    # Carried over from os.path.isdir().
-                    is_dir = False
-
-                if is_dir:
-                    dirnames.append(entry.name)
-                else:
-                    filenames.append(entry.name)
-
-            if top_down:
-                yield path, dirnames, filenames
-            else:
-                paths.append((path, dirnames, filenames))
-
-            paths += [path / d for d in reversed(dirnames)]
-
-    @_utils.notimplemented
-    def _mkdir(self, mode: int): ...
-
-    def mkdir(self, mode=0o777, parents=False, exist_ok=False):
-        """
-        Create a new directory at this given path.
-        """
-        try:
-            self._mkdir(mode)
-        except FileNotFoundError:
-            if not parents or self.parent == self:
-                raise
-            self.parent.mkdir(parents=True, exist_ok=True)
-            self.mkdir(mode, parents=False, exist_ok=exist_ok)
-        except OSError:
-            # Cannot rely on checking for EEXIST, since the operating system
-            # could give priority to other errors like EACCES or EROFS
-            if not exist_ok or not self.is_dir():
-                raise
-
-    @_utils.notimplemented
-    def chmod(self, mode: int): ...
-
-    @_utils.notimplemented
-    def unlink(self, missing_ok=False): ...
-
-    @_utils.notimplemented
-    def rmdir(self): ...
-
-    def rm(self, /, recursive=False, missing_ok=False, ignore_error=False):
-        _onerror = lambda _err, _path: (
-            ignore_error if not callable(ignore_error) else ignore_error
-        )
-        try:
-            if not self.exists():
-                if missing_ok:
-                    return
-                raise FileNotFoundError(self)
-            if self.is_dir():
-                if recursive:
-                    for child in self.iterdir():
-                        child.rm(recursive=recursive, ignore_error=ignore_error)
-                self.rmdir()
-            else:
-                self.unlink()
-        except Exception as error:
-            if not _onerror(error, self):
-                raise
-
-    @_utils.notimplemented
-    def _rename(self, target: PosixPath): ...
-
-    def _src_dest(self, target: UriLike) -> "tuple[Uri,Uri]":
-        target = (
-            type(self)(target, findclass=True)
-            if not isinstance(target, Uri)
-            else target
-        )
-        src = self
-        if not src.source:
-            if target.source:
-                src = src.with_source(target.source)
-            else:
-                raise FileNotFoundError(src)
-
-        if not target.source:
-            target = target.with_source(self.source)
-
-        if target.source == src.source and target.path == src.path:
-            return None, None
-
-        return src, target
-
-    def copy(self, target: UriLike, *, overwrite=False):
-        src, target = self._src_dest(target)
-        if src is None:
-            return
-
-        if target.exists():
-            if overwrite:
-                target.unlink()
-            else:
-                raise FileExistsError(target)
-
-        try:
-            stat = src.stat()
-        except NotImplementedError:
-            stat = None
-
-        with target.open("wb") as output, src.open("rb") as input:
-            _shutil.copyfileobj(input, output)
-
-        if stat:
-            try:
-                target.chmod(stat.st_mode)
-            except NotImplementedError:
-                pass
-
-    def move(self, target: UriLike, *, overwrite=False):
-        src, target = self._src_dest(target)
-        if src is None:
-            return
-
-        if target.exists():
-            if overwrite:
-                target.unlink()
-            else:
-                raise FileExistsError(target)
-
-        if target.source == src.source:
-            try:
-                return src._rename(target.posixpath)
-            except NotImplementedError:
-                pass
-
-        src.copy(target)
-        src.unlink()
 
 
 _ROOT = PureUri("/")

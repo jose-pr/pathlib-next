@@ -1,6 +1,6 @@
 from uripath.uri import Uri, Query
-from uripath.schemes import *
-from uripath.sync import UriSyncer
+from uripath.uri.schemes import *
+from uripath.sync import PathSyncer
 from uripath import glob
 
 query = Query({'test':'://$#!1', 'test2&': [1,2]})
@@ -21,7 +21,7 @@ authkeys = sftp_root / 'root/.ssh/authorized_keys'
 def checksum(uri:Uri):
     stat = uri.stat()
     return hash(stat.st_size)
-syncer =UriSyncer(checksum, remove_missing=False)
+syncer =PathSyncer(checksum, remove_missing=False)
 syncer.sync((sftp_root / 'root/.ssh'), dest, dry_run=True)
 
 rocky_repo = Uri('http://dl.rockylinux.org/pub')

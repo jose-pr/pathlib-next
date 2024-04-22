@@ -1,5 +1,5 @@
-from ..uri import Uri
-from .. import fs, utils as _utils
+from .. import Uri
+from ... import fs, utils as _utils
 import io as _io
 import requests as _req
 import typing as _ty

@@ -8,36 +8,28 @@ import re
 import fnmatch
 import itertools
 import typing as _ty
+import functools as _func
+import re as _re
+
 
 RECURSIVE = "**"
 WILCARD_PATTERN = re.compile("([*?[])")
-HIDDEN_PREFIX = "."
+
+if _ty.TYPE_CHECKING:
+    from .protocols import PathProtocol as _Globable
+else:
+
+    class _Globable(_ty.Protocol): ...
 
 
-class _Globable:
-    def __iter__(self) -> _ty.Iterator[_ty.Self]: ...
-    @property
-    def name(self) -> str: ...
-
-    def __fspath__(self) -> str: ...
-
-    def __truediv__(self, key: _ty.Self | str) -> _ty.Self: ...
-
-    @property
-    def parent(self) -> _ty.Self: ...
-
-    def name(self) -> str: ...
-
-    def is_dir(self) -> bool: ...
-    def exists(self) -> bool: ...
+@_func.lru_cache(maxsize=256, typed=True)
+def compile_pattern(pat: str, case_sensitive: bool):
+    flags = _re.NOFLAG if case_sensitive else _re.IGNORECASE
+    return _re.compile(fnmatch.translate(pat), flags)
 
 
 def has_glob_wildard(s: str):
     return WILCARD_PATTERN.search(s) is not None
-
-
-def _ishidden(path: str):
-    return path.startswith(HIDDEN_PREFIX)
 
 
 def _join(dir: _Globable, path: _Globable):
@@ -52,7 +44,8 @@ def glob(
     *,
     root_dir: _Globable = None,
     recursive=False,
-    include_hidden=False
+    include_hidden=False,
+    case_sensitive: bool = None
 ):
     """Return a list of paths matching a pathname pattern.
 
@@ -73,6 +66,7 @@ def glob(
             root_dir=root_dir,
             recursive=recursive,
             include_hidden=include_hidden,
+            case_sensitive=case_sensitive,
         )
     )
 
@@ -82,7 +76,8 @@ def iglob(
     *,
     root_dir: _Globable = None,
     recursive=False,
-    include_hidden=False
+    include_hidden=False,
+    case_sensitive: bool = None
 ):
     """Return an iterator which yields the paths matching a pathname pattern.
 
@@ -94,8 +89,16 @@ def iglob(
     If recursive is true, the pattern '**' will match any files and
     zero or more directories and subdirectories.
     """
-
-    it = _iglob(path, root_dir, recursive, False, include_hidden=include_hidden)
+    if case_sensitive is None:
+        case_sensitive = path._is_case_sensitive
+    it = _iglob(
+        path,
+        root_dir,
+        recursive,
+        False,
+        include_hidden=include_hidden,
+        case_sensitive=case_sensitive,
+    )
     path_ = os.fspath(path)
     if not path_ or recursive and path_.startswith(RECURSIVE):
         try:
@@ -113,50 +116,67 @@ def _iglob(
     recursive: bool,
     dironly: bool,
     include_hidden=False,
+    case_sensitive: bool = None,
 ):
     pathname = os.fspath(path)
     _dironly = pathname.endswith("/")
     parent = path.parent
     parent = parent if parent != path and parent else None
+    include_hidden = path.name.startswith(".")
+    pattern = compile_pattern(path.name, case_sensitive)
+    root = _join(root_dir, parent)
     if not has_glob_wildard(pathname):
         assert not dironly
         if not _dironly:
-            if path.exists():
-                yield path
+            yield from _glob_with_pattern(
+                root, pattern, False, include_hidden=include_hidden
+            )
         else:
             # Patterns ending with a slash should match only directories
-            if parent and parent.is_dir():
-                yield path
+            if parent:
+                yield from _glob_with_pattern(
+                    root.parent, pattern, False, include_hidden=include_hidden
+                )
         return
 
     if not parent:
         if recursive and path.name == RECURSIVE:
             yield from _glob_recursive(
-                root_dir, path.name, dironly, include_hidden=include_hidden
+                root,
+                pattern,
+                dironly,
+                include_hidden=include_hidden,
+                case_sensitive=case_sensitive,
             )
         else:
             yield from _glob_with_pattern(
-                root_dir, path.name, dironly, include_hidden=include_hidden
+                root, pattern, dironly, include_hidden=include_hidden
             )
         return
 
     if parent and has_glob_wildard(parent.name):
-        dirs = _iglob(parent, root_dir, recursive, True, include_hidden=include_hidden)
+        dirs = _iglob(
+            parent,
+            root_dir,
+            recursive,
+            True,
+            include_hidden=include_hidden,
+            case_sensitive=case_sensitive,
+        )
     else:
         dirs = [parent]
-    if has_glob_wildard(path.name):
-        if recursive and path.name == RECURSIVE:
-            glob_in_dir = _glob_recursive
-        else:
-            glob_in_dir = _glob_with_pattern
+
+    if recursive and path.name == RECURSIVE:
+        glob_in_dir = _glob_recursive
     else:
-        glob_in_dir = _glob_exact_match
+        glob_in_dir = _glob_with_pattern
+
     for parent in dirs:
         for _path in glob_in_dir(
             parent,
-            path.name,
+            pattern,
             dironly,
-            include_hidden=include_hidden,
+            include_hidden
         ):
             yield _path
 
@@ -167,34 +187,21 @@ def _iglob(
 
 
 def _glob_with_pattern(
-    parent: _Globable, pattern: str, dironly: bool, include_hidden=False
+    parent: _Globable, pattern: re.Pattern, dironly: bool, include_hidden=False
 ):
-    if not include_hidden or not _ishidden(pattern):
+    if not include_hidden:
 
-        def _filter(p: str):
-            return not _ishidden(p)
+        def _filter(p: _Globable):
+            return not p.is_hidden()
 
     else:
 
-        def _filter(p: str):
+        def _filter(p: _Globable):
             return True
 
     for path in _iterdir(parent, dironly):
-        if _filter(path.name) and fnmatch.fnmatchcase(path.name, pattern):
+        if _filter(path) and pattern.match(path.name):
             yield path
-
-
-def _glob_exact_match(
-    parent: _Globable, basename: str, dironly: bool, include_hidden=False
-):
-    path = _join(parent, basename)
-    if basename:
-        if path.exists():
-            return [path]
-    else:
-        if parent.is_dir():
-            return [path]
-    return []
 
 
 # This helper function recursively yields relative pathnames inside a literal
@@ -202,9 +209,8 @@ def _glob_exact_match(
 
 
 def _glob_recursive(
-    parent: _Globable, pattern: str, dironly: bool, include_hidden=False
+    parent: _Globable, pattern: _re.Pattern, dironly: bool, include_hidden=False
 ):
-    assert pattern == RECURSIVE
     if parent and parent.is_dir():
         yield parent
     yield from _rlistdir(parent, dironly, include_hidden=include_hidden)
@@ -224,7 +230,7 @@ def _iterdir(path: _Globable, dironly: bool):
 # Recursively yields relative pathnames inside a literal directory.
 def _rlistdir(dirname: _Globable, dironly: bool, include_hidden=False):
     for path in _iterdir(dirname, dironly):
-        if include_hidden or not _ishidden(path.name):
+        if include_hidden or not path.is_hidden():
             yield path
             for y in _rlistdir(path, dironly, include_hidden=include_hidden):
                 yield y

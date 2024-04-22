@@ -1,6 +1,6 @@
 import typing as _ty
-from ..uri import Uri, Source
-from .. import utils as _utils
+from .. import Uri, Source
+from ... import utils as _utils
 import threading as _thread
 import paramiko as _paramiko
 

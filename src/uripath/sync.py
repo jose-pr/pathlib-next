@@ -1,5 +1,5 @@
 import typing as _ty
-from .uri import Uri
+from .protocols import PathProtocol
 import enum as _enum
 
 
@@ -11,16 +11,16 @@ class SyncEvent(_enum.Enum):
     CreatedDirectory = 4
 
 
-class UriSyncer(object):
+class PathSyncer(object):
     __slots__ = ("checksum", "_hook", "remove_missing")
     EVENT_LOG_FORMAT = "[{event}] Source:{source} Target:{target} DryRun:{dry_run}"
 
     def __init__(
         self,
-        checksum: _ty.Callable[[Uri], int],
+        checksum: _ty.Callable[[PathProtocol], int],
         /,
         remove_missing: bool = False,
-        hook: _ty.Callable[[Uri, Uri, SyncEvent, bool], None] = None,
+        hook: _ty.Callable[[PathProtocol, PathProtocol, SyncEvent, bool], None] = None,
     ) -> None:
         self.checksum = checksum
         self.remove_missing = remove_missing
@@ -29,7 +29,7 @@ class UriSyncer(object):
     def log(self, msg: str, **kwargs: str):
         print(msg.format_map(kwargs))
 
-    def hook(self, source: Uri, target: Uri, event: SyncEvent, dry_run: bool):
+    def hook(self, source: PathProtocol, target: PathProtocol, event: SyncEvent, dry_run: bool):
         if self._hook:
             self._hook(source, target, event, dry_run)
         self.log(
@@ -40,8 +40,7 @@ class UriSyncer(object):
             dry_run=dry_run,
         )
 
-    def sync(self, source: Uri, target: Uri, /, dry_run: bool = False):
-        source, target = source._src_dest(target)
+    def sync(self, source: PathProtocol, target: PathProtocol, /, dry_run: bool = False):
         checksum = self.checksum
         self.hook(source, target, SyncEvent.SyncStart, dry_run)
 
