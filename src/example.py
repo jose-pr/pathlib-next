@@ -1,7 +1,7 @@
-from uripath.uri import Uri, Query
-from uripath.uri.schemes import *
-from uripath.sync import PathSyncer
-from uripath import glob
+from pathlib_next.uri import Uri, Query
+from pathlib_next.uri.schemes import *
+from pathlib_next.sync import PathSyncer
+from pathlib_next import glob
 
 query = Query({'test':'://$#!1', 'test2&': [1,2]})
 q2 =  Query(str(query)).to_dict()
