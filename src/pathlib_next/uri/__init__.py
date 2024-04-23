@@ -76,7 +76,7 @@ class PureUri(PurePathProtocol):
                 continue
             if isinstance(uri, PureUri):
                 _uris.append(uri)
-            elif hasattr(uri, 'as_uri'):
+            elif hasattr(uri, "as_uri"):
                 path = uri.as_uri
                 if callable(path):
                     path = path()
@@ -97,7 +97,7 @@ class PureUri(PurePathProtocol):
                         "object where __fspath__ returns a str, "
                         f"not {type(path).__name__!r}"
                     )
-                _uris.append(f'file:{uritools.uriencode(path).decode()}')
+                _uris.append(f"file:{uritools.uriencode(path).decode()}")
         self._raw_uris = _uris
 
     @classmethod
@@ -310,18 +310,10 @@ class PureUri(PurePathProtocol):
     def parts(self):
         return self.source, self.path, self.query, self.fragment
 
-    def joinpath(self, *pathsegments: UriLike):
-        """Combine this path with one or several arguments, and return a
-        new path representing either a subpath (if all arguments are relative
-        paths) or a totally different path (if one of the arguments is
-        anchored).
-        """
-        return type(self)(self, *pathsegments)
-
     def __truediv__(self, key: UriLike):
         try:
-            return self.joinpath(key)
-        except TypeError:
+            return type(self)(self, key)
+        except (TypeError, NotImplementedError):
             return NotImplemented
 
     @property
@@ -364,7 +356,10 @@ class PureUri(PurePathProtocol):
     def __eq__(self, other):
         other = other if isinstance(other, PureUri) else PureUri(other)
         return self.parts == other.parts
-
+    
+    def samefile(self, other_path: str | _ty.Self):
+        other = other_path if isinstance(other_path, PureUri) else PureUri(other_path)
+        return self.parts == other.parts
 
 class Uri(PureUri, PathProtocol):
     __slots__ = ("_backend",)
@@ -458,8 +453,11 @@ class Uri(PureUri, PathProtocol):
                     self._backend = uri._backend
                     break
 
-    def joinpath(self, *pathsegments: UriLike):
-        return type(self)(self, *pathsegments, findclass=True)
+    def __truediv__(self, key: str | PureUri | os.PathLike):
+        try:
+            return type(self)(self, key, findclass=True)
+        except (TypeError, NotImplementedError):
+            return NotImplemented
 
     def with_source(self, source: Source):
         cls = type(self)
