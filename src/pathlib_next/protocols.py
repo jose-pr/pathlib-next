@@ -226,7 +226,12 @@ class PathProtocol(PurePathProtocol):
         ...
 
     def open(
-        self, mode="r", buffering=-1, encoding=None, errors=None, newline=None
+        self,
+        mode="r",
+        buffering=-1,
+        encoding: str = None,
+        errors: str = None,
+        newline: str = None,
     ) -> _io.IOBase:
         """
         Open the file pointed by this path and return a file object, as
@@ -238,21 +243,21 @@ class PathProtocol(PurePathProtocol):
             fh = _io.TextIOWrapper(fh, encoding, errors, newline)
         return fh
 
-    def read_bytes(self):
+    def read_bytes(self) -> bytes:
         """
         Open the file in bytes mode, read it, and close the file.
         """
         with self.open(mode="rb") as f:
             return f.read()
 
-    def read_text(self, encoding=None, errors=None):
+    def read_text(self, encoding: str = None, errors: str = None) -> str:
         """
         Open the file in text mode, read it, and close the file.
         """
         with self.open(mode="r", encoding=encoding, errors=errors) as f:
             return f.read()
 
-    def write_bytes(self, data):
+    def write_bytes(self, data: bytes):
         """
         Open the file in bytes mode, write to it, and close the file.
         """
@@ -261,7 +266,9 @@ class PathProtocol(PurePathProtocol):
         with self.open(mode="wb") as f:
             return f.write(view)
 
-    def write_text(self, data, encoding=None, errors=None, newline=None):
+    def write_text(
+        self, data: str, encoding: str = None, errors: str = None, newline: str = None
+    ):
         """
         Open the file in text mode, write to it, and close the file.
         """
@@ -285,7 +292,12 @@ class PathProtocol(PurePathProtocol):
         ...
 
     def glob(
-        self, pattern: str, *, case_sensitive: bool = None, include_hidden: bool = False
+        self,
+        pattern: str,
+        *,
+        case_sensitive: bool = None,
+        include_hidden: bool = False,
+        recursive: bool = False,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
@@ -294,22 +306,29 @@ class PathProtocol(PurePathProtocol):
             self / pattern,
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
-            recursive=False,
+            recursive=recursive,
         )
 
-    def rglob(self, pattern: str, *, case_sensitive=None, include_hidden=False):
+    def rglob(
+        self, pattern: str, *, case_sensitive: bool = None, include_hidden: bool = False
+    ):
         """Recursively yield all existing files (of any kind, including
         directories) matching the given relative pattern, anywhere in
         this subtree.
         """
-        yield from _glob.iglob(
-            self / pattern,
+        yield from self.glob(
+            pattern,
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
-            recursive=False,
+            recursive=True,
         )
 
-    def walk(self, top_down=True, on_error=None, follow_symlinks=False):
+    def walk(
+        self,
+        top_down=True,
+        on_error: _ty.Callable[[OSError], None] = None,
+        follow_symlinks=False,
+    ):
         """Walk the directory tree from this directory, similar to os.walk()."""
         paths: "list[_ty.Self|tuple[_ty.Self, list[str], list[str]]]" = [self]
 
@@ -383,13 +402,13 @@ class PathProtocol(PurePathProtocol):
                 raise
 
     @_utils.notimplemented
-    def chmod(self, mode, *, follow_symlinks=True):
+    def chmod(self, mode: int, *, follow_symlinks=True):
         """
         Change the permissions of the path, like os.chmod().
         """
         ...
 
-    def lchmod(self, mode):
+    def lchmod(self, mode: int):
         """
         Like chmod(), except if the path points to a symlink, the symlink's
         permissions are changed, rather than its target's.
@@ -409,7 +428,13 @@ class PathProtocol(PurePathProtocol):
         Remove this directory.  The directory must be empty.
         """
 
-    def rm(self, /, recursive=False, missing_ok=False, ignore_error=False):
+    def rm(
+        self,
+        /,
+        recursive=False,
+        missing_ok=False,
+        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+    ):
         _onerror = lambda _err, _path: (
             ignore_error if not callable(ignore_error) else ignore_error
         )
