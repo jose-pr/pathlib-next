@@ -1,1 +1,1 @@
-./src/uripath/README.md
+./src/pathlib_next/README.md
