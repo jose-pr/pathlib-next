@@ -348,12 +348,13 @@ class PathProtocol(PurePathProtocol):
             filenames: "list[str]" = []
             for entry in scandir_it:
                 try:
+                    is_symlink = entry.is_symlink()
                     is_dir = entry.is_dir()
                 except OSError:
                     # Carried over from os.path.isdir().
                     is_dir = False
 
-                if is_dir:
+                if is_dir and (follow_symlinks or not is_symlink):
                     dirnames.append(entry.name)
                 else:
                     filenames.append(entry.name)
