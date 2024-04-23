@@ -1,5 +1,5 @@
 import os
-from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath
+from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath, Path as _OSPath
 import typing as _ty
 import uritools
 
@@ -76,27 +76,28 @@ class PureUri(PurePathProtocol):
                 continue
             if isinstance(uri, PureUri):
                 _uris.append(uri)
-            elif isinstance(uri, _PurePath):
-                if not uri.is_absolute():
-                    _uris.append(uritools.uriencode(uri.as_posix()).decode())
-                else:
-                    _uris.append(uri.as_uri())
+            elif hasattr(uri, 'as_uri'):
+                path = uri.as_uri
+                if callable(path):
+                    path = path()
+                _uris.append(path)
             elif isinstance(uri, str):
                 _uris.append(uri)
             elif isinstance(uri, bytes):
                 _uris.append(uri.decode())
             else:
+                path = None
                 try:
                     path = os.fspath(uri)
-                except TypeError:
-                    path = uri
+                except (TypeError, NotImplementedError):
+                    pass
                 if not isinstance(path, str):
                     raise TypeError(
                         "argument should be a str or an os.PathLike "
                         "object where __fspath__ returns a str, "
                         f"not {type(path).__name__!r}"
                     )
-                _uris.append(uritools.uriencode(path).decode())
+                _uris.append(f'file:{uritools.uriencode(path).decode()}')
         self._raw_uris = _uris
 
     @classmethod
@@ -198,8 +199,11 @@ class PureUri(PurePathProtocol):
         passing to system calls."""
         return self.as_uri()
 
-    def __fspath__(self):
+    def _path_(self):
         return self.path
+
+    def __fspath__(self):
+        raise NotImplementedError(f"fspath for {self.source.scheme}")
 
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self.as_uri())
@@ -265,7 +269,7 @@ class PureUri(PurePathProtocol):
         cls = type(self)
         inst = cls.__new__(cls)
         inst._init(self.source, f"{self.path}/{name}", "", "")
-        return self
+        return inst
 
     def with_source(self, source: Source):
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)

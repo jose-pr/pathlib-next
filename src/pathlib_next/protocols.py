@@ -5,6 +5,7 @@ paths with operations that have semantics appropriate for different
 operating systems.
 """
 
+import os as _os
 import re as _re
 import stat as _stat
 from pathlib import _ignore_error
@@ -35,14 +36,26 @@ class FileStatProtocol(_ty.Protocol):
 
 
 class FsPath(_ty.Protocol):
-    @_abc.abstractmethod
+    __slots__ = ()
+
+    @_utils.notimplemented
     def __fspath__(self) -> str: ...
+
+
+_os.PathLike.register(FsPath)
+
+
+class PathContainer(FsPath):
+    __slots__ = ()
+
+    def _path_(self) -> str:
+        return self.__fspath__()
 
 
 FsPathLike = str | FsPath
 
 
-class PurePathProtocol(FsPath, _ty.Generic[_P]):
+class PurePathProtocol(PathContainer, _ty.Generic[_P]):
     """Base class for manipulating paths without I/O."""
 
     __slots__ = ()
@@ -50,6 +63,10 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
     @property
     def _is_case_sensitive(self) -> bool:
         return True
+
+    @property
+    def _path_separators(self) -> _ty.Sequence[str]:
+        return ("/",)
 
     @_abc.abstractmethod
     def as_uri(self) -> str: ...
@@ -76,17 +93,17 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
         return self.with_name(stem + self.suffix)
 
     @_abc.abstractmethod
-    def with_suffix(self, suffix: FsPathLike) -> _ty.Self: ...
+    def with_suffix(self, suffix: str) -> _ty.Self: ...
 
     @_abc.abstractmethod
-    def relative_to(self, other: FsPathLike) -> _ty.Self:
+    def relative_to(self, other: _ty.Self | str) -> _ty.Self:
         """Return the relative path to another path identified by the passed
         arguments.  If the operation is not possible (because this is not
         related to the other path), raise ValueError.
         """
         ...
 
-    def is_relative_to(self, other: FsPathLike):
+    def is_relative_to(self, other: _ty.Self | str):
         """Return True if the path is relative to another path or False."""
         cls = type(self)
         other = other if isinstance(other, cls) else cls(self, other)
@@ -97,7 +114,7 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
         return self / name
 
     @_abc.abstractmethod
-    def __truediv__(self, key: FsPathLike) -> _ty.Self: ...
+    def __truediv__(self, key: _ty.Self | str) -> _ty.Self: ...
 
     @property
     def parent(self) -> _ty.Self:
@@ -123,12 +140,15 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
         """
         if case_sensitive is None:
             case_sensitive = self._is_case_sensitive
-        path = self.__fspath__()
+        path = self._path_()
         if not isinstance(path_pattern, _re.Pattern):
             if isinstance(str, path_pattern):
-                path_pattern = type(self)(path_pattern).__fspath__()
+                path_pattern = type(self)(path_pattern).__path__()
             path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
         return path_pattern.match(path) is not None
+
+
+PurePathLike = str | PurePathProtocol
 
 
 class PathProtocol(PurePathProtocol):
@@ -212,10 +232,11 @@ class PathProtocol(PurePathProtocol):
         return _stat.S_ISSOCK(self._st_mode() or 0)
 
     @_utils.notimplemented
-    def samefile(self, other_path):
+    def samefile(self, other_path: str | _ty.Self):
         """Return whether other_path is the same or not as this file
         (as returned by os.path.samefile()).
         """
+        ...
 
     @_utils.notimplemented
     def _open(
@@ -297,7 +318,7 @@ class PathProtocol(PurePathProtocol):
 
     def glob(
         self,
-        pattern: str,
+        pattern: str | _ty.Self,
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
@@ -314,7 +335,11 @@ class PathProtocol(PurePathProtocol):
         )
 
     def rglob(
-        self, pattern: str, *, case_sensitive: bool = None, include_hidden: bool = False
+        self,
+        pattern: str | _ty.Self,
+        *,
+        case_sensitive: bool = None,
+        include_hidden: bool = False,
     ):
         """Recursively yield all existing files (of any kind, including
         directories) matching the given relative pattern, anywhere in
@@ -460,7 +485,7 @@ class PathProtocol(PurePathProtocol):
                 raise
 
     @_utils.notimplemented
-    def rename(self, target: "PathProtocol | str"): ...
+    def rename(self, target: "_ty.Self | str"): ...
 
     def copy(self, target: "PathProtocol | str", *, overwrite=False):
         if isinstance(target, str):
@@ -509,3 +534,6 @@ class PathProtocol(PurePathProtocol):
 
         src.copy(target)
         src.unlink()
+
+
+PathLike = str | PathProtocol

@@ -37,6 +37,9 @@ class FileUri(Uri):
                 path = path.removeprefix("/")
         super()._init(source, path, query, fragment, **kwargs)
 
+    def __fspath__(self):
+        return self.filepath.__fspath__()
+
     def _ls(self):
         for path in self.filepath.iterdir():
             yield path.name

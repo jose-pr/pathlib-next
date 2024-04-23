@@ -3,7 +3,6 @@
 
 """Filename globbing utility."""
 
-import os
 import re
 import fnmatch
 import itertools
@@ -99,7 +98,7 @@ def iglob(
         include_hidden=include_hidden,
         case_sensitive=case_sensitive,
     )
-    path_ = os.fspath(path)
+    path_ = path._path_()
     if not path_ or recursive and path_.startswith(RECURSIVE):
         try:
             s = next(it)  # skip empty string
@@ -118,13 +117,13 @@ def _iglob(
     include_hidden=False,
     case_sensitive: bool = None,
 ) -> _ty.Iterable[_Globable]:
-    pathname = os.fspath(path)
-    _dironly = pathname.endswith("/")
+    pathname = path._path_()
+    _dironly = pathname and pathname[-1] in path._path_separators
     parent = path.parent
     parent = parent if parent != path and parent else None
-    include_hidden = path.name.startswith(".")
+    include_hidden = include_hidden or path.is_hidden()
     pattern = compile_pattern(path.name, case_sensitive)
-    root = _join(root_dir, parent)
+    root:_Globable = _join(root_dir, parent)
     if not has_glob_wildard(pathname):
         assert not dironly
         if not _dironly:

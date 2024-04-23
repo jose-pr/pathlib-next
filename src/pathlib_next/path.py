@@ -11,10 +11,14 @@ class PurePath(_path.PurePath, _proto.PurePathProtocol):
     _flavour: _os.path
 
     @property
+    def _path_separators(self) -> _ty.Sequence[str]:
+        return (self._flavour.pathsep, self._flavour.altsep)
+
+    @property
     @_func.cache
     def _is_case_sensitive(self) -> bool:
         return self._flavour.normcase("Aa") == "Aa"
-    
+
     def _make_child_relpath(self, name: str) -> _ty.Self:
         return _path.Path._make_child_relpath(self, name)
 
@@ -27,9 +31,14 @@ class PureWindowsPath(_path.PureWindowsPath, PurePath):
     __slots__ = ()
 
 
-class Path(_path.Path, _proto.PathProtocol):
+class Path(_path.Path, _proto.PathProtocol, PurePath):
     __slots__ = ()
 
+    def __new__(cls, *args, **kwargs):
+        if cls is Path:
+            cls = WindowsPath if _os.name == 'nt' else PosixPath
+        return object.__new__(cls)
+    
     def glob(
         self,
         pattern: str,
@@ -63,3 +72,28 @@ class Path(_path.Path, _proto.PathProtocol):
             include_hidden=include_hidden,
             recursive=True,
         )
+
+
+class PosixPath(Path, PurePosixPath):
+    """Path subclass for non-Windows systems.
+
+    On a POSIX system, instantiating a Path should return this object.
+    """
+    __slots__ = ()
+
+    if _os.name == 'nt':
+        def __new__(cls, *args, **kwargs):
+            raise NotImplementedError(
+                f"cannot instantiate {cls.__name__!r} on your system")
+
+class WindowsPath(Path, PureWindowsPath):
+    """Path subclass for Windows systems.
+
+    On a Windows system, instantiating a Path should return this object.
+    """
+    __slots__ = ()
+
+    if _os.name != 'nt':
+        def __new__(cls, *args, **kwargs):
+            raise NotImplementedError(
+                f"cannot instantiate {cls.__name__!r} on your system")
