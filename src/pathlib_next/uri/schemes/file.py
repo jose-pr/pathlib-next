@@ -1,6 +1,8 @@
-from pathlib import Path as _Path
+from ...path import Path as _Path
+from pathlib import PurePath as _SystemPath
 import os as _os
 from .. import Uri, Source
+
 
 class FileUri(Uri):
     __SCHEMES = ("file",)
@@ -10,12 +12,16 @@ class FileUri(Uri):
     def filepath(self):
         if self._filepath is None:
             if not self.is_local():
-                path = self.path if self.path.startswith('/') else f"/{self.path}"
+                if _os.name != "net":
+                    raise NotImplementedError(
+                        "Remote Source only supported in local paths in Windows"
+                    )
+                path = self.path if self.path.startswith("/") else f"/{self.path}"
                 self._filepath = _Path(f"//{self.source.host}{path}")
             else:
                 self._filepath = _Path(self.path)
         return self._filepath
-    
+
     def _init(
         self,
         source: Source,
@@ -30,7 +36,6 @@ class FileUri(Uri):
             if root and root[-1] == ":":
                 path = path.removeprefix("/")
         super()._init(source, path, query, fragment, **kwargs)
-
 
     def _ls(self):
         for path in self.filepath.iterdir():
@@ -54,5 +59,7 @@ class FileUri(Uri):
     def rmdir(self):
         return self.filepath.rmdir()
 
-    def _rename(self, target):
+    def rename(self, target):
+        if not isinstance(target, (_SystemPath, str)):
+            raise NotImplementedError("rename", target)
         return self.filepath.rename(target)

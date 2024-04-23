@@ -92,6 +92,10 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
         other = other if isinstance(other, cls) else cls(self, other)
         return other == self or other in self.parents
 
+    def _make_child_relpath(self, name: str) -> _ty.Self:
+        # Subclass can speciliaze this
+        return self / name
+
     @_abc.abstractmethod
     def __truediv__(self, key: FsPathLike) -> _ty.Self: ...
 

@@ -1,6 +1,7 @@
 import pathlib as _path
 import os as _os
 import functools as _func
+import typing as _ty
 from . import protocols as _proto
 
 
@@ -13,6 +14,9 @@ class PurePath(_path.PurePath, _proto.PurePathProtocol):
     @_func.cache
     def _is_case_sensitive(self) -> bool:
         return self._flavour.normcase("Aa") == "Aa"
+    
+    def _make_child_relpath(self, name: str) -> _ty.Self:
+        return _path.Path._make_child_relpath(self, name)
 
 
 class PurePosixPath(_path.PurePosixPath, PurePath):

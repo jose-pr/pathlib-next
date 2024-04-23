@@ -135,7 +135,7 @@ class PureUri(PurePathProtocol):
                 paths.append(path)
 
             for path in reversed(paths):
-                if  not path:
+                if not path:
                     continue
                 if path.endswith("/"):
                     _path = f"{path}{_path}"
@@ -260,6 +260,12 @@ class PureUri(PurePathProtocol):
     @property
     def stem(self):
         return self.posixpath.stem
+
+    def _make_child_relpath(self, name: str) -> _ty.Self:
+        cls = type(self)
+        inst = cls.__new__(cls)
+        inst._init(self.source, f"{self.path}/{name}", "", "")
+        return self
 
     def with_source(self, source: Source):
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
@@ -465,13 +471,14 @@ class Uri(PureUri, PathProtocol):
     @_utils.notimplemented
     def _ls(self) -> "_ty.Iterator[str]": ...
 
-       
+    def _make_child_relpath(self, name: str) -> _ty.Self:
+        inst = super()._make_child_relpath(name)
+        inst._backend = self._backend
+        return inst
+
     def iterdir(self) -> "_ty.Iterator[Self]":
-        cls = type(self)
         for path in self._ls():
-            inst = cls.__new__(cls, backend=self._backend)
-            inst._init(self.source, f"{self.path}/{path}", "", "")
-            yield inst
+            yield self._make_child_relpath(path)
 
 
 _ROOT = PureUri("/")
