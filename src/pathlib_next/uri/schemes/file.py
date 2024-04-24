@@ -40,9 +40,8 @@ class FileUri(Uri):
     def __fspath__(self):
         return self.filepath.__fspath__()
 
-    def _ls(self):
-        for path in self.filepath.iterdir():
-            yield path.name
+    def _listdir(self):
+        yield from _os.listdir(self.filepath)
 
     def stat(self, *, follow_symlinks=True):
         return self.filepath.stat(follow_symlinks=follow_symlinks)

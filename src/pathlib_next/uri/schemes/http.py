@@ -40,7 +40,7 @@ class HttpPath(Uri):
     def _initbackend(self):
         return HttpBackend(_req.Session(), {})
 
-    def _ls(self) -> list[_FileEntry]:
+    def _listdir(self) -> list[_FileEntry]:
         req = self.backend.session.request("GET", self)
         req.raise_for_status()
         soup = _bs4.BeautifulSoup(req.content, "html5lib")
@@ -50,7 +50,7 @@ class HttpPath(Uri):
     def iterdir(self):
         _self = self.path.removesuffix("/")
         cls = type(self)
-        for path in self._ls():
+        for path in self._listdir():
             inst = type(self).__new__(cls, backend=self.backend)
             inst._init(self.source, f"{_self}/{path.name}", "", "")
             yield inst
@@ -96,7 +96,7 @@ class HttpPath(Uri):
                     entry = next(
                         filter(
                             lambda p: p.name.removesuffix("/") == self.name,
-                            parent._ls(),
+                            parent._listdir(),
                         )
                     )
                     if entry and entry.modified:

@@ -73,7 +73,7 @@ class SftpPath(Uri):
             client = _CACHED_CLIENTS.invalidate(self.backend, self.source, thead_id)
         return client
 
-    def _ls(self):
+    def _listdir(self):
         for path in self._sftpclient.listdir(self.path):
             yield path
 

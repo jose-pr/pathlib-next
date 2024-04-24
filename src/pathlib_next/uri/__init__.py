@@ -475,7 +475,7 @@ class Uri(PureUri, PathProtocol):
         return inst
 
     @_utils.notimplemented
-    def _ls(self) -> "_ty.Iterator[str]": ...
+    def _listdir(self) -> "_ty.Iterator[str]": ...
 
     def _make_child_relpath(self, name: str) -> _ty.Self:
         inst = super()._make_child_relpath(name)
@@ -483,7 +483,7 @@ class Uri(PureUri, PathProtocol):
         return inst
 
     def iterdir(self) -> "_ty.Iterator[Self]":
-        for path in self._ls():
+        for path in self._listdir():
             yield self._make_child_relpath(path)
 
 
