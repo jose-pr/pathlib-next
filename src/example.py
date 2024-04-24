@@ -16,7 +16,9 @@ test1 = dest / 'test' / 'test2/'
 print(test1)
 
 sftp_root = Uri('sftp://root@sftpexample/')
+print(sftp_root.as_posix())
 authkeys = sftp_root / 'root/.ssh/authorized_keys'
+print(authkeys.as_posix())
 
 def checksum(uri:Uri):
     stat = uri.stat()

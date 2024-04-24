@@ -352,6 +352,19 @@ class PureUri(PurePathProtocol):
         other = other_path if isinstance(other_path, PureUri) else PureUri(other_path)
         return self.parts == other.parts
 
+    def as_posix(self):
+        source = self.source
+        host = None
+        posix = self.path
+        if source.host:
+            host = source.host
+            user, password = source.parsed_userinfo()
+            if user:
+                posix = f"{user}@{host}:{posix}"
+            else:
+                posix = f"{host}:{posix}"
+        return posix
+
 
 class Uri(PureUri, PathProtocol):
     __slots__ = ("_backend",)
