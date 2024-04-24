@@ -199,9 +199,6 @@ class PureUri(PurePathProtocol):
         passing to system calls."""
         return self.as_uri()
 
-    def _path_(self):
-        return self.path
-
     def __fspath__(self):
         raise NotImplementedError(f"fspath for {self.source.scheme}")
 
@@ -310,12 +307,6 @@ class PureUri(PurePathProtocol):
     def parts(self):
         return self.source, self.path, self.query, self.fragment
 
-    def __truediv__(self, key: UriLike):
-        try:
-            return type(self)(self, key)
-        except (TypeError, NotImplementedError):
-            return NotImplemented
-
     @property
     def parent(self):
         """The logical parent of the path."""
@@ -356,10 +347,11 @@ class PureUri(PurePathProtocol):
     def __eq__(self, other):
         other = other if isinstance(other, PureUri) else PureUri(other)
         return self.parts == other.parts
-    
+
     def samefile(self, other_path: str | _ty.Self):
         other = other_path if isinstance(other_path, PureUri) else PureUri(other_path)
         return self.parts == other.parts
+
 
 class Uri(PureUri, PathProtocol):
     __slots__ = ("_backend",)

@@ -97,19 +97,18 @@ class PurePathProtocol(FsPath, _ty.Generic[_P]):
         other = other if isinstance(other, cls) else cls(self, other)
         return other == self or other in self.parents
 
-    def _make_child_relpath(self, name: str) -> _ty.Self:
-        # Subclass can speciliaze this
-        return self / name
-
-    @_abc.abstractmethod
-    def __truediv__(self, key: _ty.Self | str) -> _ty.Self: ...
+    def __truediv__(self, key: _ty.Self | str) -> _ty.Self:
+        try:
+            return type(self)(self, key)
+        except (TypeError, NotImplementedError):
+            return NotImplemented
 
     @property
+    @_abc.abstractmethod
     def parent(self) -> _ty.Self:
         """The logical parent of the path."""
 
     @property
-    @_abc.abstractmethod
     def parents(self) -> _ty.Iterable[_ty.Self]:
         parent = self.parent
         if parent != self:
@@ -311,7 +310,7 @@ class PathProtocol(PurePathProtocol):
         case_sensitive: bool = None,
         include_hidden: bool = False,
         recursive: bool = False,
-        dironly:bool = None
+        dironly: bool = None,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
@@ -321,7 +320,7 @@ class PathProtocol(PurePathProtocol):
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
-            dironly=dironly
+            dironly=dironly,
         )
 
     def rglob(
@@ -330,7 +329,7 @@ class PathProtocol(PurePathProtocol):
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
-        dironly:bool = None
+        dironly: bool = None,
     ):
         """Recursively yield all existing files (of any kind, including
         directories) matching the given relative pattern, anywhere in
@@ -341,7 +340,7 @@ class PathProtocol(PurePathProtocol):
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=True,
-            dironly=dironly
+            dironly=dironly,
         )
 
     def walk(
