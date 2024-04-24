@@ -10,7 +10,7 @@ import re as _re
 
 
 RECURSIVE = "**"
-ANY_PATTERN =  _re.compile(_fnmatch.translate('*'))
+ANY_PATTERN = _re.compile(_fnmatch.translate("*"))
 WILCARD_PATTERN = _re.compile("([*?[])")
 
 if _ty.TYPE_CHECKING:
@@ -62,7 +62,7 @@ def glob(
             break
 
     root: _Globable = (
-        (root_dir or parent) if not root_dir or parent else (root_dir / parent)
+        (root_dir or parent) if not root_dir or not parent else (root_dir / parent)
     )
 
     if recursive and path.name == RECURSIVE:
@@ -92,8 +92,7 @@ def glob(
         dirs = [parent]
 
     for parent in dirs:
-        for _path in globber(parent, pattern, dironly, include_hidden):
-            yield _path
+        yield from globber(parent, pattern, dironly, include_hidden)
 
 
 def _glob_with_pattern(
