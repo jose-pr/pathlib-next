@@ -3,6 +3,7 @@ import os as _os
 import functools as _func
 import typing as _ty
 from . import protocols as _proto
+import re as _re
 
 
 class PurePath(_path.PurePath, _proto.PurePathProtocol):
@@ -36,20 +37,29 @@ class Path(_path.Path, _proto.PathProtocol, PurePath):
 
     def __new__(cls, *args, **kwargs):
         if cls is Path:
-            cls = WindowsPath if _os.name == 'nt' else PosixPath
+            cls = WindowsPath if _os.name == "nt" else PosixPath
         return object.__new__(cls)
-    
+
     def glob(
         self,
-        pattern: str,
+        pattern: str | _proto.FsPath,
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
         recursive: bool = False,
+        dironly: bool = False,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
         """
+        if not isinstance(pattern, (str, _re.Pattern)):
+            pattern = _os.fspath(pattern)
+        if dironly is None:
+            dironly = (
+                isinstance(pattern, str)
+                and pattern
+                and pattern[-1] in self._path_separators
+            )
         yield from _proto.PathProtocol.glob(
             self,
             self,
@@ -57,10 +67,16 @@ class Path(_path.Path, _proto.PathProtocol, PurePath):
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
+            dironly=dironly,
         )
 
     def rglob(
-        self, pattern: str, *, case_sensitive: bool = None, include_hidden: bool = False
+        self,
+        pattern: str,
+        *,
+        case_sensitive: bool = None,
+        include_hidden: bool = False,
+        dironly: bool = False,
     ):
         """Recursively yield all existing files (of any kind, including
         directories) matching the given relative pattern, anywhere in
@@ -71,6 +87,7 @@ class Path(_path.Path, _proto.PathProtocol, PurePath):
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=True,
+            dironly=dironly,
         )
 
 
@@ -79,21 +96,28 @@ class PosixPath(Path, PurePosixPath):
 
     On a POSIX system, instantiating a Path should return this object.
     """
+
     __slots__ = ()
 
-    if _os.name == 'nt':
+    if _os.name == "nt":
+
         def __new__(cls, *args, **kwargs):
             raise NotImplementedError(
-                f"cannot instantiate {cls.__name__!r} on your system")
+                f"cannot instantiate {cls.__name__!r} on your system"
+            )
+
 
 class WindowsPath(Path, PureWindowsPath):
     """Path subclass for Windows systems.
 
     On a Windows system, instantiating a Path should return this object.
     """
+
     __slots__ = ()
 
-    if _os.name != 'nt':
+    if _os.name != "nt":
+
         def __new__(cls, *args, **kwargs):
             raise NotImplementedError(
-                f"cannot instantiate {cls.__name__!r} on your system")
+                f"cannot instantiate {cls.__name__!r} on your system"
+            )

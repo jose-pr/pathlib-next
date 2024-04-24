@@ -45,17 +45,10 @@ class FsPath(_ty.Protocol):
 _os.PathLike.register(FsPath)
 
 
-class PathContainer(FsPath):
-    __slots__ = ()
-
-    def _path_(self) -> str:
-        return self.__fspath__()
-
-
 FsPathLike = str | FsPath
 
 
-class PurePathProtocol(PathContainer, _ty.Generic[_P]):
+class PurePathProtocol(FsPath, _ty.Generic[_P]):
     """Base class for manipulating paths without I/O."""
 
     __slots__ = ()
@@ -64,17 +57,12 @@ class PurePathProtocol(PathContainer, _ty.Generic[_P]):
     def _is_case_sensitive(self) -> bool:
         return True
 
-    @property
-    def _path_separators(self) -> _ty.Sequence[str]:
-        return ("/",)
-
     @_abc.abstractmethod
     def as_uri(self) -> str: ...
 
     @property
     @_abc.abstractmethod
     def name(self) -> str: ...
-
     @property
     @_abc.abstractmethod
     def suffix(self) -> str: ...
@@ -133,14 +121,14 @@ class PurePathProtocol(PathContainer, _ty.Generic[_P]):
         """True if the path is absolute (has both a root and, if applicable,
         a drive)."""
         ...
-   
+
     def match(self, path_pattern: str | _re.Pattern, *, case_sensitive=None):
         """
         Return True if this path matches the given pattern.
         """
         if case_sensitive is None:
             case_sensitive = self._is_case_sensitive
-        path = self._path_()
+        path = str(self)
         if not isinstance(path_pattern, _re.Pattern):
             if isinstance(str, path_pattern):
                 path_pattern = type(self)(path_pattern).__path__()
@@ -323,15 +311,17 @@ class PathProtocol(PurePathProtocol):
         case_sensitive: bool = None,
         include_hidden: bool = False,
         recursive: bool = False,
+        dironly:bool = None
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
         """
-        yield from _glob.iglob(
+        yield from _glob.glob(
             self / pattern,
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
+            dironly=dironly
         )
 
     def rglob(
@@ -340,6 +330,7 @@ class PathProtocol(PurePathProtocol):
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
+        dironly:bool = None
     ):
         """Recursively yield all existing files (of any kind, including
         directories) matching the given relative pattern, anywhere in
@@ -350,6 +341,7 @@ class PathProtocol(PurePathProtocol):
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=True,
+            dironly=dironly
         )
 
     def walk(
@@ -500,19 +492,14 @@ class PathProtocol(PurePathProtocol):
             else:
                 raise FileExistsError(target)
 
-        try:
-            stat = src.stat()
-        except NotImplementedError:
-            stat = None
-
         with target.open("wb") as output, src.open("rb") as input:
             _shutil.copyfileobj(input, output)
 
-        if stat:
-            try:
-                target.chmod(stat.st_mode)
-            except NotImplementedError:
-                pass
+        try:
+            stat = src.stat()
+            target.chmod(stat.st_mode)
+        except NotImplementedError:
+            pass
 
     def move(self, target: "PathProtocol|str", *, overwrite=False):
         if isinstance(target, str):
