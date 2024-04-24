@@ -29,7 +29,13 @@ class PathSyncer(object):
     def log(self, msg: str, **kwargs: str):
         print(msg.format_map(kwargs))
 
-    def hook(self, source: PathProtocol, target: PathProtocol, event: SyncEvent, dry_run: bool):
+    def hook(
+        self,
+        source: PathProtocol,
+        target: PathProtocol,
+        event: SyncEvent,
+        dry_run: bool,
+    ):
         if self._hook:
             self._hook(source, target, event, dry_run)
         self.log(
@@ -40,7 +46,9 @@ class PathSyncer(object):
             dry_run=dry_run,
         )
 
-    def sync(self, source: PathProtocol, target: PathProtocol, /, dry_run: bool = False):
+    def sync(
+        self, source: PathProtocol, target: PathProtocol, /, dry_run: bool = False
+    ):
         checksum = self.checksum
         self.hook(source, target, SyncEvent.SyncStart, dry_run)
 
@@ -69,15 +77,15 @@ class PathSyncer(object):
                 if not dry_run:
                     target.mkdir()
                 self.hook(source, target, SyncEvent.CreatedDirectory, dry_run)
-            childs = []
-            for child in source.iterdir():
-                self.sync(child, target / child.name, dry_run)
-                childs.append(child.name)
+
             if self.remove_missing:
                 for child in target.iterdir():
-                    if child.name not in childs:
+                    if not (source / child.name).exists():
                         if not dry_run:
                             child.rm(recursive=True)
                         self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
+                        
+            for child in source.iterdir():
+                self.sync(child, target / child.name, dry_run)
 
         self.hook(source, target, SyncEvent.Synced, dry_run)
