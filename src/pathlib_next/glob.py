@@ -3,16 +3,15 @@
 
 """Filename globbing utility."""
 
-import re
-import fnmatch
-import itertools
+import fnmatch as _fnmatch
 import typing as _ty
 import functools as _func
 import re as _re
 
 
 RECURSIVE = "**"
-WILCARD_PATTERN = re.compile("([*?[])")
+ANY_PATTERN =  _re.compile(_fnmatch.translate('*'))
+WILCARD_PATTERN = _re.compile("([*?[])")
 
 if _ty.TYPE_CHECKING:
     from .protocols import P as _Globable
@@ -24,55 +23,13 @@ else:
 @_func.lru_cache(maxsize=256, typed=True)
 def compile_pattern(pat: str, case_sensitive: bool):
     flags = _re.NOFLAG if case_sensitive else _re.IGNORECASE
-    return _re.compile(fnmatch.translate(pat), flags)
-
-
-def has_glob_wildard(s: str):
-    return WILCARD_PATTERN.search(s) is not None
-
-
-def _join(dir: _Globable, path: _Globable):
-    # It is common if dirname or basename is empty
-    if not dir or not path:
-        return dir or path
-    return dir / path
+    return _re.compile(_fnmatch.translate(pat), flags)
 
 
 def glob(
-    pathname: _Globable,
-    *,
-    root_dir: _Globable = None,
-    recursive=False,
-    include_hidden=False,
-    case_sensitive: bool = None
-):
-    """Return a list of paths matching a pathname pattern.
-
-    The pattern may contain simple shell-style wildcards a la
-    fnmatch. Unlike fnmatch, filenames starting with a
-    dot are special cases that are not matched by '*' and '?'
-    patterns by default.
-
-    If `include_hidden` is true, the patterns '*', '?', '**'  will match hidden
-    directories.
-
-    If `recursive` is true, the pattern '**' will match any files and
-    zero or more directories and subdirectories.
-    """
-    return list(
-        iglob(
-            pathname,
-            root_dir=root_dir,
-            recursive=recursive,
-            include_hidden=include_hidden,
-            case_sensitive=case_sensitive,
-        )
-    )
-
-
-def iglob(
     path: _Globable,
     *,
+    dironly: bool = False,
     root_dir: _Globable | None = None,
     recursive: bool = False,
     include_hidden: bool = False,
@@ -90,99 +47,58 @@ def iglob(
     """
     if case_sensitive is None:
         case_sensitive = path._is_case_sensitive
-    it = _iglob(
-        path,
-        root_dir,
-        recursive,
-        False,
-        include_hidden=include_hidden,
-        case_sensitive=case_sensitive,
-    )
-    path_ = path._path_()
-    if not path_ or recursive and path_.startswith(RECURSIVE):
-        try:
-            s = next(it)  # skip empty string
-            if s:
-                it = itertools.chain((s,), it)
-        except StopIteration:
-            pass
-    return it
 
-
-def _iglob(
-    path: _Globable,
-    root_dir: _Globable | None,
-    recursive: bool,
-    dironly: bool,
-    include_hidden=False,
-    case_sensitive: bool = None,
-) -> _ty.Iterable[_Globable]:
-    pathname = path._path_()
-    _dironly = pathname and pathname[-1] in path._path_separators
-    parent = path.parent
-    parent = parent if parent != path and parent else None
     include_hidden = include_hidden or path.is_hidden()
-    pattern = compile_pattern(path.name, case_sensitive)
-    root:_Globable = _join(root_dir, parent)
-    if not has_glob_wildard(pathname):
-        assert not dironly
-        if not _dironly:
-            yield from _glob_with_pattern(
-                root, pattern, False, include_hidden=include_hidden
-            )
-        else:
-            # Patterns ending with a slash should match only directories
-            if parent:
-                yield from _glob_with_pattern(
-                    root.parent, pattern, False, include_hidden=include_hidden
-                )
+    pattern = compile_pattern(path.name, case_sensitive) if path.name else ANY_PATTERN
+
+    name_is_pattern = WILCARD_PATTERN.match(path.name) != None
+    wildcard_in_path = name_is_pattern
+    parent = None
+    for ancestor in path.parents:
+        if parent is None:
+            parent = ancestor
+        if WILCARD_PATTERN.match(ancestor.name) != None:
+            wildcard_in_path = True
+            break
+
+    root: _Globable = (
+        (root_dir or parent) if not root_dir or parent else (root_dir / parent)
+    )
+
+    if recursive and path.name == RECURSIVE:
+        globber = _glob_recursive
+    else:
+        globber = _glob_with_pattern
+
+    if not parent or not wildcard_in_path:
+        yield from globber(
+            root or path,
+            pattern,
+            dironly,
+            include_hidden=include_hidden,
+        )
         return
 
-    if not parent:
-        if recursive and path.name == RECURSIVE:
-            yield from _glob_recursive(
-                root,
-                pattern,
-                dironly,
-                include_hidden=include_hidden,
-                case_sensitive=case_sensitive,
-            )
-        else:
-            yield from _glob_with_pattern(
-                root, pattern, dironly, include_hidden=include_hidden
-            )
-        return
-
-    if parent and has_glob_wildard(parent.name):
-        dirs = _iglob(
+    if parent and name_is_pattern:
+        dirs = glob(
             parent,
-            root_dir,
-            recursive,
-            True,
+            root_dir=root_dir,
+            recursive=recursive,
+            dironly=True,
             include_hidden=include_hidden,
             case_sensitive=case_sensitive,
         )
     else:
         dirs = [parent]
 
-    if recursive and path.name == RECURSIVE:
-        glob_in_dir = _glob_recursive
-    else:
-        glob_in_dir = _glob_with_pattern
-
     for parent in dirs:
-        for _path in glob_in_dir(parent, pattern, dironly, include_hidden):
+        for _path in globber(parent, pattern, dironly, include_hidden):
             yield _path
 
 
-# These 2 helper functions non-recursively glob inside a literal directory.
-# They return a list of basenames.  _glob1 accepts a pattern while _glob0
-# takes a literal basename (so it only has to check for its existence).
-
-
 def _glob_with_pattern(
-    parent: _Globable, pattern: re.Pattern, dironly: bool, include_hidden=False
-):
+    parent: _Globable, pattern: _re.Pattern, dironly: bool, include_hidden=False
+) -> _ty.Iterable[_Globable]:
     if not include_hidden:
 
         def _filter(p: _Globable):

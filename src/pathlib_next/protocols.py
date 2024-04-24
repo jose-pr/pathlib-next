@@ -133,7 +133,7 @@ class PurePathProtocol(PathContainer, _ty.Generic[_P]):
         """True if the path is absolute (has both a root and, if applicable,
         a drive)."""
         ...
-
+   
     def match(self, path_pattern: str | _re.Pattern, *, case_sensitive=None):
         """
         Return True if this path matches the given pattern.

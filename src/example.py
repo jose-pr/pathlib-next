@@ -28,7 +28,7 @@ rocky_repo = Uri('http://dl.rockylinux.org/pub')
 
 glob_test = Uri("file:./**/*.py")
 
-for path in glob.iglob(glob_test, recursive=True):
+for path in glob.glob(glob_test, recursive=True):
     print(path)
 
 print(rocky_repo.is_dir())
