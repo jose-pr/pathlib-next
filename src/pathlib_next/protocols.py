@@ -179,7 +179,17 @@ class PathProtocol(PurePathProtocol):
         """
         Whether this path is a directory.
         """
-        return _stat.S_ISDIR(self._st_mode() or 0)
+        try:
+            return _stat.S_ISDIR(self._st_mode() or 0)
+        except NotImplementedError:
+            pass
+        try:
+            next(self.iterdir(), None)
+            return True
+        except NotADirectoryError:
+            return False
+        
+        raise NotImplementedError('is_dir')
 
     def is_file(self):
         """

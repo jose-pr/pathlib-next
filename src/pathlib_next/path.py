@@ -5,24 +5,27 @@ import typing as _ty
 from . import protocols as _proto
 import re as _re
 
+@_func.cache
+def _is_case_sensitive(flavour:_os.path) -> bool:
+    return flavour.normcase("Aa") == "Aa"
 
 class PurePath(_path.PurePath, _proto.PurePathProtocol):
     __slots__ = ()
 
-    _flavour: _os.path
+    @property
+    def _parser(self) -> _os.path :
+        try:
+            return self.parser
+        except AttributeError:
+            return self._flavour
 
     @property
     def _path_separators(self) -> _ty.Sequence[str]:
-        return (self._flavour.pathsep, self._flavour.altsep)
+        return (self._parser.pathsep, self._parser.altsep)
 
     @property
-    @_func.cache
     def _is_case_sensitive(self) -> bool:
-        return self._flavour.normcase("Aa") == "Aa"
-
-    def _make_child_relpath(self, name: str) -> _ty.Self:
-        return _path.Path._make_child_relpath(self, name)
-
+        return _is_case_sensitive(self._parser)
 
 class PurePosixPath(_path.PurePosixPath, PurePath):
     __slots__ = ()

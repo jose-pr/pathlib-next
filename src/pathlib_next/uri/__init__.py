@@ -197,20 +197,20 @@ class PureUri(PurePathProtocol):
     def __str__(self):
         """Return the string representation of the path, suitable for
         passing to system calls."""
-        return self.as_uri()
+        return self.as_uri(sanitize=True)
 
     def __fspath__(self):
         raise NotImplementedError(f"fspath for {self.source.scheme}")
 
     def __repr__(self):
-        return "{}({!r})".format(type(self).__name__, self.as_uri())
+        return "{}({!r})".format(type(self).__name__, str(self))
 
-    def as_uri(self, /, sanitize=True):
-        if self._uri is None or not sanitize:
+    def as_uri(self, /, sanitize=False):
+        if self._uri is None or sanitize:
             uri = self._format_parsed_parts(
                 self.source, self.path, self.query, self.fragment, sanitize=sanitize
             )
-            if sanitize:
+            if not sanitize:
                 self._uri = uri
             return uri
         else:
@@ -320,8 +320,7 @@ class PureUri(PurePathProtocol):
         return _UriPathParents(self)
 
     def is_absolute(self):
-        """True if the path is absolute (has both a root and, if applicable,
-        a drive)."""
+        """True if the path is absolute."""
         return bool(self.source) and self.posixpath.is_absolute()
 
     def is_relative_to(self, other: UriLike):
