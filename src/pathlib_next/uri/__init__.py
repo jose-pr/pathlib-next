@@ -13,11 +13,11 @@ from .source import Source
 
 from ..path import Path, Pathname
 
-UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
+UriLike: _ty.TypeAlias = "str | Uri | os.PathLike"
 
 _NOSOURCE = Source(None, None, None, None)
 
-_U = _ty.TypeVar("_U", bound="PureUri")
+_U = _ty.TypeVar("_U", bound="Uri")
 
 
 
