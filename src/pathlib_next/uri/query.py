@@ -44,6 +44,9 @@ class Query(str):
         return _uritools.SplitResultString("", "", "", str(query), "").getquerylist(
             query._separator, query._encoding
         )
+    
+    def __iter__(self):
+        return iter(self.decode())
 
     def to_dict(query, *, single=False):
         query_: dict[str, list[str | None]] = {}

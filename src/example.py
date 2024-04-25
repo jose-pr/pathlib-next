@@ -7,6 +7,8 @@ local = Path('./_ssh')
 print(list(local.iterdir()))
 query = Query({'test':'://$#!1', 'test2&': [1,2]})
 q2 =  Query(str(query)).to_dict()
+for name, value in query:
+    print(f"{name}: {value}")
 src = Source(scheme='scheme',userinfo='user', host='123.com', port=0)
 test = {**src}
 test2 = [*src]
