@@ -1,7 +1,7 @@
 import os
-from pathlib import PurePosixPath as PosixPath, PurePath as _PurePath, Path as _OSPath
 import typing as _ty
 import uritools
+from ..fspath import PosixPathname
 
 
 if _ty.TYPE_CHECKING:
@@ -11,13 +11,14 @@ from .. import utils as _utils
 from .query import Query
 from .source import Source
 
-from ..protocols import PathProtocol, PurePathProtocol
+from ..path import Path, Pathname
 
 UriLike: _ty.TypeAlias = "str | PureUri | os.PathLike"
 
 _NOSOURCE = Source(None, None, None, None)
 
 _U = _ty.TypeVar("_U", bound="PureUri")
+
 
 
 class _UriPathParents(_ty.Sequence[_U]):
@@ -46,7 +47,7 @@ class _UriPathParents(_ty.Sequence[_U]):
         return "<{}.parents>".format(type(self._path).__name__)
 
 
-class PureUri(PurePathProtocol):
+class PureUri(Pathname):
 
     __slots__ = (
         "_raw_uris",
@@ -114,6 +115,9 @@ class PureUri(PurePathProtocol):
             Query(parsed.getquery() or ""),
             parsed.getfragment() or "",
         )
+    
+    def _split(self):
+        return (self.source, self.path, self.query, self.fragment)
 
     def _load_parts(self):
         uris = self._raw_uris
@@ -124,12 +128,12 @@ class PureUri(PurePathProtocol):
         if not uris:
             pass
         elif len(uris) == 1 and isinstance(uris[0], PureUri):
-            source, _path, query, fragment = uris[0].parts
+            source, _path, query, fragment = uris[0]._split()
         else:
             paths: list[str] = []
             for _uri in uris:
                 src, path, query, fragment = (
-                    _uri.parts if isinstance(_uri, PureUri) else self._parse_uri(_uri)
+                    _uri._split() if isinstance(_uri, PureUri) else self._parse_uri(_uri)
                 )
                 if src:
                     source = src
@@ -250,9 +254,9 @@ class PureUri(PurePathProtocol):
         return self._fragment
 
     @property
-    def posixpath(self) -> PosixPath:
+    def posixpath(self) -> PosixPathname:
         if self._posixpath is None:
-            self._posixpath = PosixPath(self.path)
+            self._posixpath = PosixPathname(self.path)
         return self._posixpath
 
     @property
@@ -280,10 +284,10 @@ class PureUri(PurePathProtocol):
     def with_source(self, source: Source):
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
 
-    def with_path(self, path: str | _PurePath):
+    def with_path(self, path: str | Pathname):
         return self._from_parsed_parts(
             self.source,
-            path.as_posix() if isinstance(path, _PurePath) else path,
+            path.as_posix() if isinstance(path, Pathname) else path,
             self.query,
             self.fragment,
         )
@@ -314,7 +318,7 @@ class PureUri(PurePathProtocol):
 
     @property
     def parts(self):
-        return self.source, self.path, self.query, self.fragment
+        return self.path.split('/')
 
     @property
     def parent(self):
@@ -352,13 +356,9 @@ class PureUri(PurePathProtocol):
     def is_local(self):
         return self.source.is_local()
 
-    def __eq__(self, other):
-        other = other if isinstance(other, PureUri) else PureUri(other)
-        return self.parts == other.parts
-
-    def samefile(self, other_path: str | _ty.Self):
-        other = other_path if isinstance(other_path, PureUri) else PureUri(other_path)
-        return self.parts == other.parts
+    def __eq__(self, other:Pathname|str):
+        uri = other.as_uri() if isinstance(other, Pathname) else other
+        return self.as_uri() == uri
 
     def as_posix(self):
         source = self.source
@@ -374,7 +374,7 @@ class PureUri(PurePathProtocol):
         return posix
 
 
-class Uri(PureUri, PathProtocol):
+class Uri(PureUri, Path):
     __slots__ = ("_backend",)
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
@@ -450,9 +450,7 @@ class Uri(PureUri, PathProtocol):
         return self._backend
 
     def with_backend(self, backend):
-        uri = self._from_parsed_parts(*self.parts)
-        uri._backend = backend
-        return uri
+        return self._from_parsed_parts(*self._split(), backend=backend)
 
     def _load_parts(self):
         super()._load_parts()

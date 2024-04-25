@@ -1,5 +1,5 @@
-from ...path import FSPath as _Path
-from ...protocols import FsPathLike
+from ...fspath import FSPath as _SystemPath
+from ...path import FsPathLike
 import os as _os
 from .. import Uri, Source
 
@@ -17,9 +17,9 @@ class FileUri(Uri):
                         "Remote Source only supported in local paths in Windows"
                     )
                 path = self.path if self.path.startswith("/") else f"/{self.path}"
-                self._filepath = _Path(f"//{self.source.host}{path}")
+                self._filepath = _SystemPath(f"//{self.source.host}{path}")
             else:
-                self._filepath = _Path(self.path)
+                self._filepath = _SystemPath(self.path)
         return self._filepath
 
     def _init(

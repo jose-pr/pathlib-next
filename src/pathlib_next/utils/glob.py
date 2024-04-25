@@ -14,7 +14,7 @@ ANY_PATTERN = _re.compile(_fnmatch.translate("*"))
 WILCARD_PATTERN = _re.compile("([*?[])")
 
 if _ty.TYPE_CHECKING:
-    from .protocols import P as _Globable
+    from ..path import P as _Globable
 else:
 
     class _Globable(_ty.Protocol): ...
@@ -53,11 +53,9 @@ def glob(
 
     name_is_pattern = WILCARD_PATTERN.match(path.name) != None
     wildcard_in_path = name_is_pattern
-    parent = None
-    for ancestor in path.parents:
-        if parent is None:
-            parent = ancestor
-        if WILCARD_PATTERN.match(ancestor.name) != None:
+    parent = next(iter(path.parents), None)
+    for segment in path.parts:
+        if WILCARD_PATTERN.match(segment) != None:
             wildcard_in_path = True
             break
 

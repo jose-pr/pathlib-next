@@ -1,5 +1,5 @@
 import typing as _ty
-from .protocols import PathProtocol
+from ..path import Path
 import enum as _enum
 
 
@@ -17,10 +17,10 @@ class PathSyncer(object):
 
     def __init__(
         self,
-        checksum: _ty.Callable[[PathProtocol], int],
+        checksum: _ty.Callable[[Path], int],
         /,
         remove_missing: bool = False,
-        hook: _ty.Callable[[PathProtocol, PathProtocol, SyncEvent, bool], None] = None,
+        hook: _ty.Callable[[Path, Path, SyncEvent, bool], None] = None,
     ) -> None:
         self.checksum = checksum
         self.remove_missing = remove_missing
@@ -31,8 +31,8 @@ class PathSyncer(object):
 
     def hook(
         self,
-        source: PathProtocol,
-        target: PathProtocol,
+        source: Path,
+        target: Path,
         event: SyncEvent,
         dry_run: bool,
     ):
@@ -47,7 +47,7 @@ class PathSyncer(object):
         )
 
     def sync(
-        self, source: PathProtocol, target: PathProtocol, /, dry_run: bool = False
+        self, source: Path, target: Path, /, dry_run: bool = False
     ):
         checksum = self.checksum
         self.hook(source, target, SyncEvent.SyncStart, dry_run)

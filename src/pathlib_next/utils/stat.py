@@ -1,9 +1,22 @@
 import stat as _stat
+import typing as _ty
+import abc as _abc
+from .. import utils as _utils
 
-from . import utils as _utils
+class FileStatLike(_ty.Protocol):
+    __slots__ = ()
 
+    @property
+    @_abc.abstractmethod
+    def st_mode(self) -> int: ...
+    @property
+    @_abc.abstractmethod
+    def st_size(self) -> int: ...
+    @property
+    @_abc.abstractmethod
+    def st_mtime(self) -> int: ...
 
-class FileStat:
+class FileStat(FileStatLike):
     __slots__ = (
         "st_mode",
         "st_nlink",

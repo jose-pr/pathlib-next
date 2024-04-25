@@ -1,5 +1,6 @@
+from ...utils.stat import FileStat
 from .. import Uri
-from ... import fs, utils as _utils
+from ... import utils as _utils
 import io as _io
 import requests as _req
 import typing as _ty
@@ -104,7 +105,7 @@ class HttpPath(Uri):
                 except:
                     pass
 
-        return fs.FileStat(
+        return FileStat(
             st_size=st_size, st_mtime=_utils.parsedate(lm), is_dir=self._isdir
         )
 
