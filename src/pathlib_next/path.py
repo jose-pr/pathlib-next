@@ -59,9 +59,6 @@ class Pathname(FsPathLike):
     @_abc.abstractmethod
     def parts(self) -> _ty.Iterable[str]: ...
 
-    @property
-    def segments(self) -> _ty.Iterable[str]: ...
-
     @_abc.abstractmethod
     def with_name(self, name: str) -> _ty.Self: ...
 

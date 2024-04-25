@@ -25,14 +25,18 @@ class _UriPathParents(_ty.Sequence[_U]):
     """This object provides sequence-like access to the logical ancestors
     of a path.  Don't try to construct it yourself."""
 
-    __slots__ = ("_path", "_parents")
+    __slots__ = ("_path", "_segments")
 
     def __init__(self, path: _U):
         self._path = path
-        self._parents = path.posixpath.parents
+        segments =  path.parts
+        while segments and segments[-1] == '':
+            segments = segments[:-1]
+        self._segments = segments
+
 
     def __len__(self):
-        return len(self._parents)
+        return  len(self._segments)
 
     @_ty.overload
     def __getitem__(self, idx: slice) -> tuple[_U]: ...
@@ -41,7 +45,12 @@ class _UriPathParents(_ty.Sequence[_U]):
     def __getitem__(self, idx: int | slice) -> tuple[_U] | _U:
         if isinstance(idx, slice):
             return tuple(self[i] for i in range(*idx.indices(len(self))))
-        return self._path.with_path(self._parents[idx].as_posix())
+
+        if idx >= len(self) or idx < -len(self):
+            raise IndexError(idx)
+        if idx < 0:
+            idx += len(self)
+        return self._path.with_path('/'.join(self._segments[:-idx - 1]))
 
     def __repr__(self):
         return "<{}.parents>".format(type(self._path).__name__)
@@ -278,7 +287,7 @@ class PureUri(Pathname):
     def _make_child_relpath(self, name: str) -> _ty.Self:
         cls = type(self)
         inst = cls.__new__(cls)
-        inst._init(self.source, f"{self.path}/{name}", "", "")
+        inst._init(self.source, f"{self.path}/{name}" if self.path else name, "", "")
         return inst
 
     def with_source(self, source: Source):
@@ -318,15 +327,17 @@ class PureUri(Pathname):
 
     @property
     def parts(self):
+        if not self.path:
+            return ()
         return self.path.split('/')
 
     @property
     def parent(self):
         """The logical parent of the path."""
-        parent = self.posixpath.parent
-        if parent == self.posixpath:
+        segments = self.parts
+        if not segments or len(segments) == 2 and segments[1] == '':
             return self
-        return self.with_path(parent.as_posix())
+        return self.with_path('/'.join(segments[:-1]))
 
     @property
     def parents(self):
