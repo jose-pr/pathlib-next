@@ -56,7 +56,7 @@ class _UriPathParents(_ty.Sequence[_U]):
         return "<{}.parents>".format(type(self._path).__name__)
 
 
-class PureUri(Pathname):
+class Uri(Pathname):
 
     __slots__ = (
         "_raw_uris",
@@ -80,11 +80,11 @@ class PureUri(Pathname):
     def __init__(self, *uris: UriLike, **options):
         if self._raw_uris or self._initiated:
             return
-        _uris: list[str | PureUri] = []
+        _uris: list[str | Uri] = []
         for uri in uris:
             if not uri:
                 continue
-            if isinstance(uri, PureUri):
+            if isinstance(uri, Uri):
                 _uris.append(uri)
             elif hasattr(uri, "as_uri"):
                 path = uri.as_uri
@@ -136,13 +136,13 @@ class PureUri(Pathname):
 
         if not uris:
             pass
-        elif len(uris) == 1 and isinstance(uris[0], PureUri):
+        elif len(uris) == 1 and isinstance(uris[0], Uri):
             source, _path, query, fragment = uris[0]._split()
         else:
             paths: list[str] = []
             for _uri in uris:
                 src, path, query, fragment = (
-                    _uri._split() if isinstance(_uri, PureUri) else self._parse_uri(_uri)
+                    _uri._split() if isinstance(_uri, Uri) else self._parse_uri(_uri)
                 )
                 if src:
                     source = src
@@ -349,11 +349,11 @@ class PureUri(Pathname):
 
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
-        other = other if isinstance(other, PureUri) else PureUri(self, _ROOT, other)
+        other = other if isinstance(other, Uri) else Uri(self, _ROOT, other)
         return other == self or other in self.parents
 
     def relative_to(self, other: UriLike):
-        other = other if isinstance(other, PureUri) else PureUri(other)
+        other = other if isinstance(other, Uri) else Uri(other)
         if (self.source and other.source) and other.source != self.source:
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
         try:
@@ -385,7 +385,7 @@ class PureUri(Pathname):
         return posix
 
 
-class Uri(PureUri, Path):
+class UriPath(Uri, Path):
     __slots__ = ("_backend",)
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
@@ -424,17 +424,17 @@ class Uri(PureUri, Path):
         schemesmap: dict[str, type["Self"]] = None,
         findclass=False,
         **kwargs,
-    ) -> "Uri":
-        if cls is Uri or findclass:
-            uri = PureUri(*args, **kwargs)
-            cls: type[Uri] = uri.source.get_scheme_cls(schemesmap)
-            if cls is Uri:
-                inst = PureUri.__new__(cls, *args, **kwargs)
+    ) -> "UriPath":
+        if cls is UriPath or findclass:
+            uri = Uri(*args, **kwargs)
+            cls: type[UriPath] = uri.source.get_scheme_cls(schemesmap)
+            if cls is UriPath:
+                inst = Uri.__new__(cls, *args, **kwargs)
             else:
                 inst = cls.__new__(cls, *args, **kwargs)
             inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
         else:
-            inst = PureUri.__new__(cls, *args, **kwargs)
+            inst = Uri.__new__(cls, *args, **kwargs)
         return inst
 
     def _initbackend(self):
@@ -468,14 +468,14 @@ class Uri(PureUri, Path):
         if self.source and self.source.scheme:
             for uri in reversed(self._raw_uris):
                 if (
-                    isinstance(uri, Uri)
+                    isinstance(uri, UriPath)
                     and uri.source.scheme == self.source.scheme
                     and uri._backend
                 ):
                     self._backend = uri._backend
                     break
 
-    def __truediv__(self, key: str | PureUri | os.PathLike):
+    def __truediv__(self, key: str | Uri | os.PathLike):
         try:
             return type(self)(self, key, findclass=True)
         except (TypeError, NotImplementedError):
@@ -484,9 +484,9 @@ class Uri(PureUri, Path):
     def with_source(self, source: Source):
         cls = type(self)
         if not source:
-            inst = PureUri.__new__(Uri)
+            inst = Uri.__new__(UriPath)
         elif source.scheme not in cls._schemes():
-            inst = Uri.__new__(Uri, source.scheme + ":")
+            inst = UriPath.__new__(UriPath, source.scheme + ":")
         else:
             inst = cls.__new__(cls, backend=self._backend)
         inst._init(source, self.path, self.query, self.fragment)
@@ -505,4 +505,4 @@ class Uri(PureUri, Path):
             yield self._make_child_relpath(path)
 
 
-_ROOT = PureUri("/")
+_ROOT = Uri("/")

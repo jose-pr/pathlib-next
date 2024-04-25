@@ -1,10 +1,10 @@
 from ...fspath import FSPath as _SystemPath
 from ...path import FsPathLike
 import os as _os
-from .. import Uri, Source
+from .. import UriPath, Source
 
 
-class FileUri(Uri):
+class FileUri(UriPath):
     __SCHEMES = ("file",)
     __slots__ = ("_filepath",)
 

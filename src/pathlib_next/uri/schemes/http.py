@@ -1,5 +1,5 @@
 from ...utils.stat import FileStat
-from .. import Uri
+from .. import UriPath
 from ... import utils as _utils
 import io as _io
 import requests as _req
@@ -30,7 +30,7 @@ class HttpBackend(_ty.NamedTuple):
         )
 
 
-class HttpPath(Uri):
+class HttpPath(UriPath):
     __SCHEMES = ("http", "https")
     __slots__ = ("_isdir", "_session", "_requests_args")
     _isdir: bool

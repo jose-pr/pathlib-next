@@ -8,7 +8,7 @@ from .. import utils as _utils
 _IPAddress = _ip.IPv4Address | _ip.IPv6Address
 
 if _ty.TYPE_CHECKING:
-    from . import Uri
+    from . import UriPath
 
 
 class Source(_ty.NamedTuple):
@@ -34,14 +34,14 @@ class Source(_ty.NamedTuple):
         parts = parts + ["", ""]
         return parts[0], parts[1]
 
-    def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["Uri"]] = None):
-        from . import Uri
+    def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["UriPath"]] = None):
+        from . import UriPath
         if self.scheme:
             if schemesmap is None:
-                schemesmap = Uri._schemesmap()
+                schemesmap = UriPath._schemesmap()
             _cls = schemesmap.get(self.scheme, None)
-            return _cls if _cls else Uri
-        return Uri
+            return _cls if _cls else UriPath
+        return UriPath
 
     def is_local(self):
         host = self.host

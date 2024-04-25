@@ -1,5 +1,5 @@
 import typing as _ty
-from .. import Uri, Source
+from .. import UriPath, Source
 from ... import utils as _utils
 import threading as _thread
 import paramiko as _paramiko
@@ -54,7 +54,7 @@ def _create_sftpclient(backend: BaseSftpBackend, source: Source, thread_id: int)
 _CACHED_CLIENTS = _utils.LRU(_create_sftpclient, maxsize=128)
 
 
-class SftpPath(Uri):
+class SftpPath(UriPath):
 
     __SCHEMES = ("sftp",)
     __slots__ = ()
