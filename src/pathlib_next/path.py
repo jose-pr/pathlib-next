@@ -187,6 +187,13 @@ class Path(Pathname):
 
     __slots__ = ()
 
+    def __new__(cls, *args, **kwargs):
+        if cls is Path:
+            from .fspath import LocalPath
+
+            cls = LocalPath
+        return Pathname.__new__(cls)
+
     @_utils.notimplemented
     def stat(self, *, follow_symlinks=True) -> FileStatLike: ...
 

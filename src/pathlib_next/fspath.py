@@ -32,6 +32,9 @@ class _BaseFSPathname(_path.PurePath, _proto.Pathname):
     @property
     def segments(self):
         return self.parts
+    
+    def with_segments(self, *args: str | _proto.FsPathLike):
+        return type(self)(*args)
 
 
 class PosixPathname(_path.PurePosixPath, _BaseFSPathname):
@@ -42,7 +45,7 @@ class WindowsPathname(_path.PureWindowsPath, _BaseFSPathname):
     __slots__ = ()
 
 
-class FSPath(
+class LocalPath(
     _path.WindowsPath if _os.name == "nt" else _path.PosixPath,
     _proto.Path,
     _BaseFSPathname,

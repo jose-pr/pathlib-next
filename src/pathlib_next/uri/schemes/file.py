@@ -1,4 +1,4 @@
-from ...fspath import FSPath as _SystemPath
+from ...fspath import LocalPath as _Local
 from ...path import FsPathLike
 import os as _os
 from .. import UriPath, Source
@@ -11,15 +11,7 @@ class FileUri(UriPath):
     @property
     def filepath(self):
         if self._filepath is None:
-            if not self.is_local():
-                if _os.name != "net":
-                    raise NotImplementedError(
-                        "Remote Source only supported in local paths in Windows"
-                    )
-                path = self.path if self.path.startswith("/") else f"/{self.path}"
-                self._filepath = _SystemPath(f"//{self.source.host}{path}")
-            else:
-                self._filepath = _SystemPath(self.path)
+            self._filepath = _Local(self.__fspath__())
         return self._filepath
 
     def _init(
@@ -36,9 +28,6 @@ class FileUri(UriPath):
             if root and root[-1] == ":":
                 path = path.removeprefix("/")
         super()._init(source, path, query, fragment, **kwargs)
-
-    def __fspath__(self):
-        return self.filepath.__fspath__()
 
     def _listdir(self):
         yield from _os.listdir(self.filepath)

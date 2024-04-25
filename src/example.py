@@ -1,11 +1,14 @@
 from pathlib_next.uri import UriPath, Query
 from pathlib_next.uri.schemes import *
 from pathlib_next.utils.sync import PathSyncer
-from pathlib_next.utils import glob
+from pathlib_next import glob, Path
 
+local = Path('./_ssh')
+print(list(local.iterdir()))
 query = Query({'test':'://$#!1', 'test2&': [1,2]})
 q2 =  Query(str(query)).to_dict()
 dest = UriPath('file:./_ssh')
+UriPath('file://test.com/path').is_local()
 dest = UriPath(dest)
 test_ = UriPath('file:') / 'test'
 empty = UriPath()

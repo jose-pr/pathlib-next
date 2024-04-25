@@ -213,14 +213,13 @@ class Uri(Pathname):
 
     def __fspath__(self):
         if (self.source.scheme or "file") == "file":
-            if not self.source.host:
+            if not self.source.host or self.is_local():
                 return self.path
+            elif os.name == "nt":
+                return  f"//{self.source.host}/{self.path.removeprefix('/')}"
             else:
-                return (
-                    f"//{self.source.host}/{self.path.removeprefix('/')}"
-                    if os.name == "nt"
-                    else self.as_posix()
-                )
+                raise NotImplementedError(f"OS Support for not local fspath")
+
         raise NotImplementedError(f"fspath for {self.source.scheme}")
 
     def __repr__(self):
