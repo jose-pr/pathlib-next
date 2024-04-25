@@ -267,22 +267,6 @@ class Uri(Pathname):
             self._posixpath = PosixPathname(self.path)
         return self._posixpath
 
-    @property
-    def name(self):
-        return self.posixpath.name
-
-    @property
-    def suffix(self):
-        return self.posixpath.suffix
-
-    @property
-    def suffixes(self):
-        return self.posixpath.suffixes
-
-    @property
-    def stem(self):
-        return self.posixpath.stem
-
     def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
         cls = type(self)
         inst = cls.__new__(cls)
@@ -293,6 +277,11 @@ class Uri(Pathname):
 
     def with_source(self, source: Source):
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
+
+    def with_segments(self, *segments: str):
+        if not segments:
+            return self.with_path("")
+        return self.with_path("/".join(segments))
 
     def with_path(self, path: str | Pathname):
         return self._from_parsed_parts(
@@ -309,22 +298,6 @@ class Uri(Pathname):
 
     def with_fragment(self, fragment: str):
         return self._from_parsed_parts(self.source, self.path, self.query, fragment)
-
-    def with_name(self, name: str):
-        return self._from_parsed_parts(
-            self.source,
-            self.posixpath.with_name(name).as_posix(),
-            self.query,
-            self.fragment,
-        )
-
-    def with_suffix(self, suffix: str):
-        return self._from_parsed_parts(
-            self.source,
-            self.posixpath.with_suffix(suffix).as_posix(),
-            self.query,
-            self.fragment,
-        )
 
     @property
     def segments(self):

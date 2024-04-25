@@ -48,14 +48,48 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def as_uri(self) -> str: ...
 
     @property
-    @_abc.abstractmethod
-    def name(self) -> str: ...
+    def name(self) -> str:
+        """The final path component, if any."""
+        segments = self.segments
+        return "" if not segments else segments[-1]
+
     @property
-    @_abc.abstractmethod
-    def suffix(self) -> str: ...
+    def suffix(self) -> str:
+        """
+        The final component's last suffix, if any.
+
+        This includes the leading period. For example: '.txt'
+        """
+        name = self.name
+        i = name.rfind(".")
+        if 0 < i < len(name) - 1:
+            return name[i:]
+        else:
+            return ""
+
     @property
-    @_abc.abstractmethod
-    def stem(self) -> str: ...
+    def suffixes(self):
+        """
+        A list of the final component's suffixes, if any.
+
+        These include the leading periods. For example: ['.tar', '.gz']
+        """
+        name = self.name
+        if name.endswith("."):
+            return []
+        name = name.lstrip(".")
+        return ["." + suffix for suffix in name.split(".")[1:]]
+
+    @property
+    def stem(self):
+        """The final path component, minus its last suffix."""
+        name = self.name
+        i = name.rfind(".")
+        if 0 < i < len(name) - 1:
+            return name[:i]
+        else:
+            return name
+
     @property
     @_abc.abstractmethod
     def segments(self) -> _ty.Iterable[str]: ...
@@ -65,14 +99,30 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def parts(self) -> _P: ...
 
     @_abc.abstractmethod
-    def with_name(self, name: str) -> _ty.Self: ...
+    def with_segments(self, *segments: str) -> _ty.Self: ...
+
+    def with_name(self, name: str) -> _ty.Self:
+        if not self.name:
+            raise ValueError("%r has an empty name" % (self,))
+        segments = self.segments[:-1] + [name]
+        return self.with_segments(*segments)
 
     def with_stem(self, stem: str) -> _ty.Self:
         """Return a new path with the stem changed."""
         return self.with_name(stem + self.suffix)
 
-    @_abc.abstractmethod
-    def with_suffix(self, suffix: str) -> _ty.Self: ...
+    def with_suffix(self, suffix: str) -> _ty.Self:
+        name = self.name
+        if suffix and not suffix.startswith(".") or suffix == ".":
+            raise ValueError("Invalid suffix %r" % (suffix))
+        if not name:
+            raise ValueError("%r has an empty name" % (self,))
+        old_suffix = self.suffix
+        if not old_suffix:
+            name = name + suffix
+        else:
+            name = name[: -len(old_suffix)] + suffix
+        return self.with_name(name)
 
     @_abc.abstractmethod
     def relative_to(self, other: _ty.Self | str) -> _ty.Self:
