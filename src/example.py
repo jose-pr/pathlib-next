@@ -11,7 +11,6 @@ test_ = UriPath('file:') / 'test'
 empty = UriPath()
 uri = dest.as_uri()
 
-print(list(dest.iterdir()))
 test1 = dest / 'test' / 'test2/'
 print(test1)
 

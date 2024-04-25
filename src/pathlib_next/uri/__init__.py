@@ -20,7 +20,6 @@ _NOSOURCE = Source(None, None, None, None)
 _U = _ty.TypeVar("_U", bound="Uri")
 
 
-
 class _UriPathParents(_ty.Sequence[_U]):
     """This object provides sequence-like access to the logical ancestors
     of a path.  Don't try to construct it yourself."""
@@ -29,14 +28,13 @@ class _UriPathParents(_ty.Sequence[_U]):
 
     def __init__(self, path: _U):
         self._path = path
-        segments =  path.parts
-        while segments and segments[-1] == '':
+        segments = path.parts
+        while segments and segments[-1] == "":
             segments = segments[:-1]
         self._segments = segments
 
-
     def __len__(self):
-        return  len(self._segments)
+        return len(self._segments)
 
     @_ty.overload
     def __getitem__(self, idx: slice) -> tuple[_U]: ...
@@ -50,7 +48,7 @@ class _UriPathParents(_ty.Sequence[_U]):
             raise IndexError(idx)
         if idx < 0:
             idx += len(self)
-        return self._path.with_path('/'.join(self._segments[:-idx - 1]))
+        return self._path.with_path("/".join(self._segments[: -idx - 1]))
 
     def __repr__(self):
         return "<{}.parents>".format(type(self._path).__name__)
@@ -124,7 +122,7 @@ class Uri(Pathname):
             Query(parsed.getquery() or ""),
             parsed.getfragment() or "",
         )
-    
+
     def _split(self):
         return (self.source, self.path, self.query, self.fragment)
 
@@ -284,10 +282,12 @@ class Uri(Pathname):
     def stem(self):
         return self.posixpath.stem
 
-    def _make_child_relpath(self, name: str) -> _ty.Self:
+    def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
         cls = type(self)
         inst = cls.__new__(cls)
-        inst._init(self.source, f"{self.path}/{name}" if self.path else name, "", "")
+        inst._init(
+            self.source, f"{self.path}/{name}" if self.path else name, "", "", **kwargs
+        )
         return inst
 
     def with_source(self, source: Source):
@@ -329,15 +329,15 @@ class Uri(Pathname):
     def parts(self):
         if not self.path:
             return ()
-        return self.path.split('/')
+        return self.path.split("/")
 
     @property
     def parent(self):
         """The logical parent of the path."""
         segments = self.parts
-        if not segments or len(segments) == 2 and segments[1] == '':
+        if not segments or len(segments) == 2 and segments[1] == "":
             return self
-        return self.with_path('/'.join(segments[:-1]))
+        return self.with_path("/".join(segments[:-1]))
 
     @property
     def parents(self):
@@ -367,7 +367,7 @@ class Uri(Pathname):
     def is_local(self):
         return self.source.is_local()
 
-    def __eq__(self, other:Pathname|str):
+    def __eq__(self, other: Pathname | str):
         uri = other.as_uri() if isinstance(other, Pathname) else other
         return self.as_uri() == uri
 
@@ -495,9 +495,8 @@ class UriPath(Uri, Path):
     @_utils.notimplemented
     def _listdir(self) -> "_ty.Iterator[str]": ...
 
-    def _make_child_relpath(self, name: str) -> _ty.Self:
-        inst = super()._make_child_relpath(name)
-        inst._backend = self._backend
+    def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
+        inst = super()._make_child_relpath(name, backend=self.backend, **kwargs)
         return inst
 
     def iterdir(self) -> "_ty.Iterator[Self]":
