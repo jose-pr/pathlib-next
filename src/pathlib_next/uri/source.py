@@ -26,6 +26,14 @@ class Source(_ty.NamedTuple):
         return _uritools.uricompose(
             scheme=self.scheme, userinfo=self.userinfo, host=self.host, port=self.port
         )
+    
+    def keys(self):
+        return self._asdict().keys()
+    
+    def __getitem__(self, key:int|str):
+        if not isinstance(key, str):
+            key = self._fields[key]
+        return getattr(self, key)   
 
     def parsed_userinfo(self):
         parts = []
