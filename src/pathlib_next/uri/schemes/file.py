@@ -1,5 +1,5 @@
-from ...path import Path as _Path
-from pathlib import PurePath as _SystemPath
+from ...path import FSPath as _Path
+from ...protocols import FsPathLike
 import os as _os
 from .. import Uri, Source
 
@@ -61,7 +61,13 @@ class FileUri(Uri):
     def rmdir(self):
         return self.filepath.rmdir()
 
-    def rename(self, target):
-        if not isinstance(target, (_SystemPath, str)):
+    def rename(self, target: FsPathLike | str):
+        try:
+            _target = _os.fspath(target)
+        except (TypeError, NotImplementedError):
+            _target = NotImplemented
+
+        if _target is NotImplemented:
             raise NotImplementedError("rename", target)
-        return self.filepath.rename(target)
+
+        return self.filepath.rename(_target)

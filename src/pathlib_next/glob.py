@@ -128,7 +128,7 @@ def _glob_recursive(
 # If dironly is false, yields all file names inside a directory.
 # If dironly is true, yields only directory names.
 def _iterdir(path: _Globable, dironly: bool):
-    for entry in path:
+    for entry in path.iterdir():
         try:
             if not dironly or entry.is_dir():
                 yield entry

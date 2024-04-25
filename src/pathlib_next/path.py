@@ -5,15 +5,17 @@ import typing as _ty
 from . import protocols as _proto
 import re as _re
 
+
 @_func.cache
-def _is_case_sensitive(flavour:_os.path) -> bool:
+def _is_case_sensitive(flavour: _os.path) -> bool:
     return flavour.normcase("Aa") == "Aa"
 
-class PurePath(_path.PurePath, _proto.PurePathProtocol):
+
+class _BaseFSPath(_path.PurePath, _proto.PurePathProtocol):
     __slots__ = ()
 
     @property
-    def _parser(self) -> _os.path :
+    def _parser(self) -> _os.path:
         try:
             return self.parser
         except AttributeError:
@@ -27,25 +29,25 @@ class PurePath(_path.PurePath, _proto.PurePathProtocol):
     def _is_case_sensitive(self) -> bool:
         return _is_case_sensitive(self._parser)
 
-class PurePosixPath(_path.PurePosixPath, PurePath):
+
+class PosixPath(_path.PurePosixPath, _BaseFSPath):
     __slots__ = ()
 
 
-class PureWindowsPath(_path.PureWindowsPath, PurePath):
+class WindowsPath(_path.PureWindowsPath, _BaseFSPath):
     __slots__ = ()
 
 
-class Path(_path.Path, _proto.PathProtocol, PurePath):
+class FSPath(
+    _path.WindowsPath if _os.name == "nt" else _path.PosixPath,
+    _proto.PathProtocol,
+    _BaseFSPath,
+):
     __slots__ = ()
-
-    def __new__(cls, *args, **kwargs):
-        if cls is Path:
-            cls = WindowsPath if _os.name == "nt" else PosixPath
-        return object.__new__(cls)
 
     def glob(
         self,
-        pattern: str | _proto.FsPath,
+        pattern: str | _proto.FsPathLike,
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
@@ -92,35 +94,3 @@ class Path(_path.Path, _proto.PathProtocol, PurePath):
             recursive=True,
             dironly=dironly,
         )
-
-
-class PosixPath(Path, PurePosixPath):
-    """Path subclass for non-Windows systems.
-
-    On a POSIX system, instantiating a Path should return this object.
-    """
-
-    __slots__ = ()
-
-    if _os.name == "nt":
-
-        def __new__(cls, *args, **kwargs):
-            raise NotImplementedError(
-                f"cannot instantiate {cls.__name__!r} on your system"
-            )
-
-
-class WindowsPath(Path, PureWindowsPath):
-    """Path subclass for Windows systems.
-
-    On a Windows system, instantiating a Path should return this object.
-    """
-
-    __slots__ = ()
-
-    if _os.name != "nt":
-
-        def __new__(cls, *args, **kwargs):
-            raise NotImplementedError(
-                f"cannot instantiate {cls.__name__!r} on your system"
-            )

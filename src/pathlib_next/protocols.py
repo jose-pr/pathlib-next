@@ -35,20 +35,20 @@ class FileStatProtocol(_ty.Protocol):
     def st_mtime(self) -> int: ...
 
 
-class FsPath(_ty.Protocol):
+class FsPathLike(_ty.Protocol):
     __slots__ = ()
 
     @_utils.notimplemented
     def __fspath__(self) -> str: ...
 
 
-_os.PathLike.register(FsPath)
+_os.PathLike.register(FsPathLike)
 
 
-FsPathLike = str | FsPath
+_FsPathLike = str | FsPathLike
 
 
-class PurePathProtocol(FsPath, _ty.Generic[_P]):
+class PurePathProtocol(FsPathLike, _ty.Generic[_P]):
     """Base class for manipulating paths without I/O."""
 
     __slots__ = ()
