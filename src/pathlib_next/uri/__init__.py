@@ -28,7 +28,7 @@ class _UriPathParents(_ty.Sequence[_U]):
 
     def __init__(self, path: _U):
         self._path = path
-        segments = path.parts
+        segments = path.segments
         while segments and segments[-1] == "":
             segments = segments[:-1]
         self._segments = segments
@@ -123,7 +123,8 @@ class Uri(Pathname):
             parsed.getfragment() or "",
         )
 
-    def _split(self):
+    @property
+    def parts(self):
         return (self.source, self.path, self.query, self.fragment)
 
     def _load_parts(self):
@@ -135,12 +136,12 @@ class Uri(Pathname):
         if not uris:
             pass
         elif len(uris) == 1 and isinstance(uris[0], Uri):
-            source, _path, query, fragment = uris[0]._split()
+            source, _path, query, fragment = uris[0].parts
         else:
             paths: list[str] = []
             for _uri in uris:
                 src, path, query, fragment = (
-                    _uri._split() if isinstance(_uri, Uri) else self._parse_uri(_uri)
+                    _uri.parts if isinstance(_uri, Uri) else self._parse_uri(_uri)
                 )
                 if src:
                     source = src
@@ -326,7 +327,7 @@ class Uri(Pathname):
         )
 
     @property
-    def parts(self):
+    def segments(self):
         if not self.path:
             return ()
         return self.path.split("/")
@@ -334,7 +335,7 @@ class Uri(Pathname):
     @property
     def parent(self):
         """The logical parent of the path."""
-        segments = self.parts
+        segments = self.segments
         if not segments or len(segments) == 2 and segments[1] == "":
             return self
         return self.with_path("/".join(segments[:-1]))
@@ -461,7 +462,7 @@ class UriPath(Uri, Path):
         return self._backend
 
     def with_backend(self, backend):
-        return self._from_parsed_parts(*self._split(), backend=backend)
+        return self._from_parsed_parts(*self.parts, backend=backend)
 
     def _load_parts(self):
         super()._load_parts()

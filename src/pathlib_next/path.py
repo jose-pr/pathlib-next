@@ -19,6 +19,7 @@ from .utils import glob as _glob
 from .utils.stat import FileStatLike
 
 P = _ty.TypeVar("P", bound="Path")
+_P = _ty.TypeVar("_P")
 
 
 class FsPathLike(_ty.Protocol):
@@ -34,7 +35,7 @@ _os.PathLike.register(FsPathLike)
 _FsPathLike = str | FsPathLike
 
 
-class Pathname(FsPathLike):
+class Pathname(FsPathLike, _ty.Generic[_P]):
     """Base class for manipulating paths without I/O."""
 
     __slots__ = ()
@@ -57,7 +58,11 @@ class Pathname(FsPathLike):
     def stem(self) -> str: ...
     @property
     @_abc.abstractmethod
-    def parts(self) -> _ty.Iterable[str]: ...
+    def segments(self) -> _ty.Iterable[str]: ...
+
+    @property
+    @_abc.abstractmethod
+    def parts(self) -> _P: ...
 
     @_abc.abstractmethod
     def with_name(self, name: str) -> _ty.Self: ...

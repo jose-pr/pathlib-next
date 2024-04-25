@@ -54,7 +54,7 @@ def glob(
     name_is_pattern = WILCARD_PATTERN.match(path.name) != None
     wildcard_in_path = name_is_pattern
     parent = next(iter(path.parents), None)
-    for segment in path.parts:
+    for segment in path.segments:
         if WILCARD_PATTERN.match(segment) != None:
             wildcard_in_path = True
             break

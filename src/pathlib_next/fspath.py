@@ -29,6 +29,10 @@ class _BaseFSPathname(_path.PurePath, _proto.Pathname):
     def _is_case_sensitive(self) -> bool:
         return _is_case_sensitive(self._parser)
 
+    @property
+    def segments(self):
+        return self.parts
+
 
 class PosixPathname(_path.PurePosixPath, _BaseFSPathname):
     __slots__ = ()
