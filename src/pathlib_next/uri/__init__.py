@@ -216,7 +216,7 @@ class Uri(Pathname):
             if not self.source.host or self.is_local():
                 return self.path
             elif os.name == "nt":
-                return  f"//{self.source.host}/{self.path.removeprefix('/')}"
+                return f"//{self.source.host}/{self.path.removeprefix('/')}"
             else:
                 raise NotImplementedError(f"OS Support for not local fspath")
 
@@ -438,7 +438,7 @@ class UriPath(Uri, Path):
 
     def _load_parts(self):
         super()._load_parts()
-        if self.source and self.source.scheme:
+        if self.source and self.source.scheme and self._backend is None:
             for uri in reversed(self._raw_uris):
                 if (
                     isinstance(uri, UriPath)
