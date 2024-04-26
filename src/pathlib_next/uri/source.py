@@ -11,6 +11,7 @@ if _ty.TYPE_CHECKING:
     from . import UriPath
 
 
+
 class Source(_ty.NamedTuple):
     scheme: str
     userinfo: str
@@ -18,9 +19,7 @@ class Source(_ty.NamedTuple):
     port: int
 
     def __bool__(self):
-        if not self.scheme:
-            return False
-        return True
+        return self != _NOSOURCE
 
     def __str__(self) -> str:
         return _uritools.uricompose(

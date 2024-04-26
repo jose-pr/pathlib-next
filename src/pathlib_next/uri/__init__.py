@@ -109,7 +109,7 @@ class Uri(Pathname):
                 src, path, query, fragment = (
                     _uri.parts if isinstance(_uri, Uri) else self._parse_uri(_uri)
                 )
-                if src:
+                if src != _NOSOURCE:
                     source = src
                 paths.append(path)
 
