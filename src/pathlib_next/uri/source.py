@@ -18,7 +18,11 @@ class Source(_ty.NamedTuple):
     port: int | None
 
     def __bool__(self):
-        return self != _NOSOURCE
+        for val in self:
+            if val == '' or val is None:
+                continue
+            return True
+        return False
 
     def __str__(self) -> str:
         return _uritools.uricompose(

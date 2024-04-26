@@ -1,5 +1,6 @@
 import pytest
 import src.pathlib_next as pathlib_next
+from src.pathlib_next.uri import Uri
 
 
 def test_source():
@@ -47,11 +48,18 @@ def test_path():
     assert uri.path == '/root/subroot/filename.ext'
 
 def test_encoded_path():
-    uri = pathlib_next.Uri("http://google.com/root/subroot/%3Fquery/%23fragment/%2Fencoded%2Ffilename.ext")
+    uri = pathlib_next.Uri("http://goog%2Fe.com/root/subroot/%3Fquery/%23fragment/%2Fencoded%2Ffilename.ext")
     assert uri.source.scheme == "http"
-    assert uri.source.host == "google.com"
+    assert uri.source.host == "goog/e.com"
     assert uri.source.port == None
     assert uri.source.parsed_userinfo() == ('','')
     assert uri.path == '/root/subroot/?query/#fragment//encoded/filename.ext'
+
+
+def test_child():
+    sftp_root = Uri('sftp://root@sftpexample/')
+    authkeys = sftp_root / 'root/.ssh/authorized_keys'
+    uri = authkeys.as_uri()
+    assert uri == 'sftp://root@sftpexample/root/.ssh/authorized_keys'
 
     

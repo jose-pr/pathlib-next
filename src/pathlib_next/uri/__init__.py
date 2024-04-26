@@ -109,7 +109,7 @@ class Uri(Pathname):
                 src, path, query, fragment = (
                     _uri.parts if isinstance(_uri, Uri) else self._parse_uri(_uri)
                 )
-                if src != _NOSOURCE:
+                if bool(src):
                     source = src
                 paths.append(path)
 
@@ -285,7 +285,7 @@ class Uri(Pathname):
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
         other = other if isinstance(other, Uri) else Uri(self, _ROOT, other)
-        if not ((other.source == self.source) or not (self.source and other.source)):
+        if not ((other.source == self.source) or not (bool(self.source) and bool(other.source))):
             return False
         _other = other.normalized_path
         _self = self.normalized_path
