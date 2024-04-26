@@ -13,10 +13,10 @@ if _ty.TYPE_CHECKING:
 
 
 class Source(_ty.NamedTuple):
-    scheme: str
-    userinfo: str
-    host: str | _IPAddress
-    port: int
+    scheme: str | None
+    userinfo: str | None
+    host: str | _IPAddress | None
+    port: int | None
 
     def __bool__(self):
         return self != _NOSOURCE
