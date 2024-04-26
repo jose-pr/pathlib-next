@@ -13,7 +13,17 @@ src = Source(scheme='scheme',userinfo='user', host='123.com', port=0)
 test = {**src}
 test2 = [*src]
 dest = UriPath('file:./_ssh')
-UriPath('file://test.com/path').is_local()
+
+#
+# Norm test
+#
+with_dots = UriPath('a/b/c/d/../../test/.')
+print(with_dots.normalized_path)
+
+source_host = UriPath('file://test.com/path1/path2/path3/path4')
+source_host.is_local()
+
+rel_to  = source_host.relative_to('/path1/path2')
 dest = UriPath(dest)
 test_ = UriPath('file:') / 'test'
 empty = UriPath()

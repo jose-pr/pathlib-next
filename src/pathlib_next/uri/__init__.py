@@ -1,7 +1,7 @@
 import os
 import typing as _ty
 import uritools
-from ..fspath import PosixPathname
+import posixpath as _posix
 
 
 if _ty.TYPE_CHECKING:
@@ -60,11 +60,11 @@ class Uri(Pathname):
         "_raw_uris",
         "_source",
         "_path",
-        "_posixpath",
         "_query",
         "_fragment",
         "_uri",
         "_initiated",
+        "_normalized_path",
     )
 
     def __new__(cls, *uris, **options):
@@ -260,12 +260,6 @@ class Uri(Pathname):
             self._load_parts()
         return self._fragment
 
-    @property
-    def posixpath(self) -> PosixPathname:
-        if self._posixpath is None:
-            self._posixpath = PosixPathname(self.path)
-        return self._posixpath
-
     def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
         cls = type(self)
         inst = cls.__new__(cls)
@@ -316,25 +310,44 @@ class Uri(Pathname):
     def parents(self):
         return _UriPathParents(self)
 
+    @property
+    def normalized_path(self):
+        if self._normalized_path is None:
+            self._normalized_path = _posix.normpath(self.path)
+        return self._normalized_path
+
     def is_absolute(self):
         """True if the path is absolute."""
-        return bool(self.source) and self.posixpath.is_absolute()
+        return bool(self.source) and self.path.startswith("/")
 
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
         other = other if isinstance(other, Uri) else Uri(self, _ROOT, other)
-        return other == self or other in self.parents
+        if not ((other.source == self.source) or not (self.source and other.source)):
+            return False
+        _other = other.normalized_path
+        _self = self.normalized_path
+        return _self.startswith(_other)
 
-    def relative_to(self, other: UriLike):
+    def relative_to(self, other: UriLike, *, walk_up=False):
         other = other if isinstance(other, Uri) else Uri(other)
-        if (self.source and other.source) and other.source != self.source:
+        if not self.is_relative_to(other):
             raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
-        try:
-            relpath = self.posixpath.relative_to(other.path)
-        except ValueError:
-            relpath = self.posixpath
+
+        for step, path in enumerate([other] + list(other.parents)):
+            if self.is_relative_to(path):
+                break
+            elif not walk_up:
+                raise ValueError(
+                    f"{str(self)!r} is not in the subpath of {str(other)!r}"
+                )
+            elif path.name == "..":
+                raise ValueError(f"'..' segment in {str(other)!r} cannot be walked")
+        else:
+            raise ValueError(f"{str(self)!r} and {str(other)!r} have different anchors")
+        parts = [".."] * step + self.segments[len(path.segments) :]
         return self._from_parsed_parts(
-            _NOSOURCE, relpath.as_posix(), self.query, self.fragment
+            _NOSOURCE, "/".join(parts), self.query, self.fragment
         )
 
     def is_local(self):
