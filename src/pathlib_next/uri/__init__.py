@@ -20,40 +20,6 @@ _NOSOURCE = Source(None, None, None, None)
 _U = _ty.TypeVar("_U", bound="Uri")
 
 
-class _UriPathParents(_ty.Sequence[_U]):
-    """This object provides sequence-like access to the logical ancestors
-    of a path.  Don't try to construct it yourself."""
-
-    __slots__ = ("_path", "_segments")
-
-    def __init__(self, path: _U):
-        self._path = path
-        segments = path.segments
-        while segments and segments[-1] == "":
-            segments = segments[:-1]
-        self._segments = segments
-
-    def __len__(self):
-        return len(self._segments)
-
-    @_ty.overload
-    def __getitem__(self, idx: slice) -> tuple[_U]: ...
-    @_ty.overload
-    def __getitem__(self, idx: int) -> _U: ...
-    def __getitem__(self, idx: int | slice) -> tuple[_U] | _U:
-        if isinstance(idx, slice):
-            return tuple(self[i] for i in range(*idx.indices(len(self))))
-
-        if idx >= len(self) or idx < -len(self):
-            raise IndexError(idx)
-        if idx < 0:
-            idx += len(self)
-        return self._path.with_path("/".join(self._segments[: -idx - 1]))
-
-    def __repr__(self):
-        return "<{}.parents>".format(type(self._path).__name__)
-
-
 class Uri(Pathname):
 
     __slots__ = (
@@ -305,10 +271,6 @@ class Uri(Pathname):
         if not segments or len(segments) == 2 and segments[1] == "":
             return self
         return self.with_path("/".join(segments[:-1]))
-
-    @property
-    def parents(self):
-        return _UriPathParents(self)
 
     @property
     def normalized_path(self):

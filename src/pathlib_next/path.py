@@ -19,6 +19,8 @@ from .utils import glob as _glob
 from .utils.stat import FileStatLike
 
 P = _ty.TypeVar("P", bound="Path")
+PN = _ty.TypeVar("PN", bound="Pathname")
+
 _P = _ty.TypeVar("_P")
 
 
@@ -34,6 +36,38 @@ _os.PathLike.register(FsPathLike)
 
 _FsPathLike = str | FsPathLike
 
+class _PathnameParents(_ty.Sequence[PN]):
+    """This object provides sequence-like access to the logical ancestors
+    of a path.  Don't try to construct it yourself."""
+
+    __slots__ = ("_path", "_segments")
+
+    def __init__(self, path: PN):
+        self._path = path
+        segments = path.segments
+        while segments and not segments[-1]:
+            segments = segments[:-1]
+        self._segments = segments
+
+    def __len__(self):
+        return len(self._segments)
+
+    @_ty.overload
+    def __getitem__(self, idx: slice) -> tuple[PN]: ...
+    @_ty.overload
+    def __getitem__(self, idx: int) -> PN: ...
+    def __getitem__(self, idx: int | slice) -> tuple[PN] | PN:
+        if isinstance(idx, slice):
+            return tuple(self[i] for i in range(*idx.indices(len(self))))
+
+        if idx >= len(self) or idx < -len(self):
+            raise IndexError(idx)
+        if idx < 0:
+            idx += len(self)
+        return self._path.with_segments(*self._segments[: -idx - 1])
+
+    def __repr__(self):
+        return "<{}.parents>".format(type(self._path).__name__)
 
 class Pathname(FsPathLike, _ty.Generic[_P]):
     """Base class for manipulating paths without I/O."""
@@ -150,11 +184,9 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         """The logical parent of the path."""
 
     @property
-    def parents(self) -> _ty.Iterable[_ty.Self]:
-        parent = self.parent
-        if parent != self:
-            yield parent
-            yield from parent.parents
+    def parents(self)->_ty.Sequence[_ty.Self]:
+        return _PathnameParents(self)
+
 
     @_utils.notimplemented
     def is_absolute(self) -> bool:
