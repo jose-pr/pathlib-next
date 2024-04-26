@@ -11,7 +11,6 @@ if _ty.TYPE_CHECKING:
     from . import UriPath
 
 
-
 class Source(_ty.NamedTuple):
     scheme: str | None
     userinfo: str | None
@@ -25,14 +24,21 @@ class Source(_ty.NamedTuple):
         return _uritools.uricompose(
             scheme=self.scheme, userinfo=self.userinfo, host=self.host, port=self.port
         )
-    
+
+    @classmethod
+    def from_str(cls, source: str, strict=True):
+        uri = _uritools.urisplit(source)
+        if strict and (uri.path or uri.fragment or uri.query):
+            raise ValueError(source)
+        return cls(uri.getscheme(), uri.getuserinfo(), uri.gethost(), uri.getport())
+
     def keys(self):
         return self._asdict().keys()
-    
-    def __getitem__(self, key:int|str):
+
+    def __getitem__(self, key: int | str):
         if not isinstance(key, str):
             key = self._fields[key]
-        return getattr(self, key)   
+        return getattr(self, key)
 
     def parsed_userinfo(self):
         parts = []
@@ -43,6 +49,7 @@ class Source(_ty.NamedTuple):
 
     def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["UriPath"]] = None):
         from . import UriPath
+
         if self.scheme:
             if schemesmap is None:
                 schemesmap = UriPath._schemesmap()
