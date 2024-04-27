@@ -2,6 +2,8 @@ import pytest
 import src.pathlib_next as pathlib_next
 from src.pathlib_next.uri import Uri
 
+import pathlib
+
 
 def test_source():
     uri = pathlib_next.Uri("http://user:pass@google.com:80")
@@ -62,4 +64,12 @@ def test_child():
     uri = authkeys.as_uri()
     assert uri == 'sftp://root@sftpexample/root/.ssh/authorized_keys'
 
+def test_truediv_pathlib():
+    sftp_root = Uri('sftp://root@sftpexample/')
+    authkeys = sftp_root / pathlib.PurePosixPath('root/.ssh/authorized_keys')
+    uri = authkeys.as_uri()
+    assert uri == 'sftp://root@sftpexample/root/.ssh/authorized_keys'
+    authkeys = sftp_root / pathlib.Path('root/.ssh/authorized_keys')
+    uri = authkeys.as_uri()
+    assert uri == 'file:/root/.ssh/authorized_keys'
     

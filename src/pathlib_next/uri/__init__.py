@@ -2,6 +2,7 @@ import os
 import typing as _ty
 import uritools
 import posixpath as _posix
+import pathlib as _pathlib
 
 
 if _ty.TYPE_CHECKING:
@@ -18,6 +19,10 @@ UriLike: _ty.TypeAlias = "str | Uri | os.PathLike"
 _NOSOURCE = Source(None, None, None, None)
 
 _U = _ty.TypeVar("_U", bound="Uri")
+
+
+def _uriencode(text: str, safe=""):
+    return uritools.uriencode(text, safe=safe).decode()
 
 
 class Uri(Pathname):
@@ -47,9 +52,17 @@ class Uri(Pathname):
         _uris: list[str | Uri] = []
         for uri in uris:
             if not uri:
-                continue
+                uri = ""
             if isinstance(uri, Uri):
                 _uris.append(uri)
+            elif isinstance(uri, (_pathlib.Path, Path)):
+                try:
+                    uri = uri.as_uri()
+                except:
+                    uri = f"file:{_uriencode(uri.as_posix(), safe='/')}"
+                _uris.append(uri)
+            elif isinstance(uri, (_pathlib.PurePath, Pathname)):
+                _uris.append(f"{_uriencode(uri.as_posix(), safe='/')}")
             elif hasattr(uri, "as_uri"):
                 path = uri.as_uri
                 if callable(path):
@@ -71,7 +84,7 @@ class Uri(Pathname):
                         "object where __fspath__ returns a str, "
                         f"not {type(path).__name__!r}"
                     )
-                _uris.append(f"file:{uritools.uriencode(path).decode()}")
+                _uris.append(f"{_uriencode(uri.as_posix(), safe='/')}")
         self._raw_uris = _uris
 
     @classmethod
@@ -285,7 +298,10 @@ class Uri(Pathname):
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
         other = other if isinstance(other, Uri) else Uri(self, _ROOT, other)
-        if not ((other.source == self.source) or not (bool(self.source) and bool(other.source))):
+        if not (
+            (other.source == self.source)
+            or not (bool(self.source) and bool(other.source))
+        ):
             return False
         _other = other.normalized_path
         _self = self.normalized_path
