@@ -416,26 +416,6 @@ class Path(Pathname):
             dironly=dironly,
         )
 
-    def rglob(
-        self,
-        pattern: str | _ty.Self,
-        *,
-        case_sensitive: bool = None,
-        include_hidden: bool = False,
-        dironly: bool = None,
-    ):
-        """Recursively yield all existing files (of any kind, including
-        directories) matching the given relative pattern, anywhere in
-        this subtree.
-        """
-        yield from self.glob(
-            pattern,
-            case_sensitive=case_sensitive,
-            include_hidden=include_hidden,
-            recursive=True,
-            dironly=dironly,
-        )
-
     def walk(
         self,
         top_down=True,

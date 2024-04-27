@@ -74,30 +74,9 @@ class LocalPath(
             )
         yield from _proto.Path.glob(
             self,
-            self,
             pattern,
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
-            dironly=dironly,
-        )
-
-    def rglob(
-        self,
-        pattern: str,
-        *,
-        case_sensitive: bool = None,
-        include_hidden: bool = False,
-        dironly: bool = False,
-    ):
-        """Recursively yield all existing files (of any kind, including
-        directories) matching the given relative pattern, anywhere in
-        this subtree.
-        """
-        yield from self.glob(
-            pattern,
-            case_sensitive=case_sensitive,
-            include_hidden=include_hidden,
-            recursive=True,
             dironly=dironly,
         )
