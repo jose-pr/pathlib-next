@@ -1,3 +1,10 @@
 from .file import FileUri
-from .http import HttpPath
-from .sftp import SftpPath
+
+try:
+    from .http import HttpPath
+except ImportError:
+    pass
+try:
+    from .sftp import SftpPath
+except ImportError:
+    pass
