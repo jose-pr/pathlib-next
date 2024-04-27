@@ -404,6 +404,13 @@ class UriPath(Uri, Path):
     def _initbackend(self):
         return None
 
+    def _from_parsed_parts(
+        self, source: Source, path: str, query: str, fragment: str, /, **kwargs
+    ):
+        if "backend" not in kwargs:
+            kwargs["backend"] = self.backend
+        return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+
     def _init(
         self,
         source: Source,
