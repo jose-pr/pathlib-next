@@ -108,7 +108,7 @@ class MemPath(Path):
 
     def _mkdir(self, mode: int):
         parent, name = self._parent_container()
-        if name in parent:
+        if not name or name in parent:
             raise FileExistsError(name)
         parent[name] = {}
 
