@@ -1,18 +1,17 @@
 import os
-import typing as _ty
-import uritools
-import posixpath as _posix
 import pathlib as _pathlib
+import posixpath as _posix
+import typing as _ty
 
+import uritools
 
 if _ty.TYPE_CHECKING:
     from typing import Self
 
 from .. import utils as _utils
+from ..path import Path, Pathname
 from .query import Query
 from .source import Source
-
-from ..path import Path, Pathname
 
 UriLike: _ty.TypeAlias = "str | Uri | os.PathLike"
 
