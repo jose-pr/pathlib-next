@@ -3,7 +3,7 @@ import posixpath as _posix
 from io import IOBase
 from urllib.parse import quote as _urlquote
 
-from .path import Path
+from .path import Path, Pathname
 from .utils.stat import FileStat, FileStatLike
 
 
@@ -26,10 +26,32 @@ class MemPath(Path):
 
     __slots__ = ("_backend", "_segments", "_normalized")
 
-    def __init__(self, *segments: str, backend: MemPathBackend = None, **kwargs):
-        self._segments = "/".join(segments).split("/")
+    def __init__(
+        self, *segments: str | Pathname | Path, backend: MemPathBackend = None, **kwargs
+    ):
+        _segments = []
+        _backend = None
+        for segment in segments:
+            if isinstance(segment, MemPath):
+                _segments.extend(segment.segments)
+                _backend = segment.backend
+            elif isinstance(segment, Path):
+                raise NotImplementedError()
+            elif isinstance(segment, Pathname):
+                _segments.extend(segment.segments)
+            else:
+                _segments.append(segment)
+        self._segments = "/".join(_segments).split("/")
+        if _backend and backend is None:
+            backend = _backend
         self._backend = backend if backend is not None else MemPathBackend()
         self._normalized = None
+
+    def __repr__(self):
+        return "{}({!r})".format(type(self).__name__, self.as_posix())
+
+    def __str__(self) -> str:
+        return self.as_posix()
 
     @property
     def backend(self):
@@ -39,7 +61,7 @@ class MemPath(Path):
     def normalized(self):
         if self._normalized is None:
             self._normalized = (
-                _posix.normpath("/".join(self.segments))
+                _posix.normpath(self.as_posix())
                 .removeprefix(".")
                 .removeprefix("/")
                 .split("/")
@@ -68,8 +90,10 @@ class MemPath(Path):
         return type(self)(*segments, backend=self.backend)
 
     def as_uri(self):
-        path = "/".join(self.segments)
-        return f"mempath:{_urlquote(path)}"
+        return f"mempath:{_urlquote(self.as_posix())}"
+
+    def as_posix(self):
+        return "/".join(self.segments)
 
     def _parent_container(self) -> tuple[dict[str, bytearray], str]:
         parent = self.backend
