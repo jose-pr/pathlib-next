@@ -92,9 +92,6 @@ class MemPath(Path):
     def as_uri(self):
         return f"mempath:{_urlquote(self.as_posix())}"
 
-    def as_posix(self):
-        return "/".join(self.segments)
-
     def _parent_container(self) -> tuple[dict[str, bytearray], str]:
         parent = self.backend
         *ancestors, name = self.normalized

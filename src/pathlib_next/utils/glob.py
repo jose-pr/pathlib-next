@@ -4,10 +4,9 @@
 """Filename globbing utility."""
 
 import fnmatch as _fnmatch
-import typing as _ty
 import functools as _func
 import re as _re
-
+import typing as _ty
 
 RECURSIVE = "**"
 ANY_PATTERN = _re.compile(_fnmatch.translate("*"))
@@ -33,7 +32,7 @@ def glob(
     root_dir: _Globable | None = None,
     recursive: bool = False,
     include_hidden: bool = False,
-    case_sensitive: bool | None = None
+    case_sensitive: bool | None = None,
 ) -> _ty.Iterable[_Globable]:
     """Return an iterator which yields the paths matching a pathname pattern.
 
@@ -52,12 +51,8 @@ def glob(
     pattern = compile_pattern(path.name, case_sensitive) if path.name else ANY_PATTERN
 
     name_is_pattern = WILCARD_PATTERN.match(path.name) != None
-    wildcard_in_path = name_is_pattern
+    wildcard_in_path = name_is_pattern or path.has_glob_pattern()
     parent = next(iter(path.parents), None)
-    for segment in path.segments:
-        if WILCARD_PATTERN.match(segment) != None:
-            wildcard_in_path = True
-            break
 
     root: _Globable = (
         (root_dir or parent) if not root_dir or not parent else (root_dir / parent)

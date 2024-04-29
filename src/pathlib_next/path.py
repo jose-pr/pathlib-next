@@ -5,14 +5,14 @@ paths with operations that have semantics appropriate for different
 operating systems.
 """
 
-import os as _os
-import re as _re
-import stat as _stat
-from pathlib import _ignore_error
-import typing as _ty
 import abc as _abc
 import io as _io
+import os as _os
+import re as _re
 import shutil as _shutil
+import stat as _stat
+import typing as _ty
+from pathlib import _ignore_error
 
 from . import utils as _utils
 from .utils import glob as _glob
@@ -35,6 +35,7 @@ _os.PathLike.register(FsPathLike)
 
 
 _FsPathLike = str | FsPathLike
+
 
 class _PathnameParents(_ty.Sequence[PN]):
     """This object provides sequence-like access to the logical ancestors
@@ -68,6 +69,7 @@ class _PathnameParents(_ty.Sequence[PN]):
 
     def __repr__(self):
         return "<{}.parents>".format(type(self._path).__name__)
+
 
 class Pathname(FsPathLike, _ty.Generic[_P]):
     """Base class for manipulating paths without I/O."""
@@ -184,9 +186,8 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         """The logical parent of the path."""
 
     @property
-    def parents(self)->_ty.Sequence[_ty.Self]:
+    def parents(self) -> _ty.Sequence[_ty.Self]:
         return _PathnameParents(self)
-
 
     @_utils.notimplemented
     def is_absolute(self) -> bool:
@@ -207,8 +208,14 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
             path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
         return path_pattern.match(path) is not None
 
-    @_utils.notimplemented
-    def as_posix(self) -> str: ...
+    def as_posix(self) -> str:
+        return "/".join(self.segments)
+
+    def has_glob_pattern(self):
+        for segment in self.segments:
+            if _glob.WILCARD_PATTERN.match(segment) != None:
+                return True
+        return False
 
 
 PurePathLike = str | Pathname
