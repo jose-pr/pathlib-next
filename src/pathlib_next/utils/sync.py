@@ -1,6 +1,8 @@
-import typing as _ty
-from ..path import Path
 import enum as _enum
+import typing as _ty
+
+from ..path import Path
+from ..utils.stat import FileStat
 
 
 class SyncEvent(_enum.Enum):
@@ -46,34 +48,42 @@ class PathSyncer(object):
             dry_run=dry_run,
         )
 
-    def sync(
-        self, source: Path, target: Path, /, dry_run: bool = False
-    ):
+    def sync(self, source: Path, target: Path, /, dry_run: bool = False):
         checksum = self.checksum
         self.hook(source, target, SyncEvent.SyncStart, dry_run)
 
-        if not source.exists():
+        src_stat = FileStat.from_path(source)
+        tgt_stat = FileStat.from_path(target)
+
+        if src_stat is None:
             if self.remove_missing:
                 if not dry_run:
                     target.rm(recursive=True, missing_ok=True)
                 self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
 
-        elif source.is_file():
+        elif src_stat.is_file():
             synced = False
-            if target.is_file():
+            if tgt_stat and tgt_stat.is_file():
                 if checksum(target) == checksum(source):
                     synced = True
             if not synced:
                 if not dry_run:
-                    target.rm(recursive=True, missing_ok=True)
+                    if tgt_stat:
+                        if tgt_stat.is_file() or target.is_symlink():
+                            target.unlink()
+                        else:
+                            if target:
+                                target.rm(recursive=tgt_stat.is_dir())
                     source.copy(target)
                 self.hook(source, target, SyncEvent.Copy, dry_run)
         else:
-            if target.is_file():
+            t_exists = tgt_stat != None
+            if tgt_stat and tgt_stat.is_file():
                 if not dry_run:
                     target.unlink()
+                t_exists = False
 
-            if not target.exists():
+            if not t_exists:
                 if not dry_run:
                     target.mkdir()
                 self.hook(source, target, SyncEvent.CreatedDirectory, dry_run)
@@ -84,7 +94,7 @@ class PathSyncer(object):
                         if not dry_run:
                             child.rm(recursive=True)
                         self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
-                        
+
             for child in source.iterdir():
                 self.sync(child, target / child.name, dry_run)
 
