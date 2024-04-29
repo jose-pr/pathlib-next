@@ -398,6 +398,13 @@ class UriPath(Uri, Path):
             inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
         else:
             inst = Uri.__new__(cls, *args, **kwargs)
+            backend = kwargs.get("backend", None)
+            if backend is None:
+                for segment in reversed(args):
+                    if isinstance(segment, cls):
+                        backend = cls.backend
+                        break
+            inst._backend = backend
         return inst
 
     def _initbackend(self):
@@ -433,18 +440,6 @@ class UriPath(Uri, Path):
     def with_backend(self, backend):
         return self._from_parsed_parts(*self.parts, backend=backend)
 
-    def _load_parts(self):
-        super()._load_parts()
-        if self.source and self.source.scheme and self._backend is None:
-            for uri in reversed(self._raw_uris):
-                if (
-                    isinstance(uri, UriPath)
-                    and uri.source.scheme == self.source.scheme
-                    and uri._backend
-                ):
-                    self._backend = uri._backend
-                    break
-
     def __truediv__(self, key: str | Uri | os.PathLike):
         try:
             return type(self)(self, key, findclass=True)
@@ -456,7 +451,7 @@ class UriPath(Uri, Path):
         if not source:
             inst = Uri.__new__(UriPath)
         elif source.scheme not in cls._schemes():
-            inst = UriPath.__new__(UriPath, source.scheme + ":")
+            inst = cls.__new__(cls, source.scheme + ":", findclass=True)
         else:
             inst = cls.__new__(cls, backend=self._backend)
         inst._init(source, self.path, self.query, self.fragment)

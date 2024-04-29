@@ -1,13 +1,14 @@
+import io as _io
+import time as _time
+import typing as _ty
+
+import bs4 as _bs4
+import requests as _req
+from htmllistparse import parse as _htmlparse
+
+from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import UriPath
-from ... import utils as _utils
-import io as _io
-import requests as _req
-import typing as _ty
-import bs4 as _bs4
-import time as _time
-
-from htmllistparse import parse as _htmlparse
 
 
 class _FileEntry(_ty.NamedTuple):
@@ -42,7 +43,7 @@ class HttpPath(UriPath):
         return HttpBackend(_req.Session(), {})
 
     def _listdir(self) -> list[_FileEntry]:
-        req = self.backend.session.request("GET", self)
+        req = self.backend.request("GET", self)
         req.raise_for_status()
         soup = _bs4.BeautifulSoup(req.content, "html5lib")
         _, listing = _htmlparse(soup)
