@@ -1,8 +1,10 @@
-import typing as _ty
-from .. import UriPath, Source
-from ... import utils as _utils
 import threading as _thread
+import typing as _ty
+
 import paramiko as _paramiko
+
+from ... import utils as _utils
+from .. import Source, UriPath
 
 
 class BaseSftpBackend(object):
@@ -77,8 +79,11 @@ class SftpPath(UriPath):
         for path in self._sftpclient.listdir(self.path):
             yield path
 
-    def stat(self):
-        return self._sftpclient.stat(self.path)
+    def stat(self, *, follow_symlinks=True):
+        if follow_symlinks:
+            return self._sftpclient.stat(self.path)
+        else:
+            return self._sftpclient.lstat(self.path)
 
     def _open(self, mode="r", buffering=-1):
         return self._sftpclient.open(self.path, mode, buffering)

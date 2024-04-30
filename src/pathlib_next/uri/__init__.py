@@ -402,7 +402,7 @@ class UriPath(Uri, Path):
             if backend is None:
                 for segment in reversed(args):
                     if isinstance(segment, cls):
-                        backend = cls.backend
+                        backend = segment.backend
                         break
             inst._backend = backend
         return inst

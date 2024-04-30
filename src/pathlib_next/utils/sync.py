@@ -14,7 +14,7 @@ class SyncEvent(_enum.Enum):
 
 
 class PathSyncer(object):
-    __slots__ = ("checksum", "_hook", "remove_missing")
+    __slots__ = ("checksum", "_hook", "remove_missing", "follow_symlinks")
     EVENT_LOG_FORMAT = "[{event}] Source:{source} Target:{target} DryRun:{dry_run}"
 
     def __init__(
@@ -22,11 +22,13 @@ class PathSyncer(object):
         checksum: _ty.Callable[[Path], int],
         /,
         remove_missing: bool = False,
+        follow_symlinks: bool = True,
         hook: _ty.Callable[[Path, Path, SyncEvent, bool], None] = None,
     ) -> None:
         self.checksum = checksum
         self.remove_missing = remove_missing
         self._hook = hook
+        self.follow_symlinks = follow_symlinks
 
     def log(self, msg: str, **kwargs: str):
         print(msg.format_map(kwargs))
@@ -52,15 +54,16 @@ class PathSyncer(object):
         checksum = self.checksum
         self.hook(source, target, SyncEvent.SyncStart, dry_run)
 
-        src_stat = FileStat.from_path(source)
-        tgt_stat = FileStat.from_path(target)
+        src_stat = FileStat.from_path(source, follow_symlink=self.follow_symlinks)
+        tgt_stat = FileStat.from_path(target, follow_symlink=self.follow_symlinks)
 
         if src_stat is None:
             if self.remove_missing:
                 if not dry_run:
                     target.rm(recursive=True, missing_ok=True)
                 self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
-
+        elif src_stat.is_symlink():
+            raise NotImplementedError("symlink sync not implemented yet")
         elif src_stat.is_file():
             synced = False
             if tgt_stat and tgt_stat.is_file():
@@ -69,7 +72,7 @@ class PathSyncer(object):
             if not synced:
                 if not dry_run:
                     if tgt_stat:
-                        if tgt_stat.is_file() or target.is_symlink():
+                        if tgt_stat.is_file() or tgt_stat.is_symlink():
                             target.unlink()
                         else:
                             if target:
