@@ -3,7 +3,6 @@ import os
 from pathlib_next import Path, glob
 from pathlib_next.mempath import MemPath
 from pathlib_next.uri import Query, Source, UriPath
-from pathlib_next.uri.schemes import *
 from pathlib_next.utils.sync import PathSyncer
 
 mempath = MemPath("test/test3") / "subpath"

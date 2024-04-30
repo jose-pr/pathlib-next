@@ -1,11 +1,9 @@
-import functools as _functools
-from threading import RLock
-import typing as _ty
-import time as _time
-from email.utils import parsedate as _parsedate
-
-
 import collections
+import functools as _functools
+import time as _time
+import typing as _ty
+from email.utils import parsedate as _parsedate
+from threading import RLock
 
 K = _ty.ParamSpec("K")
 V = _ty.TypeVar("V")
@@ -22,7 +20,7 @@ class LRU(_ty.Generic[K, V]):
     @property
     def maxsize(self):
         return self._maxsize
-    
+
     @maxsize.setter
     def maxsize(self, maxsize: int):
         cache = self.cache
@@ -78,11 +76,13 @@ def notimplemented(method):
 
     return _notimplemented
 
-import socket as _socket
+
 import ipaddress as _ip
+import socket as _socket
+
 
 def get_machine_ips():
-    ips:list[_ip.IPv4Address|_ip.IPv6Address] = list()
+    ips: list[_ip.IPv4Address | _ip.IPv6Address] = list()
     for item in _socket.getaddrinfo(_socket.gethostname(), None):
         protocol, *_, (ip, *_) = item
         if protocol == _socket.AddressFamily.AF_INET:

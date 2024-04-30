@@ -1,4 +1,5 @@
 import typing as _ty
+
 import uritools as _uritools
 
 
@@ -16,7 +17,7 @@ class Query(str):
         ),
         *,
         encoding=ENCODING,
-        separator=SEPARATOR
+        separator=SEPARATOR,
     ):
         if isinstance(query, Query):
             _encoding = query._encoding
@@ -44,7 +45,7 @@ class Query(str):
         return _uritools.SplitResultString("", "", "", str(query), "").getquerylist(
             query._separator, query._encoding
         )
-    
+
     def __iter__(self):
         return iter(self.decode())
 

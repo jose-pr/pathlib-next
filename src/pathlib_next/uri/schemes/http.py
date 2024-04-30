@@ -65,7 +65,7 @@ class HttpPath(UriPath):
             or resp.url.endswith("/.")
         )
 
-    def stat(self):
+    def stat(self, *, follow_symlinks=True, walk_up_last_modified=False):
         check = (
             [self.with_path(self.path.removesuffix("/")), self]
             if self.path.endswith("/")
@@ -91,7 +91,7 @@ class HttpPath(UriPath):
 
         st_size = 0 if self._isdir else int(resp.headers.get("Content-Length", 0))
         lm = resp.headers.get("Last-Modified")
-        if lm is None:
+        if lm is None and walk_up_last_modified:
             parent = self.parent
             if self != parent:
                 try:

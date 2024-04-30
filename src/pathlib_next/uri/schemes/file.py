@@ -1,7 +1,8 @@
+import os as _os
+
 from ...fspath import LocalPath as _Local
 from ...path import FsPathLike
-import os as _os
-from .. import UriPath, Source
+from .. import Source, UriPath
 
 
 class FileUri(UriPath):

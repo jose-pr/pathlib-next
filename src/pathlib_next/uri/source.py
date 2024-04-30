@@ -1,7 +1,8 @@
-import typing as _ty
-import uritools as _uritools
-import socket as _socket
 import ipaddress as _ip
+import socket as _socket
+import typing as _ty
+
+import uritools as _uritools
 
 from .. import utils as _utils
 
@@ -19,7 +20,7 @@ class Source(_ty.NamedTuple):
 
     def __bool__(self):
         for val in self:
-            if val == '' or val is None:
+            if val == "" or val is None:
                 continue
             return True
         return False

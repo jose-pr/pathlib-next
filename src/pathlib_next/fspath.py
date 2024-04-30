@@ -1,9 +1,10 @@
-import pathlib as _path
-import os as _os
 import functools as _func
-import typing as _ty
-from . import path as _proto
+import os as _os
+import pathlib as _path
 import re as _re
+import typing as _ty
+
+from . import path as _proto
 
 
 @_func.cache
@@ -32,7 +33,7 @@ class _BaseFSPathname(_path.PurePath, _proto.Pathname):
     @property
     def segments(self):
         return self.parts
-    
+
     def with_segments(self, *args: str | _proto.FsPathLike):
         return type(self)(*args)
 
