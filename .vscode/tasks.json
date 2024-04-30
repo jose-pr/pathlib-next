@@ -10,6 +10,8 @@
             "args": [
                 "-m",
                 "pip",
+                "install",
+                "-U",
                 ".[dev]"
             ],
             "problemMatcher": [],
