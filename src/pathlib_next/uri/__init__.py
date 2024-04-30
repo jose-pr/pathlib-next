@@ -137,6 +137,13 @@ class Uri(Pathname):
                 if _path.startswith("/"):
                     break
 
+        if (
+            (source.host or source.userinfo or source.port)
+            and _path
+            and not _path.startswith("/")
+        ):
+            _path = "/" + _path
+
         self._init(source, _path, query, fragment)
 
     def _init(self, source: Source, path: str, query: str, fragment: str, **kwargs):
@@ -201,7 +208,10 @@ class Uri(Pathname):
         raise NotImplementedError(f"fspath for {self.source.scheme}")
 
     def __repr__(self):
-        return "{}({!r})".format(type(self).__name__, str(self))
+        if self._initiated:
+            return "{}({!r})".format(type(self).__name__, str(self))
+        else:
+            return super().__repr__()
 
     def as_uri(self, /, sanitize=False):
         if self._uri is None or sanitize:

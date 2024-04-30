@@ -177,7 +177,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def __truediv__(self, key: _ty.Self | str) -> _ty.Self:
         try:
             return type(self)(self, key)
-        except (TypeError, NotImplementedError):
+        except (TypeError, NotImplementedError) as _err:
             return NotImplemented
 
     @property

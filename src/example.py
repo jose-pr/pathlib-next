@@ -2,8 +2,15 @@ import os
 
 from pathlib_next import Path, glob
 from pathlib_next.mempath import MemPath
-from pathlib_next.uri import Query, Source, UriPath
+from pathlib_next.uri import Query, Source, Uri, UriPath
 from pathlib_next.utils.sync import PathSyncer
+
+rootless = Uri("sftp://root@sftpexample")
+rootless.source
+authkeys = rootless / "root/.ssh/authorized_keys"
+keys = authkeys.as_uri()
+
+local = Path("./_ssh")
 
 mempath = MemPath("test/test3") / "subpath"
 mempath.parent.mkdir(parents=True, exist_ok=True)
@@ -11,9 +18,6 @@ mempath.write_text("test")
 check = mempath.read_text()
 mempath.parent.rm(recursive=True)
 
-pass
-
-local = Path("./_ssh")
 test = list(os.scandir(local))
 print(list(local.iterdir()))
 query = Query({"test": "://$#!1", "test2&": [1, 2]})
