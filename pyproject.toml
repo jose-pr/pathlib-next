@@ -19,6 +19,7 @@ dependencies = []
 uri = ["uritools"]
 http = ["requests", "pathlib_next[uri]", 'htmllistparse', 'bs4']
 sftp = ["paramiko", "pathlib_next[uri]"]
+dev = ['build', 'twine', 'hatchling']
 
 
 [project.urls]
