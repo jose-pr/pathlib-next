@@ -3,6 +3,7 @@ import stat as _stat
 import typing as _ty
 
 from .. import utils as _utils
+from ..protocols import FileStatLike as _FStat
 
 if _ty.TYPE_CHECKING:
     from os import stat_result as _os_stat
@@ -10,21 +11,7 @@ if _ty.TYPE_CHECKING:
     from ..path import Path
 
 
-class FileStatLike(_ty.Protocol):
-    __slots__ = ()
-
-    @property
-    @_abc.abstractmethod
-    def st_mode(self) -> int: ...
-    @property
-    @_abc.abstractmethod
-    def st_size(self) -> int: ...
-    @property
-    @_abc.abstractmethod
-    def st_mtime(self) -> int: ...
-
-
-class FileStat(FileStatLike):
+class FileStat(_FStat):
     __slots__ = (
         "st_mode",
         "st_nlink",

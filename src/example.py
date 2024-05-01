@@ -63,7 +63,7 @@ syncer.sync((sftp_root / "root/.ssh"), dest, dry_run=True)
 
 rocky_repo = UriPath("http://dl.rockylinux.org/pub")
 
-glob_test = UriPath("file:./**/*.py")
+glob_test = UriPath("file:src/**/*.py")
 
 for path in glob.glob(glob_test, recursive=True):
     print(path)

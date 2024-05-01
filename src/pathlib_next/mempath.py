@@ -4,16 +4,16 @@ from io import IOBase
 from urllib.parse import quote as _urlquote
 
 from .path import Path, Pathname
-from .utils.stat import FileStat, FileStatLike
+from .utils.stat import FileStat
 
 
 class MemPathBackend(dict): ...
 
 
 class MemBytesIO(io.BytesIO):
-    def __init__(self, initial_bytes: bytearray) -> None:
-        self._bytes = initial_bytes
-        super().__init__(initial_bytes)
+    def __init__(self, dest: bytearray) -> None:
+        self._bytes = dest
+        super().__init__()
 
     def close(self) -> None:
         self.seek(0)
@@ -137,7 +137,7 @@ class MemPath(Path):
             raise IsADirectoryError(self)
         parent.pop(name)
 
-    def stat(self, *, follow_symlinks=True) -> FileStatLike:
+    def stat(self, *, follow_symlinks=True):
         parent, name = self._parent_container()
         if not name:
             return FileStat(is_dir=True)

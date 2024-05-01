@@ -6,17 +6,14 @@ operating systems.
 """
 
 import abc as _abc
-import io as _io
 import os as _os
 import re as _re
-import shutil as _shutil
-import stat as _stat
 import typing as _ty
-from pathlib import _ignore_error
 
 from . import utils as _utils
+from .protocols import BinaryOpen, Chmod, Stat
 from .utils import glob as _glob
-from .utils.stat import FileStatLike
+from .utils.stat import FileStat
 
 P = _ty.TypeVar("P", bound="Path")
 PN = _ty.TypeVar("PN", bound="Pathname")
@@ -128,7 +125,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     @property
     @_abc.abstractmethod
-    def segments(self) -> _ty.Iterable[str]: ...
+    def segments(self) -> _ty.Sequence[str]: ...
 
     @property
     @_abc.abstractmethod
@@ -140,8 +137,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def with_name(self, name: str) -> _ty.Self:
         if not self.name:
             raise ValueError("%r has an empty name" % (self,))
-        segments = self.segments[:-1] + [name]
-        return self.with_segments(*segments)
+        return self.with_segments(*self.segments[:-1], name)
 
     def with_stem(self, stem: str) -> _ty.Self:
         """Return a new path with the stem changed."""
@@ -191,8 +187,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     @_utils.notimplemented
     def is_absolute(self) -> bool:
-        """True if the path is absolute (has both a root and, if applicable,
-        a drive)."""
+        """True if the path is absolute"""
         ...
 
     def match(self, path_pattern: str | _re.Pattern, *, case_sensitive=None):
@@ -204,7 +199,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         path = str(self)
         if not isinstance(path_pattern, _re.Pattern):
             if isinstance(str, path_pattern):
-                path_pattern = type(self)(path_pattern).__path__()
+                path_pattern = type(self)(path_pattern)
             path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
         return path_pattern.match(path) is not None
 
@@ -221,7 +216,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 PurePathLike = str | Pathname
 
 
-class Path(Pathname):
+class Path(Pathname, Chmod, Stat, BinaryOpen):
     """Base class for manipulating paths with I/O."""
 
     __slots__ = ()
@@ -233,90 +228,8 @@ class Path(Pathname):
             cls = LocalPath
         return Pathname.__new__(cls)
 
-    @_utils.notimplemented
-    def stat(self, *, follow_symlinks=True) -> FileStatLike: ...
-
-    def lstat(self) -> FileStatLike:
-        """
-        Like stat(), except if the path points to a symlink, the symlink's
-        status information is returned, rather than its target's.
-        """
-        return self.stat(follow_symlinks=False)
-
-    def _st_mode(self, *, follow_symlinks=True):
-        try:
-            return self.stat().st_mode
-        except FileNotFoundError:
-            return None
-        except OSError as e:
-            if not _ignore_error(e):
-                raise
-            return None
-        except ValueError:
-            return None
-
-    # Convenience functions for querying the stat results
-    def exists(self, *, follow_symlinks=True):
-        """
-        Whether this path exists.
-        """
-        return self._st_mode(follow_symlinks=follow_symlinks) != None
-
     def is_hidden(self):
         return self.name.startswith(".")
-
-    def is_dir(self):
-        """
-        Whether this path is a directory.
-        """
-        try:
-            return _stat.S_ISDIR(self._st_mode() or 0)
-        except NotImplementedError:
-            pass
-        try:
-            next(self.iterdir(), None)
-            return True
-        except NotADirectoryError:
-            return False
-
-        raise NotImplementedError("is_dir")
-
-    def is_file(self):
-        """
-        Whether this path is a regular file (also True for symlinks pointing
-        to regular files).
-        """
-        return _stat.S_ISREG(self._st_mode() or 0)
-
-    def is_symlink(self):
-        """
-        Whether this path is a symbolic link.
-        """
-        return _stat.S_ISLNK(self._st_mode(follow_symlinks=True) or 0)
-
-    def is_block_device(self):
-        """
-        Whether this path is a block device.
-        """
-        return _stat.S_ISBLK(self._st_mode() or 0)
-
-    def is_char_device(self):
-        """
-        Whether this path is a character device.
-        """
-        return _stat.S_ISCHR(self._st_mode() or 0)
-
-    def is_fifo(self):
-        """
-        Whether this path is a FIFO.
-        """
-        return _stat.S_ISFIFO(self._st_mode() or 0)
-
-    def is_socket(self):
-        """
-        Whether this path is a socket.
-        """
-        return _stat.S_ISSOCK(self._st_mode() or 0)
 
     @_utils.notimplemented
     def samefile(self, other_path: str | _ty.Self):
@@ -324,72 +237,6 @@ class Path(Pathname):
         (as returned by os.path.samefile()).
         """
         ...
-
-    @_utils.notimplemented
-    def _open(
-        self,
-        mode="r",
-        buffering=-1,
-    ) -> _io.IOBase:
-        """
-        All operations should be binary
-        To be used only by UriPath.open() to obtain binary stream
-        """
-        ...
-
-    def open(
-        self,
-        mode="r",
-        buffering=-1,
-        encoding: str = None,
-        errors: str = None,
-        newline: str = None,
-    ) -> _io.IOBase:
-        """
-        Open the file pointed by this path and return a file object, as
-        the built-in open() function does.
-        """
-        fh = self._open(mode.replace("b", ""), buffering)
-        if "b" not in mode:
-            encoding = _io.text_encoding(encoding)
-            fh = _io.TextIOWrapper(fh, encoding, errors, newline)
-        return fh
-
-    def read_bytes(self) -> bytes:
-        """
-        Open the file in bytes mode, read it, and close the file.
-        """
-        with self.open(mode="rb") as f:
-            return f.read()
-
-    def read_text(self, encoding: str = None, errors: str = None) -> str:
-        """
-        Open the file in text mode, read it, and close the file.
-        """
-        with self.open(mode="r", encoding=encoding, errors=errors) as f:
-            return f.read()
-
-    def write_bytes(self, data: bytes):
-        """
-        Open the file in bytes mode, write to it, and close the file.
-        """
-        # type-check for the buffer interface before truncating the file
-        view = memoryview(data)
-        with self.open(mode="wb") as f:
-            return f.write(view)
-
-    def write_text(
-        self, data: str, encoding: str = None, errors: str = None, newline: str = None
-    ):
-        """
-        Open the file in text mode, write to it, and close the file.
-        """
-        if not isinstance(data, str):
-            raise TypeError("data must be str, not %s" % data.__class__.__name__)
-        with self.open(
-            mode="w", encoding=encoding, errors=errors, newline=newline
-        ) as f:
-            return f.write(data)
 
     def __iter__(self):
         return self.iterdir()
@@ -448,13 +295,13 @@ class Path(Pathname):
             filenames: "list[str]" = []
             for entry in scandir_it:
                 try:
-                    is_symlink = entry.is_symlink()
-                    is_dir = entry.is_dir()
+                    stat = FileStat.from_path(entry, follow_symlink=follow_symlinks)
+                    is_dir = stat.is_dir()
                 except OSError:
                     # Carried over from os.path.isdir().
                     is_dir = False
 
-                if is_dir and (follow_symlinks or not is_symlink):
+                if is_dir:
                     dirnames.append(entry.name)
                 else:
                     filenames.append(entry.name)
@@ -494,27 +341,11 @@ class Path(Pathname):
         except FileNotFoundError:
             if not parents or self.parent == self:
                 raise
-            self.parent.mkdir(parents=True, exist_ok=True)
-            self.mkdir(mode, parents=False, exist_ok=exist_ok)
-        except OSError:
-            # Cannot rely on checking for EEXIST, since the operating system
-            # could give priority to other errors like EACCES or EROFS
+            self.parent.mkdir(parents=True, exist_ok=False)
+            self.mkdir(mode, parents=False, exist_ok=False)
+        except FileExistsError:
             if not exist_ok or not self.is_dir():
                 raise
-
-    @_utils.notimplemented
-    def chmod(self, mode: int, *, follow_symlinks=True):
-        """
-        Change the permissions of the path, like os.chmod().
-        """
-        ...
-
-    def lchmod(self, mode: int):
-        """
-        Like chmod(), except if the path points to a symlink, the symlink's
-        permissions are changed, rather than its target's.
-        """
-        self.chmod(mode, follow_symlinks=False)
 
     @_utils.notimplemented
     def unlink(self, missing_ok=False):
@@ -540,11 +371,11 @@ class Path(Pathname):
             ignore_error if not callable(ignore_error) else ignore_error
         )
         try:
-            if not self.exists():
-                if missing_ok:
-                    return
-                raise FileNotFoundError(self)
-            if self.is_dir():
+            stat = FileStat.from_path(self)
+            if stat is None:
+                if not missing_ok:
+                    raise FileNotFoundError(self)
+            elif stat.is_dir():
                 if recursive:
                     for child in self.iterdir():
                         child.rm(recursive=recursive, ignore_error=ignore_error)
@@ -570,9 +401,7 @@ class Path(Pathname):
                 target.unlink()
             else:
                 raise FileExistsError(target)
-
-        with target.open("wb") as output, src.open("rb") as input:
-            _shutil.copyfileobj(input, output)
+        BinaryOpen.copy(src, target)
 
         try:
             stat = src.stat()
@@ -598,7 +427,7 @@ class Path(Pathname):
         except NotImplementedError:
             pass
 
-        src.copy(target)
+        BinaryOpen.copy(src, target)
         src.unlink()
 
 
