@@ -246,7 +246,11 @@ class PathSyncer(object):
                         target,
                         SyncEvent.SyncChild,
                         False,
-                        lambda: self.sync(child, target.path / child.name, dry_run),
+                        lambda: self.sync(
+                            child,
+                            target.path / (child.name or child.parent.name),
+                            dry_run,
+                        ),
                     )
 
             self.hook(source, target, SyncEvent.SyncChildren, False, sync_children)
