@@ -1,4 +1,5 @@
 __pycache__
+.pytest_cache
 /_*
 [a-zA-Z]*__
 [a-zA-Z]*__.*
