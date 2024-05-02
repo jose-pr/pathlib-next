@@ -3,7 +3,7 @@ import os
 from pathlib_next import Path, glob
 from pathlib_next.mempath import MemPath
 from pathlib_next.uri import Query, Source, Uri, UriPath
-from pathlib_next.utils.sync import PathSyncer
+from pathlib_next.utils.sync import PathAndStat, PathSyncer
 
 rootless = Uri("sftp://root@sftpexample")
 rootless.source
@@ -18,8 +18,6 @@ mempath.write_text("test")
 check = mempath.read_text()
 mempath.parent.rm(recursive=True)
 
-test = list(os.scandir(local))
-print(list(local.iterdir()))
 query = Query({"test": "://$#!1", "test2&": [1, 2]})
 q2 = Query(str(query)).to_dict()
 for name, value in query:
@@ -53,13 +51,13 @@ authkeys = sftp_root / "root/.ssh/authorized_keys"
 print(authkeys.as_posix())
 
 
-def checksum(uri: UriPath):
-    stat = uri.stat()
+def checksum(uri: PathAndStat):
+    stat = uri.stat
     return hash(stat.st_size)
 
 
 syncer = PathSyncer(checksum, remove_missing=False)
-syncer.sync((sftp_root / "root/.ssh"), dest, dry_run=True)
+syncer.sync((sftp_root / "root/.ssh"), dest, dry_run=False)
 
 rocky_repo = UriPath("http://dl.rockylinux.org/pub")
 

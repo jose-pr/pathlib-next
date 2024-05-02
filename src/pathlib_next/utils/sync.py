@@ -8,38 +8,113 @@ from ..utils.stat import FileStat
 class SyncEvent(_enum.Enum):
     Copy = 1
     RemovedMissing = 2
+    TypeMismatch = 6
     SyncStart = 5
     Synced = 3
     CreatedDirectory = 4
+    CheckTargetChild = _enum.auto()
+    CheckTargetChildren = _enum.auto()
+    SyncChild = _enum.auto()
+    SyncChildren = _enum.auto()
+
+
+class PathAndStat(object):
+    __slots__ = ("_path", "_stat")
+
+    def __init__(self, path: Path, *, follow_symlink=None) -> None:
+        self._path = path
+        self.refresh(follow_symlink)
+
+    def __str__(self) -> str:
+        return str(self.path)
+
+    def __repr__(self) -> str:
+        return str((self.path, self._stat))
+
+    @property
+    def path(self):
+        return self._path
+
+    @property
+    def stat(self):
+        return self._stat
+
+    def exists(self):
+        return self.stat != None
+
+    def refresh(self, follow_symlink: bool):
+        self._stat = FileStat.from_path(self.path, follow_symlink=follow_symlink)
+
+    def __getattr__(self, name: str):
+        if name.startswith("is_"):
+            if self.stat:
+                return getattr(self.stat, name)
+            else:
+                return lambda *args, **kwargs: False
+
+
+if _ty.TYPE_CHECKING:
+
+    class PathAndStat(PathAndStat, FileStat): ...
+
+
+class _OnPathSyncerError(_ty.Protocol):
+    def __call__(
+        self,
+        error: Exception,
+        source: PathAndStat,
+        target: PathAndStat,
+        event: SyncEvent,
+    ) -> bool: ...
 
 
 class PathSyncer(object):
-    __slots__ = ("checksum", "_hook", "remove_missing", "follow_symlinks")
+    __slots__ = (
+        "checksum",
+        "_hook",
+        "remove_missing",
+        "follow_symlinks",
+        "ignore_error",
+    )
     EVENT_LOG_FORMAT = "[{event}] Source:{source} Target:{target} DryRun:{dry_run}"
 
     def __init__(
         self,
-        checksum: _ty.Callable[[Path], int],
+        checksum: _ty.Callable[[PathAndStat], int],
         /,
         remove_missing: bool = False,
         follow_symlinks: bool = True,
-        hook: _ty.Callable[[Path, Path, SyncEvent, bool], None] = None,
+        hook: _ty.Callable[[PathAndStat, PathAndStat, SyncEvent, bool], None] = None,
+        ignore_error: _OnPathSyncerError | bool = False,
     ) -> None:
         self.checksum = checksum
         self.remove_missing = remove_missing
         self._hook = hook
         self.follow_symlinks = follow_symlinks
+        if not callable(ignore_error):
+            _ignore_error = lambda *args, **kwargs: bool(ignore_error)
+        else:
+            _ignore_error = ignore_error
+        self.ignore_error = _ty.cast(_OnPathSyncerError, _ignore_error)
 
     def log(self, msg: str, **kwargs: str):
         print(msg.format_map(kwargs))
 
     def hook(
         self,
-        source: Path,
-        target: Path,
+        source: PathAndStat,
+        target: PathAndStat,
         event: SyncEvent,
         dry_run: bool,
+        do: _ty.Callable[[], None] = None,
     ):
+        if not dry_run and do:
+            try:
+                do()
+            except Exception as e:
+                if self.ignore_error(e, source, target, event):
+                    return e
+                raise
         if self._hook:
             self._hook(source, target, event, dry_run)
         self.log(
@@ -50,55 +125,130 @@ class PathSyncer(object):
             dry_run=dry_run,
         )
 
-    def sync(self, source: Path, target: Path, /, dry_run: bool = False):
+    def sync(
+        self,
+        source: Path | PathAndStat,
+        target: Path | PathAndStat,
+        /,
+        dry_run: bool = False,
+        ignore_error: (
+            bool | _ty.Callable[[Exception, PathAndStat, PathAndStat], None]
+        ) = False,
+    ):
         checksum = self.checksum
-        self.hook(source, target, SyncEvent.SyncStart, dry_run)
 
-        src_stat = FileStat.from_path(source, follow_symlink=self.follow_symlinks)
-        tgt_stat = FileStat.from_path(target, follow_symlink=self.follow_symlinks)
+        def start():
+            nonlocal source, target
+            source = (
+                PathAndStat(source, follow_symlink=self.follow_symlinks)
+                if not isinstance(source, PathAndStat)
+                else source
+            )
+            target = (
+                PathAndStat(target, follow_symlink=self.follow_symlinks)
+                if not isinstance(target, PathAndStat)
+                else target
+            )
 
-        if src_stat is None:
+        if self.hook(source, target, SyncEvent.SyncStart, False, start):
+            return
+
+        if not source.exists():
             if self.remove_missing:
-                if not dry_run:
-                    target.rm(recursive=True, missing_ok=True)
-                self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
-        elif src_stat.is_symlink():
-            raise NotImplementedError("symlink sync not implemented yet")
-        elif src_stat.is_file():
+                if self.hook(
+                    source,
+                    target,
+                    SyncEvent.RemovedMissing,
+                    dry_run,
+                    lambda: target.path.rm(recursive=True, missing_ok=True),
+                ):
+                    return
+        elif source.is_symlink():
+            error = NotImplementedError("symlink sync not implemented yet")
+            if not ignore_error(error, source, target, None):
+                raise error
+            return
+        elif source.is_file():
             synced = False
-            if tgt_stat and tgt_stat.is_file():
+            if target.is_file():
                 if checksum(target) == checksum(source):
                     synced = True
             if not synced:
-                if not dry_run:
-                    if tgt_stat:
-                        if tgt_stat.is_file() or tgt_stat.is_symlink():
-                            target.unlink()
-                        else:
-                            if target:
-                                target.rm(recursive=tgt_stat.is_dir())
-                    source.copy(target)
-                self.hook(source, target, SyncEvent.Copy, dry_run)
-        else:
-            t_exists = tgt_stat != None
-            if tgt_stat and tgt_stat.is_file():
-                if not dry_run:
-                    target.unlink()
-                t_exists = False
 
-            if not t_exists:
-                if not dry_run:
-                    target.mkdir()
-                self.hook(source, target, SyncEvent.CreatedDirectory, dry_run)
+                def copy():
+                    if target.is_file() or target.is_symlink():
+                        target.path.unlink()
+                    else:
+                        if target.exists():
+                            target.path.rm(recursive=target.is_dir())
+                    source.path.copy(target.path)
+
+                if self.hook(source, target, SyncEvent.Copy, dry_run, copy):
+                    return
+        else:
+            if target.is_file():
+                if self.hook(
+                    source,
+                    target,
+                    SyncEvent.TypeMismatch,
+                    dry_run,
+                    lambda: target.path.unlink(),
+                ):
+                    return
+
+                target._stat = None
+
+            if not target.exists():
+                if self.hook(
+                    source,
+                    target,
+                    SyncEvent.CreatedDirectory,
+                    dry_run,
+                    lambda: target.path.mkdir(),
+                ):
+                    return
 
             if self.remove_missing:
-                for child in target.iterdir():
-                    if not (source / child.name).exists():
-                        if not dry_run:
-                            child.rm(recursive=True)
-                        self.hook(source, target, SyncEvent.RemovedMissing, dry_run)
 
-            for child in source.iterdir():
-                self.sync(child, target / child.name, dry_run)
+                def checkchildren():
+                    for child in target.path.iterdir():
+
+                        def checkchild():
+                            if not (source.path / child.name).exists():
+                                self.hook(
+                                    source,
+                                    target,
+                                    SyncEvent.RemovedMissing,
+                                    dry_run,
+                                    lambda: child.rm(recursive=True),
+                                )
+
+                        self.hook(
+                            source,
+                            target,
+                            SyncEvent.CheckTargetChild,
+                            False,
+                            checkchild,
+                        )
+
+                self.hook(
+                    source,
+                    target,
+                    SyncEvent.CheckTargetChildren,
+                    False,
+                    checkchildren,
+                )
+
+            def sync_children():
+                for child in source.path.iterdir():
+                    self.hook(
+                        source,
+                        target,
+                        SyncEvent.SyncChild,
+                        False,
+                        lambda: self.sync(child, target.path / child.name, dry_run),
+                    )
+
+            self.hook(source, target, SyncEvent.SyncChildren, False, sync_children)
 
         self.hook(source, target, SyncEvent.Synced, dry_run)
