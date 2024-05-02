@@ -6,6 +6,9 @@ import bs4 as _bs4
 import requests as _req
 from htmllistparse import parse as _htmlparse
 
+if _ty.TYPE_CHECKING:
+    from urllib3.response import HTTPResponse
+
 from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import UriPath
@@ -119,10 +122,12 @@ class HttpPath(UriPath):
             raise NotImplementedError(mode)
         buffer_size = _io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering
         req = self.backend.request("GET", self.as_uri(), stream=True)
+        resp: "HTTPResponse" = req.raw
+        resp.auto_close = False
         return (
-            req.raw
+            resp
             if buffer_size == 0
-            else _io.BufferedReader(req.raw, buffer_size=buffer_size)
+            else _io.BufferedReader(resp, buffer_size=buffer_size)
         )
 
     def is_dir(self):
