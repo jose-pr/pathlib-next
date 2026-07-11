@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Actual Python 3.9/3.10 runtime compatibility (CI previously only tested 3.11/3.13
+  and missed these): `LocalPath`/`Uri` case-sensitivity and path-separator detection
+  crashed on 3.9-3.11 (`_flavour` object has no `normcase`); `open(mode="r")` crashed
+  on <3.10 (`io.text_encoding` is 3.10+); glob pattern compilation crashed on <3.11
+  (`re.NOFLAG` is 3.11+); `FileUri.stat()`/`chmod()` crashed on 3.9
+  (`pathlib.Path.stat/chmod` gained `follow_symlinks=` in 3.10; raises
+  `NotImplementedError` there for `follow_symlinks=False`).
+- `LocalPath._path_separators` returned the env-var list separator (`;`/`:`) instead
+  of the path separator, and could include a `None` altsep on POSIX.
+
+### Added
+- `tests/test_smoke.py`: regression coverage for README/example snippets across
+  supported Python versions.
+
 ## [0.4.1] - 2026-07-11
 
 ### Fixed
