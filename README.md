@@ -6,14 +6,42 @@
 [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://jose-pr.github.io/pathlib_next/)
 [![CI](https://img.shields.io/github/actions/workflow/status/jose-pr/pathlib_next/test.yml)](https://github.com/jose-pr/pathlib_next/actions/workflows/test.yml)
 
-Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
+A **robust, extensible pathlib-like base** for any resource addressable as a
+path or URI. Same method names, signatures, semantics, and exception types as
+`pathlib.Path` wherever a `pathlib.Path` equivalent exists -- write code once
+against `Path`/`UriPath` and it works against your local disk, an in-memory
+tree, an HTTP index, or an SFTP server. Every intentional divergence from
+`pathlib`'s behavior is documented, not silent -- see
+[`docs/divergences.md`](https://jose-pr.github.io/pathlib_next/divergences/).
 
 ## Features
 
-- **Unified URI Interface** — Access resources on sftp, http, or local file schemes using python's familiar pathlib syntax.
-- **In-memory filesystem** — `MemPath` provides a lightweight, virtual file system helper for mock files, testing, or transient storage.
-- **Path synchronization** — `PathSyncer` allows syncing directory structures across different paths with customizable checksums.
-- **Query & Source Parsing** — Parse and serialize complex URL query strings and URI sources easily.
+| Capability | `LocalPath` | `file:` | `mem:` (`MemPath`) | `http(s):` | `sftp:` |
+| --- | --- | --- | --- | --- | --- |
+| Read | Yes | Yes | Yes | Yes | Yes |
+| Write | Yes | Yes | Yes | No | Yes |
+| List (`iterdir`) | Yes | Yes | Yes | Yes (HTML index) | Yes |
+| Stat / exists / is_dir / is_file | Yes | Yes | Yes | Yes | Yes |
+| `mkdir` | Yes | Yes | Yes | No | Yes |
+| Delete | Yes | Yes | Yes | No | Yes |
+| `rename` | Yes | Yes | No (copy+unlink fallback) | No | Yes |
+| Extra required | none | none | none | `http` | `sftp` |
+
+Every scheme shares the same `glob()`, `walk()`, `copy()`/`move()`, `rm()`
+implementations -- see the full matrix and notes in
+[Schemes](https://jose-pr.github.io/pathlib_next/guides/schemes/).
+
+- **Unified path interface** across local files, in-memory paths, and
+  `sftp`/`http`/`file` URIs.
+- **`MemPath`** -- a lightweight virtual filesystem for mocks, tests, or
+  transient storage.
+- **`PathSyncer`** -- one-way checksum-driven tree sync between any two
+  `Path` implementations, with dry-run and event hooks.
+- **`Query`/`Source`** -- parse and serialize URL query strings and URI
+  authority components.
+- **Extensible two ways**: subclass `Path` directly for a custom
+  non-URI resource, or subclass `UriPath` for a new URI scheme -- see
+  [Extending](https://jose-pr.github.io/pathlib_next/guides/extending/).
 
 ## Installation
 
@@ -29,22 +57,74 @@ Optional features/extras:
 | `http` | `requests`, `bs4`, `htmllistparse` | Read and list files over HTTP/HTTPS |
 | `sftp` | `paramiko` | SFTP path operations and transfers |
 
+`import pathlib_next` and `LocalPath`/`MemPath` work with no extras
+installed.
+
 ## Quick start
 
-### Unified Path Operations
+**Local filesystem** -- drop-in `pathlib.Path`:
 
 ```python
 from pathlib_next import Path
+
+p = Path("./data") / "report.txt"
+p.write_text("hello")
+print(p.read_text())
+```
+
+**In-memory** (`mem:`) -- a virtual filesystem, no disk I/O:
+
+```python
+from pathlib_next.mempath import MemPath
+
+p = MemPath("/config/settings.json")
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text('{"debug": true}')
+```
+
+**`file:`** -- the same local filesystem, addressed as a URI:
+
+```python
 from pathlib_next.uri import UriPath
 
-# Use the unified path interface
-local_path = Path("./my_folder")
-http_path = UriPath("http://example.com/data.txt")
-
-# Read and print text if it exists
-if http_path.exists():
-    print(http_path.read_text())
+p = UriPath("file:./data/report.txt")
+print(p.read_text())
 ```
+
+**`http(s):`** -- read files and list Apache/nginx-style directory indexes:
+
+```python
+from pathlib_next.uri import UriPath
+
+p = UriPath("http://example.com/data/")
+for child in p.iterdir():
+    if child.is_file():
+        print(child.name, child.stat().st_size)
+```
+
+**`sftp:`** -- same interface, over SSH:
+
+```python
+from pathlib_next.uri import UriPath
+
+p = UriPath("sftp://user@host/var/log/app.log")
+print(p.read_text())
+```
+
+## Extending
+
+Two first-class ways to add a new path-addressable resource -- both covered
+in depth, with worked examples, in
+[Extending](https://jose-pr.github.io/pathlib_next/guides/extending/):
+
+- Subclass `Path` directly for a custom, non-URI resource (`MemPath` is the
+  reference exemplar).
+- Subclass `UriPath` and set `__SCHEMES` for a new URI scheme (`FileUri`/
+  `HttpPath`/`SftpPath` are the built-in examples).
+
+`pathlib_next.testing.PathContract` is a reusable pytest mixin covering the
+baseline contract every implementation must satisfy -- subclass it with a
+`root` fixture to verify your own.
 
 ## API overview
 
@@ -54,14 +134,23 @@ if http_path.exists():
 | `pathlib_next.uri` | URI/URL specific path support and Query utils |
 | `pathlib_next.mempath` | In-memory transient path structure |
 | `pathlib_next.utils.sync` | Synchronization functions and PathSyncer class |
+| `pathlib_next.testing` | `PathContract`, a pytest mixin for verifying custom implementations |
 
 ## Supported Python versions
 
-Python >= 3.9
+Python >= 3.9, tested on 3.9 and 3.13 in CI (see
+[`.github/workflows/test.yml`](.github/workflows/test.yml)).
 
 ## Development
 
-For environment setup, dependency installation, and running tests, refer to virtual environment configurations and running `pytest`.
+```bash
+pip install -e ".[dev,uri,http,sftp]"
+pytest -q
+```
+
+If you maintain separate virtual environments per Python version locally
+(e.g. `.venv/3.9/`, `.venv/3.13/`), run the same `pytest -q` in each --
+CI does the equivalent across Python 3.9/3.13 on Linux, macOS, and Windows.
 
 ### Releasing
 
