@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pathlib_next"
-version = "0.3.5"
+version = "0.4.0"
 authors = [{ name = "Jose A" }]
 description = "Generic Path Protocol based pathlib"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -20,11 +20,19 @@ uri = ["uritools"]
 http = ["requests", "pathlib_next[uri]", 'htmllistparse', 'bs4']
 sftp = ["paramiko", "pathlib_next[uri]"]
 dev = ['build', 'twine', 'hatchling', 'pytest']
-
+docs = ['mkdocs', 'mkdocs-material', 'mkdocstrings[python]']
 
 [project.urls]
 Homepage = "https://github.com/jose-pr/pathlib_next/"
+Documentation = "https://jose-pr.github.io/pathlib_next/"
 Issues = "https://github.com/jose-pr/pathlib_next/issues"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["/.*"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pathlib_next"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
