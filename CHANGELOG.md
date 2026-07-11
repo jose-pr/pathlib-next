@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `Pathname.joinpath()`, `Pathname.full_match()` (3.13 parity, supports `**`
+  matching any number of segments), `Pathname.anchor`/`drive`/`root`
+  (generic derivation for non-local paths), `Path.rglob()`,
+  `read_text(..., newline=)` (3.13 parity), `Path.samefile()` (default
+  `st_dev`/`st_ino` comparison when the backend's `stat()` provides them,
+  `NotImplementedError` otherwise).
+- `Path.glob()`/`LocalPath.glob()`: `recursive=` now auto-detects (`True` if
+  the pattern has a `"**"` component) instead of defaulting to `False`;
+  explicit `recursive=True`/`False` still overrides.
+- `Path.copy()`: raises `IsADirectoryError` when the target is an existing
+  directory (previously misbehaved); gained `follow_symlinks=`/
+  `preserve_metadata=` kwargs, named to match CPython 3.14's `Path.copy()`.
+- `docs/divergences.md`: registry of every deliberate behavioral divergence
+  from `pathlib`, with rationale. Linked from the docs nav.
+
 ### Fixed
 - `Path.mkdir(parents=True)` created intermediate parents with `exist_ok=False`
   (racy, and wrong when a parent already existed) and dropped the caller's
