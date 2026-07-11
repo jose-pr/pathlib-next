@@ -135,10 +135,10 @@ class HttpPath(UriPath):
     def is_dir(self):
         if self._isdir is None:
             self.stat()
-        return self._is_dir is not None and self._isdir
+        return bool(self._isdir)
 
     def is_file(self):
-        return self.is_dir is not None and not self.is_dir()
+        return not self.is_dir()
 
     def with_session(self, session: _req.Session, **requests_args):
         return type(self)(self, backend=HttpBackend(session, requests_args))

@@ -24,6 +24,15 @@ _NOSOURCE = Source(None, None, None, None)
 _U = _ty.TypeVar("_U", bound="Uri")
 
 
+def _segments_of(path: str) -> list[str]:
+    """Split a normalized posix-style path into segments for prefix
+    comparison. "/" alone must yield [""] (the root), not ["", ""]
+    (str.split's artifact for a string ending in "/")."""
+    if path == "/":
+        return [""]
+    return path.split("/")
+
+
 def _uriencode(text: str, safe=""):
     return uritools.uriencode(text, safe=safe).decode()
 
@@ -61,7 +70,8 @@ class Uri(Pathname):
             elif isinstance(uri, (_pathlib.Path, Path)):
                 try:
                     uri = uri.as_uri()
-                except:
+                except ValueError:
+                    # as_uri() raises ValueError for a relative path.
                     uri = f"file:{_uriencode(uri.as_posix(), safe='/')}"
                 _uris.append(uri)
             elif isinstance(uri, (_pathlib.PurePath, Pathname)):
@@ -87,7 +97,10 @@ class Uri(Pathname):
                         "object where __fspath__ returns a str, "
                         f"not {type(path).__name__!r}"
                     )
-                _uris.append(f"{_uriencode(uri.as_posix(), safe='/')}")
+                # Only __fspath__ is guaranteed here -- posix-normalize the
+                # string itself rather than assuming an as_posix() method.
+                posix = _pathlib.PurePath(path).as_posix()
+                _uris.append(f"{_uriencode(posix, safe='/')}")
         self._raw_uris = _uris
 
     @classmethod
@@ -316,15 +329,18 @@ class Uri(Pathname):
             or not (bool(self.source) and bool(other.source))
         ):
             return False
-        _other = other.normalized_path
-        _self = self.normalized_path
-        return _self.startswith(_other)
+        # Segment-wise prefix comparison: a naive startswith() on the raw
+        # strings would report "/foo/bar2" as relative to "/foo/bar".
+        _other = _segments_of(other.normalized_path)
+        _self = _segments_of(self.normalized_path)
+        return _self[: len(_other)] == _other
 
     def relative_to(self, other: UriLike, *, walk_up=False):
         other = other if isinstance(other, Uri) else Uri(other)
-        if not self.is_relative_to(other):
-            raise ValueError(f"{str(self)!r} is not in the subpath of {str(other)!r}")
-
+        # NOTE: no upfront `if not self.is_relative_to(other): raise` here --
+        # that used to short-circuit before the walk_up loop below ever ran,
+        # making walk_up=True dead code. The step==0 iteration of the loop
+        # (path=other) reproduces the exact same non-walk_up error.
         for step, path in enumerate([other] + list(other.parents)):
             if self.is_relative_to(path):
                 break
@@ -345,8 +361,16 @@ class Uri(Pathname):
         return self.source.is_local()
 
     def __eq__(self, other: Pathname | str):
-        uri = other.as_uri() if isinstance(other, Pathname) else other
+        if isinstance(other, Pathname):
+            uri = other.as_uri()
+        elif isinstance(other, str):
+            uri = other
+        else:
+            return NotImplemented
         return self.as_uri() == uri
+
+    def __hash__(self):
+        return hash(self.as_uri())
 
     def as_posix(self):
         source = self.source

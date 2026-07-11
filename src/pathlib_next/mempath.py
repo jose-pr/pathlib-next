@@ -145,7 +145,7 @@ class MemPath(Path):
             return FileStat(is_dir=True)
 
         if name not in parent:
-            return FileNotFoundError(self)
+            raise FileNotFoundError(self)
 
         return FileStat(is_dir=isinstance(parent[name], dict))
 
@@ -165,7 +165,7 @@ class MemPath(Path):
             content = parent.setdefault(name, bytearray())
             return MemBytesIO(content)
         elif name not in parent:
-            return FileNotFoundError(self)
+            raise FileNotFoundError(self)
         else:
             content = parent[name]
 

@@ -198,10 +198,9 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         """
         if case_sensitive is None:
             case_sensitive = self._is_case_sensitive
-        path = str(self)
+        # as_posix(), not str(self): str() of a Uri includes scheme/host.
+        path = self.as_posix()
         if not isinstance(path_pattern, _re.Pattern):
-            if isinstance(str, path_pattern):
-                path_pattern = type(self)(path_pattern)
             path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
         return path_pattern.match(path) is not None
 
@@ -210,7 +209,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     def has_glob_pattern(self):
         for segment in self.segments:
-            if _glob.WILCARD_PATTERN.match(segment) != None:
+            if _glob.WILDCARD_PATTERN.search(segment) != None:
                 return True
         return False
 
@@ -370,7 +369,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
     ):
         _onerror = lambda _err, _path: (
-            ignore_error if not callable(ignore_error) else ignore_error
+            ignore_error(_err, _path) if callable(ignore_error) else bool(ignore_error)
         )
         try:
             stat = FileStat.from_path(self)

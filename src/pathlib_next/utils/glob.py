@@ -11,7 +11,8 @@ import typing as _ty
 
 RECURSIVE = "**"
 ANY_PATTERN = _re.compile(_fnmatch.translate("*"))
-WILCARD_PATTERN = _re.compile("([*?[])")
+WILDCARD_PATTERN = _re.compile("([*?[])")
+WILCARD_PATTERN = WILDCARD_PATTERN  # back-compat alias for the old typo'd name
 
 if _ty.TYPE_CHECKING:
     from ..path import P as _Globable
@@ -52,7 +53,7 @@ def glob(
     include_hidden = include_hidden or path.is_hidden()
     pattern = compile_pattern(path.name, case_sensitive) if path.name else ANY_PATTERN
 
-    name_is_pattern = WILCARD_PATTERN.match(path.name) != None
+    name_is_pattern = WILDCARD_PATTERN.search(path.name) != None
     wildcard_in_path = name_is_pattern or path.has_glob_pattern()
     parent = next(iter(path.parents), None)
 

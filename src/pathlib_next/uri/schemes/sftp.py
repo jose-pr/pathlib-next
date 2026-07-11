@@ -6,7 +6,7 @@ import typing as _ty
 import paramiko as _paramiko
 
 from ... import utils as _utils
-from .. import Source, UriPath
+from .. import Source, Uri, UriPath
 
 
 class BaseSftpBackend(object):
@@ -93,7 +93,10 @@ class SftpPath(UriPath):
     def _mkdir(self, mode):
         return self._sftpclient.mkdir(self.path, mode)
 
-    def chmod(self, mode):
+    def chmod(self, mode, *, follow_symlinks=True):
+        # paramiko's SFTPClient has no lchmod-equivalent.
+        if not follow_symlinks:
+            raise NotImplementedError("chmod(follow_symlinks=False)")
         return self._sftpclient.chmod(self.path, mode)
 
     def unlink(self, missing_ok=False):
@@ -104,5 +107,11 @@ class SftpPath(UriPath):
     def rmdir(self):
         return self._sftpclient.rmdir(self.path)
 
-    def _rename(self, target):
-        return self._sftpclient.rename(self.path, target.as_posix())
+    def rename(self, target: "SftpPath | Uri | str"):
+        # base Path.rename is the notimplemented stub -- this was never
+        # called under its old name `_rename`, so every move() fell back to
+        # copy+unlink. `target.path`, not as_posix(): Uri.as_posix() prefixes
+        # "host:" for the sftp wire protocol, which only wants the raw path.
+        if not isinstance(target, Uri):
+            target = Uri(self, target)
+        return self._sftpclient.rename(self.path, target.path)

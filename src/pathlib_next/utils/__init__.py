@@ -51,7 +51,7 @@ class LRU(_ty.Generic[K, V]):
         return result
 
     def invalidate(self, *args: K.args) -> V:
-        with self.lock():
+        with self.lock:
             if args in self.cache:
                 self.cache.pop(args, None)
 
