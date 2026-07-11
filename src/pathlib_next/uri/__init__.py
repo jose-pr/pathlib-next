@@ -54,6 +54,8 @@ class Uri(Pathname):
         "_initiated",
         "_normalized_path",
         "_segments_cache",
+        "_suffix_cache",
+        "_stem_cache",
     )
 
     def __new__(cls, *uris, **options):
@@ -194,6 +196,8 @@ class Uri(Pathname):
         self._query = query
         self._fragment = fragment
         self._segments_cache = None
+        self._suffix_cache = None
+        self._stem_cache = None
 
     def _from_parsed_parts(
         self, source: Source, path: str, query: str, fragment: str, /, **kwargs
@@ -329,6 +333,28 @@ class Uri(Pathname):
         return self._segments_cache
 
     @property
+    def suffix(self) -> str:
+        if self._suffix_cache is None:
+            name = self.name
+            i = name.rfind(".")
+            if 0 < i < len(name) - 1:
+                self._suffix_cache = name[i:]
+            else:
+                self._suffix_cache = ""
+        return self._suffix_cache
+
+    @property
+    def stem(self) -> str:
+        if self._stem_cache is None:
+            name = self.name
+            i = name.rfind(".")
+            if 0 < i < len(name) - 1:
+                self._stem_cache = name[:i]
+            else:
+                self._stem_cache = name
+        return self._stem_cache
+
+    @property
     def parent(self):
         """The logical parent of the path."""
         segments = self.segments
@@ -377,7 +403,7 @@ class Uri(Pathname):
                 raise ValueError(f"'..' segment in {str(other)!r} cannot be walked")
         else:
             raise ValueError(f"{str(self)!r} and {str(other)!r} have different anchors")
-        parts = [".."] * step + self.segments[len(path.segments) :]
+        parts = [".."] * step + list(self.segments[len(path.segments) :])
         return self._from_parsed_parts(
             _NOSOURCE, "/".join(parts), self.query, self.fragment
         )

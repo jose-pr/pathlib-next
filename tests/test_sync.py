@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 import pathlib_next
@@ -95,6 +97,19 @@ def test_sync_local_to_local(tmp_path):
     syncer = PathSyncer(checksum)
     syncer.sync(pathlib_next.LocalPath(src_dir), pathlib_next.LocalPath(dst_dir))
     assert (dst_dir / "f.txt").read_text() == "data"
+
+
+# --- N2: PathSyncer.log() must use logging, not print() ---
+
+
+def test_sync_log_uses_logging_not_print(tmp_path, capsys, caplog):
+    source = _mem_tree()
+    target = pathlib_next.LocalPath(tmp_path)
+    syncer = PathSyncer(checksum)
+    with caplog.at_level(logging.INFO, logger="pathlib_next.sync"):
+        syncer.sync(source, target)
+    assert capsys.readouterr().out == ""  # nothing printed to stdout
+    assert any(r.name == "pathlib_next.sync" for r in caplog.records)
 
 
 # --- B22: PathAndStat.__getattr__ raises AttributeError for unknown attrs ---
