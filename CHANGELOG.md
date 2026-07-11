@@ -26,39 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `ftp_server`, `dav_server`, and `s3_server` pytest fixtures in `conftest.py` serving ephemeral in-process servers with pre-populated `fixture_tree` contents.
 - Entry-point declarations in `pyproject.toml` (`pathlib_next.schemes` group) for all built-in schemes, enabling pip-installed external packages to auto-register custom schemes.
 - Plugin discovery tests in `tests/test_plugins.py` covering `_load_entry_point`, `_load_builtin_scheme`, and `get_scheme_cls` integration.
-
+- Property-based tests (`hypothesis`, new `dev` extra) in `tests/test_properties.py`: URI parse/format round-trip identity, join associativity, and parity with `pathlib.PurePosixPath` for `segments`/`name`/`relative_to`/`match`/`is_relative_to`.
+- `ZipUri`/`ArchiveUri` archive handle registry: independently-constructed `UriPath("zip:...")`/`"tar:..."` instances pointing at the same outer archive now share one `_ArchiveBackend` (keyed by backend class + outer URI, a `weakref.WeakValueDictionary`) instead of each opening its own handle -- fixes stale reads and out-of-sync writes across separately-constructed instances. The backend closes its handle automatically (`__del__`) once every referencing path is garbage-collected.
+- Full `ZipUri` write support: `unlink()`, `rmdir()` (empty-dir check, mirrors `S3Path.rmdir()`), `rename()` (renames a directory's nested entries too), and overwriting an existing entry's content (previously `open("w")` on an existing entry silently appended a duplicate zipfile entry instead of replacing it). All four go through a new safe full-archive rewrite (`_ZipBackend._rewrite`) since `zipfile` has no in-place entry mutation: writes to a temp file beside the outer archive, then atomically replaces it (`os.replace`). Requires a local (`file:`) outer archive, same as existing new-entry writes.
 
 ### Changed
 - Matrix expansion in GitHub Actions CI to test Python 3.10, 3.11, and 3.12 (on Ubuntu).
 - Added a "no-extras" CI job to run tests without optional dependencies installed.
-
-### Fixed
-- `FtpPath.stat()` returned `FileNotFoundError` for the FTP root path `"/"` because `_mlsd_entry()` has no parent directory to query; now uses `CWD /` to confirm the root exists as a directory.
-- `FtpPath.rmdir()` propagated raw `ftplib.error_perm` (550) instead of `OSError` when the directory was non-empty, violating the pathlib contract.
-- `FtpPath.chmod()` raised `ftplib.error_perm` when the server rejected `SITE CHMOD` (pyftpdlib does not implement it); now converts to `NotImplementedError` so `Path.copy()` silently skips the metadata step.
-- `pytest filterwarnings` updated to suppress `boto3.exceptions.PythonDeprecationWarning` (boto3 EOL notice for Python 3.9, inherits `Warning` not `DeprecationWarning`) and `ResourceWarning` from daemon-thread server socket cleanup at GC teardown.
-- README and docs landing page were still describing the pre-0.6.0 scheme set:
-  the capability matrix, extras table, and quick starts now cover `data:`,
-  `ftp(s):`, `zip:`/`tar:`, `dav(s):`, and `s3:` (all shipped in 0.6.0/0.7.0
-  but previously only documented in the Schemes guide).
-- `LRU.maxsize` setter raised `TypeError` when shrinking below the current
-  fill (`OrderedDict.pop()` was called with the `last=False` kwarg meant for
-  `popitem()`).
-- `DavPath.rmdir()` mapped directly to WebDAV `DELETE`, which is recursive
-  by spec (RFC 4918) -- it silently deleted non-empty collections instead
-  of enforcing pathlib's "must be empty" contract like every other scheme.
-  Now does a depth-1 PROPFIND first and raises `OSError` (`ENOTEMPTY`) if
-  children exist. The native recursive `DELETE` is still available, and
-  cheaper than the base class's client-side walk, via the new
-  `DavPath.rm(recursive=True)` override (one request).
-- `Uri._make_child_relpath()` doubled the join slash for any scheme whose
-  `path` already ends in "/" (e.g. `f"{self.path}/{name}"` on an HTTP/DAV
-  directory path produced `"//name"`); also now treats an empty path with
-  an authority present as the same root as `"/"` (RFC 3986:
-  `"http://host"` == `"http://host/"`) instead of joining a bare, ambiguous
-  name with no leading slash.
-
-### Changed
 - `PathSyncer.log()` now logs through `logging.getLogger("pathlib_next.sync")`
   at `INFO` instead of calling `print()` -- stdout consumers must configure
   logging (e.g. `logging.basicConfig()`) to see sync progress again.
@@ -88,6 +62,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `stat()`, like every other scheme) in favor of a single-use stat
   hint seeded by `_scandir()`; `DavPath`'s now-redundant `iterdir()`/
   `is_dir()`/`is_file()` overrides are removed for the same reason.
+
+### Fixed
+- `Uri.relative_to()` computed the remaining segments from the raw `.segments` property instead of the root-aware `_segments_of()` helper `is_relative_to()` already used -- `Uri("/").segments` is the 2-tuple `("", "")` (an artifact of `"/".split("/")`), so `relative_to(<root>)` silently dropped the child's only real segment (e.g. `Uri("/a").relative_to(Uri("/"))` produced `""` instead of `"a"`). Found by the new property-based test suite.
+- `TestSftpContract`'s in-process paramiko test server (`tests/conftest.py::sftp_server`) deadlocked every real I/O test: its `_SSHServer.check_channel_subsystem_request()` override returned `name == "sftp"` directly instead of delegating to `paramiko.ServerInterface`'s default implementation, which is what actually instantiates and starts the registered `SFTPServer` handler thread (`handler.start()`). Without it, the channel was reported "hooked up" to the client but nothing server-side ever read from or responded on it, so `SFTPClient.from_transport()` blocked forever in version negotiation. Fixed by removing the override (the inherited default already does exactly what the removed comment claimed it did).
+- `SftpPath._mkdir()`/`_open(mode="x")` propagated a generic, untyped `OSError("Failure")` when the target already existed -- SFTPv3 has no dedicated "already exists" status code, so paramiko's server-side `convert_errno()` falls through to `SFTP_FAILURE` for `EEXIST` (unlike `ENOENT`, which it does map, giving a proper `FileNotFoundError`). Both now check `self.exists()` on failure and raise `FileExistsError` to match every other scheme's `mkdir`/`touch(exist_ok=False)` contract (mirrors `FtpPath._mkdir()`'s existing check-after-failure pattern). Found by `TestSftpContract` once the deadlock above was fixed and it could actually run.
+- `FtpPath.stat()` returned `FileNotFoundError` for the FTP root path `"/"` because `_mlsd_entry()` has no parent directory to query; now uses `CWD /` to confirm the root exists as a directory.
+- `FtpPath.rmdir()` propagated raw `ftplib.error_perm` (550) instead of `OSError` when the directory was non-empty, violating the pathlib contract.
+- `FtpPath.chmod()` raised `ftplib.error_perm` when the server rejected `SITE CHMOD` (pyftpdlib does not implement it); now converts to `NotImplementedError` so `Path.copy()` silently skips the metadata step.
+- `pytest filterwarnings` updated to suppress `boto3.exceptions.PythonDeprecationWarning` (boto3 EOL notice for Python 3.9, inherits `Warning` not `DeprecationWarning`) and `ResourceWarning` from daemon-thread server socket cleanup at GC teardown.
+- README and docs landing page were still describing the pre-0.6.0 scheme set:
+  the capability matrix, extras table, and quick starts now cover `data:`,
+  `ftp(s):`, `zip:`/`tar:`, `dav(s):`, and `s3:` (all shipped in 0.6.0/0.7.0
+  but previously only documented in the Schemes guide).
+- `LRU.maxsize` setter raised `TypeError` when shrinking below the current
+  fill (`OrderedDict.pop()` was called with the `last=False` kwarg meant for
+  `popitem()`).
+- `DavPath.rmdir()` mapped directly to WebDAV `DELETE`, which is recursive
+  by spec (RFC 4918) -- it silently deleted non-empty collections instead
+  of enforcing pathlib's "must be empty" contract like every other scheme.
+  Now does a depth-1 PROPFIND first and raises `OSError` (`ENOTEMPTY`) if
+  children exist. The native recursive `DELETE` is still available, and
+  cheaper than the base class's client-side walk, via the new
+  `DavPath.rm(recursive=True)` override (one request).
+- `Uri._make_child_relpath()` doubled the join slash for any scheme whose
+  `path` already ends in "/" (e.g. `f"{self.path}/{name}"` on an HTTP/DAV
+  directory path produced `"//name"`); also now treats an empty path with
+  an authority present as the same root as `"/"` (RFC 3986:
+  `"http://host"` == `"http://host/"`) instead of joining a bare, ambiguous
+  name with no leading slash.
 
 ## [0.7.0] - 2026-07-11
 
