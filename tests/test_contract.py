@@ -123,3 +123,30 @@ class TestDataUriContract(ReadPathContract):
         st = root.stat()
         assert st.st_size == 1
 
+
+# Ftp contract
+class TestFtpContract(PathContract):
+    @pytest.fixture
+    def root(self, ftp_server):
+        from pathlib_next.uri.schemes.ftp import FtpPath
+        return FtpPath(ftp_server)
+
+
+# WebDAV contract
+class TestDavContract(PathContract):
+    @pytest.fixture
+    def root(self, dav_server):
+        pytest.importorskip("requests")
+        from pathlib_next.uri.schemes.webdav import DavPath
+        return DavPath(dav_server)
+
+
+# S3 contract
+class TestS3Contract(PathContract):
+    @pytest.fixture
+    def root(self, s3_server):
+        pytest.importorskip("boto3")
+        url, _endpoint = s3_server
+        from pathlib_next.uri.schemes.s3 import S3Path
+        return S3Path(url)
+

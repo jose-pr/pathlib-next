@@ -156,6 +156,14 @@ class FtpPath(UriPath):
         hint = self._pop_stat_hint()
         if hint is not None:
             return hint
+        # Special case: the FTP root '/' has no parent to MLSD and SIZE won't
+        # work on a directory.  Confirm it exists via CWD.
+        if self.path in ("/", ""):
+            try:
+                self._ftpclient.cwd("/")
+                return FileStat(is_dir=True)
+            except _ftplib.error_perm as error:
+                raise FileNotFoundError(self) from error
         facts = self._mlsd_entry()
         if facts is not None:
             return self._facts_to_filestat(facts)
@@ -169,6 +177,7 @@ class FtpPath(UriPath):
         if size is None:
             raise FileNotFoundError(self)
         return FileStat(st_size=size, is_dir=False)
+
 
     def _open(self, mode="r", buffering=-1):
         if "r" in mode:
@@ -202,7 +211,16 @@ class FtpPath(UriPath):
             raise FileNotFoundError(self) from error
 
     def rmdir(self):
-        self._ftpclient.rmd(self.path)
+        try:
+            self._ftpclient.rmd(self.path)
+        except _ftplib.error_perm as error:
+            # 550 = directory not empty or does not exist
+            code = str(error)[:3]
+            if code == "550":
+                if self.exists():
+                    raise OSError(f"Directory not empty: {self}") from error
+                raise FileNotFoundError(self) from error
+            raise
 
     def rename(self, target: "FtpPath | Uri | str"):
         # A plain str target is a sibling rename (relative to self's
@@ -212,8 +230,12 @@ class FtpPath(UriPath):
         self._ftpclient.rename(self.path, target.path)
 
     def chmod(self, mode, *, follow_symlinks=True):
-        # SITE CHMOD is a common but non-standard FTP extension; not every
-        # server supports it (ftplib.error_perm propagates uncaught if so).
+        # SITE CHMOD is a non-standard FTP extension; pyftpdlib and many real
+        # servers do not support it.  Convert any server rejection (error_perm)
+        # to NotImplementedError so that path.py's copy() silently skips it.
         if not follow_symlinks:
             raise NotImplementedError("chmod(follow_symlinks=False)")
-        self._ftpclient.voidcmd(f"SITE CHMOD {mode:o} {self.path}")
+        try:
+            self._ftpclient.voidcmd(f"SITE CHMOD {mode:o} {self.path}")
+        except _ftplib.error_perm:
+            raise NotImplementedError("SITE CHMOD not supported by this server")

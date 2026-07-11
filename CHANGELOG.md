@@ -8,15 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Dynamic loading of custom URI scheme plugins via standard Python packaging entry points under the `"pathlib_next.schemes"` group, allowing third-party package extensibility.
+- Lazy-loading for all builtin scheme implementations (s3, sftp, http, etc.) to significantly reduce start-up and import overhead when heavy libraries are not needed.
+- MD5 and SHA-256 checksum helpers in `pathlib_next.utils` (`md5` and `sha256`).
+- Optional `checksum` parameter in `PathSyncer`, defaulting to the new `md5` helper.
+- Recursive directory copying via `Path.copy(recursive=True)`.
+- Support for recursive folder moves falling back to recursive copy + recursive delete when `rename` is not supported.
+- Archive utilities `make_archive` and `unpack_archive` supporting ZIP and TAR formats using memory-efficient chunk streaming.
 - Hierarchical test contracts: `PurePathContract` (pure path operations) and `ReadPathContract` (read-only path operations), allowing contract-based verification of read-only and memory/archive paths.
 - Contract test suites wired for `DataUri`, `ZipUri`, `TarUri`, and `HttpPath`.
 - Dedicated unit tests for `Path.walk()`, `samefile()`, and `Stat` device queries.
+- Comprehensive runnable examples in `examples/` for URI schemes: offline (`data_and_archive.py`) and environment-variable configured ones (`ftp_listing.py`, `webdav_roundtrip.py`, `s3_listing.py`).
+- Split monolith API reference documentation into per-module pages (`path`, `uri`, `mempath`, `utils`, `testing`).
+- Complete docstring coverage for all public methods/properties across `Pathname`, `Path`, `Uri`, `UriPath`, and protocols, and configured `mkdocs` to enforce docstring presence (`show_if_no_docstring: false`).
+- Detailed documentation of contract testing levels (`PurePathContract`, `ReadPathContract`, `PathContract`) in the extending guide.
+- In-process real-server contract tests for `FtpPath` (pyftpdlib), `DavPath` (wsgidav/cheroot), and `S3Path` (moto mock_aws): `TestFtpContract`, `TestDavContract`, `TestS3Contract` run the full `PathContract` suite against live local servers.
+- `ftp_server`, `dav_server`, and `s3_server` pytest fixtures in `conftest.py` serving ephemeral in-process servers with pre-populated `fixture_tree` contents.
+- Entry-point declarations in `pyproject.toml` (`pathlib_next.schemes` group) for all built-in schemes, enabling pip-installed external packages to auto-register custom schemes.
+- Plugin discovery tests in `tests/test_plugins.py` covering `_load_entry_point`, `_load_builtin_scheme`, and `get_scheme_cls` integration.
+
 
 ### Changed
 - Matrix expansion in GitHub Actions CI to test Python 3.10, 3.11, and 3.12 (on Ubuntu).
 - Added a "no-extras" CI job to run tests without optional dependencies installed.
 
 ### Fixed
+- `FtpPath.stat()` returned `FileNotFoundError` for the FTP root path `"/"` because `_mlsd_entry()` has no parent directory to query; now uses `CWD /` to confirm the root exists as a directory.
+- `FtpPath.rmdir()` propagated raw `ftplib.error_perm` (550) instead of `OSError` when the directory was non-empty, violating the pathlib contract.
+- `FtpPath.chmod()` raised `ftplib.error_perm` when the server rejected `SITE CHMOD` (pyftpdlib does not implement it); now converts to `NotImplementedError` so `Path.copy()` silently skips the metadata step.
+- `pytest filterwarnings` updated to suppress `boto3.exceptions.PythonDeprecationWarning` (boto3 EOL notice for Python 3.9, inherits `Warning` not `DeprecationWarning`) and `ResourceWarning` from daemon-thread server socket cleanup at GC teardown.
 - README and docs landing page were still describing the pre-0.6.0 scheme set:
   the capability matrix, extras table, and quick starts now cover `data:`,
   `ftp(s):`, `zip:`/`tar:`, `dav(s):`, and `s3:` (all shipped in 0.6.0/0.7.0

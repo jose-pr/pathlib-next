@@ -20,8 +20,21 @@ uri = ["uritools"]
 http = ["requests", "pathlib_next[uri]", 'htmllistparse', 'bs4']
 sftp = ["paramiko", "pathlib_next[uri]"]
 s3 = ["boto3", "pathlib_next[uri]"]
-dev = ['build', 'twine', 'hatchling', 'pytest', 'pytest-cov']
+dev = ['build', 'twine', 'hatchling', 'pytest', 'pytest-cov', 'pyftpdlib', 'wsgidav', 'cheroot', 'moto[s3]']
 docs = ['mkdocs', 'mkdocs-material', 'mkdocstrings[python]']
+
+[project.entry-points."pathlib_next.schemes"]
+file = "pathlib_next.uri.schemes.file:FileUri"
+data = "pathlib_next.uri.schemes.data:DataUri"
+zip = "pathlib_next.uri.schemes.archive:ZipUri"
+tar = "pathlib_next.uri.schemes.archive:TarUri"
+ftp = "pathlib_next.uri.schemes.ftp:FtpPath"
+http = "pathlib_next.uri.schemes.http:HttpPath"
+https = "pathlib_next.uri.schemes.http:HttpPath"
+dav = "pathlib_next.uri.schemes.webdav:DavPath"
+davs = "pathlib_next.uri.schemes.webdav:DavPath"
+sftp = "pathlib_next.uri.schemes.sftp:SftpPath"
+s3 = "pathlib_next.uri.schemes.s3:S3Path"
 
 [project.urls]
 Homepage = "https://github.com/jose-pr/pathlib_next/"
@@ -38,4 +51,12 @@ packages = ["src/pathlib_next"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # boto3 emits PythonDeprecationWarning on Python 3.9 (EOL notice); not our bug.
+    # It inherits from Warning directly, not DeprecationWarning.
+    "ignore::boto3.exceptions.PythonDeprecationWarning",
+    # ResourceWarnings from daemon-thread server sockets cleaned up by GC at
+    # session teardown are expected; suppress to keep output readable.
+    "ignore::ResourceWarning",
+]
