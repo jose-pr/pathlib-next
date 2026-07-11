@@ -47,7 +47,11 @@ class MemPath(Path):
             else:
                 _segments.append(segment)
         self._segments = "/".join(_segments).split("/")
-        if _backend and backend is None:
+        # `is not None`, not truthiness: a freshly-created root's backend is
+        # an *empty* dict, which is falsy -- `if _backend:` silently treated
+        # that as "no backend found" and gave the child a disconnected new
+        # one, breaking backend sharing for any join off an empty MemPath.
+        if _backend is not None and backend is None:
             backend = _backend
         self._backend = backend if backend is not None else MemPathBackend()
         self._normalized = None
@@ -68,9 +72,14 @@ class MemPath(Path):
             # Normalize against a virtual root ("/" + posix) so ".."-escaping
             # paths (e.g. "..", "../x") get clamped at the root instead of
             # mangling into "." (posixpath.normpath("..") == "..", and the
-            # old .removeprefix(".") turned that into a bare ".").
+            # old .removeprefix(".") turned that into a bare "."). Strip any
+            # existing leading "/" first: posixpath.normpath("//...") treats
+            # an exactly-double-leading-slash specially (POSIX
+            # implementation-defined root) and doesn't collapse it, which
+            # broke MemPath("/") (as_posix() == "/") into a bogus "//".
+            posix = self.as_posix().lstrip("/")
             self._normalized = (
-                _posix.normpath("/" + self.as_posix()).removeprefix("/").split("/")
+                _posix.normpath("/" + posix).removeprefix("/").split("/")
             )
         return self._normalized
 
