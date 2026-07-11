@@ -97,3 +97,50 @@ def test_join_without_root():
     authkeys = Uri("sftp://root@sftpexample") / "root/.ssh/authorized_keys"
     uri = authkeys.as_uri()
     assert uri == "sftp://root@sftpexample/root/.ssh/authorized_keys"
+
+
+# --- B15 regressions: Uri.__init__ from various source types ---
+
+
+def test_from_pure_posix_path():
+    # PurePosixPath isn't a pathlib.Path (no as_uri()), so this exercises
+    # the plain-Pathname/PurePath branch of Uri.__init__.
+    uri = Uri(pathlib.PurePosixPath("a/b/c"))
+    assert uri.path.endswith("a/b/c")
+
+
+def test_from_fspath_only_object():
+    # B15: constructing from an object that only implements __fspath__ (no
+    # as_posix()) used to crash with AttributeError.
+    class FspathOnly:
+        def __fspath__(self):
+            return "a/b/c.txt"
+
+    uri = Uri(FspathOnly())
+    assert uri.path.endswith("a/b/c.txt")
+
+
+def test_from_relative_local_path_no_crash():
+    # pathlib.Path.as_uri() raises ValueError for relative paths; Uri()
+    # must fall back cleanly instead of propagating a bare except.
+    uri = Uri(pathlib.Path("relative/path.txt"))
+    assert "relative/path.txt" in uri.path
+
+
+# --- B26 regression: query/fragment "last segment that sets one wins" ---
+
+
+def test_join_query_fragment_last_setting_segment_wins():
+    # A later segment with NO query/fragment must not blank out an earlier
+    # segment's -- only a later segment that actually sets one should win.
+    base = Uri("http://h/a?x=1#frag")
+    joined = Uri(base, "b")
+    assert joined.query == "x=1"
+    assert joined.fragment == "frag"
+
+
+def test_join_query_fragment_later_segment_overrides():
+    base = Uri("http://h/a?x=1")
+    joined = Uri(base, "b?y=2#frag2")
+    assert joined.query == "y=2"
+    assert joined.fragment == "frag2"
