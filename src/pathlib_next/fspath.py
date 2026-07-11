@@ -6,10 +6,16 @@ import os as _os
 import pathlib as _path
 import posixpath as _posixpath
 import re as _re
+import sys as _sys
 import types as _types
 import typing as _ty
 
 from . import path as _proto
+
+# pathlib.Path.stat()/chmod() only accept follow_symlinks= on 3.10+; below
+# that, LocalPath (which inherits them directly from pathlib.Path via MRO,
+# see class LocalPath below) needs a shim.
+_HAS_FOLLOW_SYMLINKS = _sys.version_info >= (3, 10)
 
 
 @_func.cache
@@ -66,6 +72,24 @@ class LocalPath(
     _BaseFSPathname,
 ):
     __slots__ = ()
+
+    def stat(self, *, follow_symlinks=True):
+        # pathlib.Path.stat() (next in MRO via WindowsPath/PosixPath) only
+        # accepts follow_symlinks= on 3.10+; below that, lstat() is the
+        # (pre-existing, non-kwarg) equivalent for follow_symlinks=False.
+        if _HAS_FOLLOW_SYMLINKS:
+            return super().stat(follow_symlinks=follow_symlinks)
+        return super().stat() if follow_symlinks else super().lstat()
+
+    def chmod(self, mode, *, follow_symlinks=True):
+        # Same follow_symlinks= 3.10+ gap as stat() above; lchmod() is the
+        # pre-existing equivalent (raises NotImplementedError itself on
+        # platforms without os.lchmod, e.g. Windows).
+        if _HAS_FOLLOW_SYMLINKS:
+            return super().chmod(mode, follow_symlinks=follow_symlinks)
+        return (
+            super().chmod(mode) if follow_symlinks else super().lchmod(mode)
+        )
 
     def glob(
         self,
