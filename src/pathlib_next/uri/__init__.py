@@ -423,7 +423,13 @@ class Uri(Pathname):
                 raise ValueError(f"'..' segment in {str(other)!r} cannot be walked")
         else:
             raise ValueError(f"{str(self)!r} and {str(other)!r} have different anchors")
-        parts = [".."] * step + list(self.segments[len(path.segments) :])
+        # _segments_of, not raw .segments: the latter gives the URI root
+        # ("/") a spurious 2-tuple ("", "") instead of ("",), which used to
+        # make relative_to(<root>) drop the child's only real segment
+        # (found via property testing, polish_perf/06).
+        self_segs = _segments_of(self.normalized_path)
+        path_segs = _segments_of(path.normalized_path)
+        parts = [".."] * step + self_segs[len(path_segs) :]
         return self._from_parsed_parts(
             _NOSOURCE, "/".join(parts), self.query, self.fragment
         )
