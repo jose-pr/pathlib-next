@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `MemPath.stat()`/`MemPath._open()` returned a `FileNotFoundError` instance instead
+  of raising it for a missing path, causing an unrelated `AttributeError` downstream.
+- `LRU.invalidate()` called `self.lock()` instead of using `self.lock` as a context
+  manager (`RLock` isn't callable) -- broke the SFTP client reconnect path.
+- `Pathname.match()` had reversed `isinstance()` arguments and compared against
+  `str(self)` (which includes scheme/host for `Uri`) instead of `as_posix()`.
+- Glob wildcard detection (`WILCARD_PATTERN`, renamed `WILDCARD_PATTERN`, old name
+  kept as an alias) used `.match()` (anchored) instead of `.search()`, so patterns
+  like `"foo*"` weren't recognized as wildcards.
+- `Uri` was unhashable (defined `__eq__` without `__hash__`); `__eq__` now also
+  returns `NotImplemented` for non-`Pathname`/`str` operands instead of raising.
+- `Uri.is_relative_to()` used `str.startswith()` on normalized path strings, so
+  `/foo/bar2` was incorrectly reported as relative to `/foo/bar`; now compares
+  path segments.
+- `Uri.relative_to(walk_up=True)` was dead code -- an early guard raised
+  `ValueError` before the walk-up loop ever ran.
+- `HttpPath.is_dir()`/`is_file()` tested truthiness of bound methods
+  (`self._is_dir`, `self.is_dir`) instead of calling/checking the right attribute,
+  so both always returned truthy nonsense.
+- `SftpPath.chmod()` didn't accept `follow_symlinks=`, so the inherited `lchmod()`
+  crashed with `TypeError`; now raises `NotImplementedError` for
+  `follow_symlinks=False` (paramiko has no `lchmod`).
+- `SftpPath` defined `_rename()`, which nothing ever called -- renamed to
+  `rename()` so `move()`/`rename()` actually use SFTP's native rename instead of
+  silently falling back to copy+unlink for every move.
+- `Uri.__init__()` used a bare `except:` around `Path.as_uri()` (now
+  `except ValueError:`, matching what `as_uri()` actually raises for relative
+  paths) and crashed with `AttributeError` when constructing from an
+  `os.PathLike` that only implements `__fspath__` (no `as_posix()`).
+- `Path.rm(ignore_error=callable)` never actually called the callable -- both
+  branches of its error handler returned the callable object itself.
+
+### Fixed (Python 3.9/3.10 compatibility)
 - Actual Python 3.9/3.10 runtime compatibility (CI previously only tested 3.11/3.13
   and missed these): `LocalPath`/`Uri` case-sensitivity and path-separator detection
   crashed on 3.9-3.11 (`_flavour` object has no `normcase`); `open(mode="r")` crashed
