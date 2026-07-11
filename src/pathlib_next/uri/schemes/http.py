@@ -58,8 +58,15 @@ class HttpPath(UriPath):
         _self = self.path.removesuffix("/")
         cls = type(self)
         for path in self._listdir():
+            # Directory-listing entries for subdirectories conventionally
+            # carry a trailing "/" (e.g. htmllistparse's FileEntry.name ==
+            # "sub/"). Without stripping it, the child's own .path would end
+            # in "/" too, and Pathname.name derives from segments[-1] --
+            # which is "" for a trailing-slash path, so every subdirectory
+            # entry silently got name == "".
+            name = path.name.removesuffix("/")
             inst = type(self).__new__(cls, backend=self.backend)
-            inst._init(self.source, f"{_self}/{path.name}", "", "")
+            inst._init(self.source, f"{_self}/{name}", "", "")
             yield inst
 
     def _is_dir(self, resp: _req.Response):
