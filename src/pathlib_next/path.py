@@ -83,7 +83,9 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return True
 
     @_abc.abstractmethod
-    def as_uri(self) -> str: ...
+    def as_uri(self) -> str:
+        """Return the path as a URI string."""
+        ...
 
     @property
     def name(self) -> str:
@@ -130,16 +132,23 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     @property
     @_abc.abstractmethod
-    def segments(self) -> _ty.Sequence[str]: ...
+    def segments(self) -> _ty.Sequence[str]:
+        """The sequence of path component strings."""
+        ...
 
     @property
     @_abc.abstractmethod
-    def parts(self) -> _P: ...
+    def parts(self) -> _P:
+        """The individual components/parts of the path."""
+        ...
 
     @_abc.abstractmethod
-    def with_segments(self, *segments: str) -> _ty.Self: ...
+    def with_segments(self, *segments: str) -> _ty.Self:
+        """Construct a same-type path instance from new segments."""
+        ...
 
     def with_name(self, name: str) -> _ty.Self:
+        """Return a new path with the name changed."""
         if not self.name:
             raise ValueError("%r has an empty name" % (self,))
         return self.with_segments(*self.segments[:-1], name)
@@ -149,6 +158,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return self.with_name(stem + self.suffix)
 
     def with_suffix(self, suffix: str) -> _ty.Self:
+        """Return a new path with the suffix changed or added."""
         name = self.name
         if suffix and not suffix.startswith(".") or suffix == ".":
             raise ValueError("Invalid suffix %r" % (suffix))
@@ -210,6 +220,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     @property
     def parents(self) -> _ty.Sequence[_ty.Self]:
+        """An immutable sequence providing access to the logical ancestors of the path."""
         return _PathnameParents(self)
 
     @_utils.notimplemented
@@ -240,9 +251,11 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return _glob.full_match(self.segments, pattern, case_sensitive)
 
     def as_posix(self) -> str:
+        """Return the string representation of the path with forward slashes."""
         return "/".join(self.segments)
 
     def has_glob_pattern(self):
+        """Return True if any of the path segments contain glob wildcards."""
         for segment in self.segments:
             if _glob.WILDCARD_PATTERN.search(segment) != None:
                 return True
@@ -276,6 +289,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         return Pathname.__new__(cls)
 
     def is_hidden(self):
+        """Return True if the final path component is a hidden file/directory."""
         return self.name.startswith(".")
 
     def samefile(self, other_path: str | _ty.Self):
@@ -513,6 +527,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         missing_ok=False,
         ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
     ):
+        """Remove this file or directory, optionally recursively and ignoring errors."""
         _onerror = lambda _err, _path: (
             ignore_error(_err, _path) if callable(ignore_error) else bool(ignore_error)
         )
@@ -533,7 +548,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 raise
 
     @_utils.notimplemented
-    def rename(self, target: "_ty.Self | str"): ...
+    def rename(self, target: "_ty.Self | str"):
+        """Rename this file or directory to the given target."""
+        ...
 
     def copy(
         self,
@@ -542,6 +559,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         overwrite=False,
         follow_symlinks=True,
         preserve_metadata=True,
+        recursive=False,
     ):
         """Copy this file's content to `target`.
 
@@ -556,6 +574,24 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if isinstance(target, str):
             target = type(self)(target)
         src = self
+
+        if recursive and src.is_dir():
+            if target.exists():
+                if not target.is_dir():
+                    raise FileExistsError(target)
+                if not overwrite:
+                    raise FileExistsError(target)
+            else:
+                target.mkdir()
+            for child in src.iterdir():
+                child.copy(
+                    target / child.name,
+                    overwrite=overwrite,
+                    follow_symlinks=follow_symlinks,
+                    preserve_metadata=preserve_metadata,
+                    recursive=True,
+                )
+            return
 
         if target.exists():
             if target.is_dir():
@@ -574,6 +610,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 pass
 
     def move(self, target: "Path|str", *, overwrite=False):
+        """Move this file or directory to target, falling back to copy+unlink/rm if rename is unsupported."""
         if isinstance(target, str):
             target = type(self)(target)
         src = self
@@ -582,7 +619,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
         if target.exists():
             if overwrite:
-                target.unlink()
+                target.rm(recursive=True, missing_ok=True)
             else:
                 raise FileExistsError(target)
 
@@ -591,8 +628,13 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         except NotImplementedError:
             pass
 
-        BinaryOpen.copy(src, target)
-        src.unlink()
+        if src.is_dir():
+            src.copy(target, overwrite=overwrite, recursive=True)
+            src.rm(recursive=True)
+        else:
+            src.copy(target, overwrite=overwrite)
+            src.unlink()
 
 
 PathLike = _ty.Union[str, Path]
+

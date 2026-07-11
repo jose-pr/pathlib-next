@@ -107,3 +107,8 @@ def get_machine_ips():
             ips.append(_ip.ip_address(ip))
 
     return ips
+
+
+from .checksum import md5 as md5, sha256 as sha256
+from .archive import make_archive as make_archive, unpack_archive as unpack_archive
+

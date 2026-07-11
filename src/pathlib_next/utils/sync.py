@@ -6,6 +6,7 @@ import typing as _ty
 
 from ..path import Path
 from ..utils.stat import FileStat
+from .checksum import md5 as _md5
 
 _logger = _logging.getLogger("pathlib_next.sync")
 
@@ -100,13 +101,15 @@ class PathSyncer(object):
 
     def __init__(
         self,
-        checksum: _ty.Callable[[PathAndStat], int],
+        checksum: _ty.Callable[[PathAndStat], _ty.Any] | None = None,
         /,
         remove_missing: bool = False,
         follow_symlinks: bool = True,
         hook: _ty.Callable[[PathAndStat, PathAndStat, SyncEvent, bool], None] = None,
         ignore_error: _OnPathSyncerError | bool = False,
     ) -> None:
+        if checksum is None:
+            checksum = lambda entry: _md5(entry.path)
         self.checksum = checksum
         self.remove_missing = remove_missing
         self._hook = hook
