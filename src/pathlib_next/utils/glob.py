@@ -22,7 +22,8 @@ else:
 
 @_func.lru_cache(maxsize=256, typed=True)
 def compile_pattern(pat: str, case_sensitive: bool):
-    flags = _re.NOFLAG if case_sensitive else _re.IGNORECASE
+    # re.NOFLAG is 3.11+
+    flags = 0 if case_sensitive else _re.IGNORECASE
     return _re.compile(_fnmatch.translate(pat), flags)
 
 

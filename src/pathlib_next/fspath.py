@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import functools as _func
+import ntpath as _ntpath
 import os as _os
 import pathlib as _path
+import posixpath as _posixpath
 import re as _re
+import types as _types
 import typing as _ty
 
 from . import path as _proto
@@ -20,13 +23,22 @@ class _BaseFSPathname(_path.PurePath, _proto.Pathname):
     @property
     def _parser(self) -> _os.path:
         try:
+            # 3.13+: renamed to `parser`, already a module.
             return self.parser
         except AttributeError:
-            return self._flavour
+            pass
+        flavour = self._flavour
+        if isinstance(flavour, _types.ModuleType):
+            # 3.12: `_flavour` is already a module (ntpath/posixpath).
+            return flavour
+        # 3.9-3.11: `_flavour` is a `_WindowsFlavour`/`_PosixFlavour` object
+        # with no `normcase`/`pathsep`/etc — bridge to the equivalent module.
+        return _ntpath if flavour.sep == "\\" else _posixpath
 
     @property
     def _path_separators(self) -> _ty.Sequence[str]:
-        return (self._parser.pathsep, self._parser.altsep)
+        parser = self._parser
+        return (parser.sep,) + ((parser.altsep,) if parser.altsep else ())
 
     @property
     def _is_case_sensitive(self) -> bool:

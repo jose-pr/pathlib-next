@@ -37,7 +37,11 @@ class BinaryOpen(_ty.Protocol):
         """
         fh = self._open(mode.replace("b", ""), buffering)
         if "b" not in mode:
-            encoding = _io.text_encoding(encoding)
+            # io.text_encoding is 3.10+; on 3.9 pass encoding through as-is
+            # (None means locale default, same effective behavior).
+            encoding = getattr(_io, "text_encoding", lambda e, stacklevel=1: e)(
+                encoding
+            )
             fh = _io.TextIOWrapper(fh, encoding, errors, newline)
         return fh
 
