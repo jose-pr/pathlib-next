@@ -160,7 +160,12 @@ class MemPath(Path):
         if name not in parent:
             raise FileNotFoundError(self)
 
-        return FileStat(is_dir=isinstance(parent[name], dict))
+        content = parent[name]
+        is_dir = isinstance(content, dict)
+        # st_size was never set for files (always defaulted to 0), which
+        # silently broke any size-based checksum (e.g. PathSyncer's default
+        # usage pattern).
+        return FileStat(is_dir=is_dir, st_size=0 if is_dir else len(content))
 
     def iterdir(self):
         parent, name = self._parent_container()
