@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-11
+
+### Fixed
+- Removed explicit `[tool.hatch.build.targets.wheel]` packages config that caused hatchling to fail resolving `README.md` during editable installs on CI.
+- Converted `README.md` from a symlink (mode `120000`) to a regular file, fixing `git checkout` failures on macOS and Windows runners.
+- Removed agent-tooling references (`AGENTS.md`, `PYTHON.md`) from committed files.
+
 ## [0.4.0] - 2026-07-11
 
 ### Added
@@ -26,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jose-pr/pathlib_next/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.4.0
 [0.3.5]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.3.5
