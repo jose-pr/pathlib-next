@@ -15,6 +15,14 @@ class _FakeSock:
         self.active = active
 
 
+class _FakeAttr:
+    def __init__(self, filename, st_mode=0):
+        self.filename = filename
+        self.st_mode = st_mode
+        self.st_size = 0
+        self.st_mtime = 0
+
+
 class _FakeSftpClient:
     def __init__(self):
         self.sock = _FakeSock(True)
@@ -29,6 +37,9 @@ class _FakeSftpClient:
 
     def listdir(self, path):
         return ["a", "b"]
+
+    def listdir_attr(self, path):
+        return [_FakeAttr("a"), _FakeAttr("b")]
 
     def stat(self, path):
         return object()
@@ -204,6 +215,10 @@ def test_sftppath_operations():
             self.actions.append(("listdir", path))
             return ["file1", "file2"]
 
+        def listdir_attr(self, path):
+            self.actions.append(("listdir_attr", path))
+            return [_FakeAttr("file1"), _FakeAttr("file2")]
+
         def stat(self, path):
             self.actions.append(("stat", path))
             from pathlib_next.utils.stat import FileStat
@@ -237,10 +252,11 @@ def test_sftppath_operations():
     backend = _OperationsFakeBackend()
     p = _sftp("sftp://host/dir", backend=backend)
 
-    # listdir via iterdir
+    # listdir_attr via iterdir (scandir contract: one call for the whole
+    # listing, metadata included -- no per-child stat())
     children = list(p.iterdir())
     assert [c.name for c in children] == ["file1", "file2"]
-    assert backend._client.actions[-1] == ("listdir", "/dir")
+    assert backend._client.actions[-1] == ("listdir_attr", "/dir")
 
     # stat
     p.stat(follow_symlinks=True)
