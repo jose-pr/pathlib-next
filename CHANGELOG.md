@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (critical -- found while writing Phase 6 examples)
+- `Path("...")` -- the top-level dispatcher documented in this project's
+  own README quick start and used throughout -- silently dropped its
+  constructor arguments on Python <3.12, leaving a blank instance that
+  crashed with `AttributeError: _drv` the moment anything touched it (e.g.
+  the `/` operator). Masked on 3.12+, where the real parsing happens in
+  `__init__` (called separately, with the original args, regardless of what
+  `__new__` did) rather than `__new__` itself. Every one of Phase 5's 300
+  tests constructed via `LocalPath(...)` directly instead, so this went
+  undetected until `examples/local_and_mem.py` exercised the documented
+  `Path(...)` entry point end to end.
+
 ### Fixed (found by the new Phase 5 test suite, not in the original bug list)
 - `LocalPath.stat()`/`chmod()` inherit directly from `pathlib.Path` via MRO
   and crashed with `TypeError` on Python 3.9 the moment anything passed
@@ -49,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unit tests (SFTP mocked, no real server), HTTP tests against a real stdlib
   `ThreadingHTTPServer`, and `PathSyncer` coverage. 300 tests, ~85% line
   coverage, green on both Python 3.9 and 3.13.
+
+### Added (docs)
+- `docs/guides/schemes.md` (capability matrix per scheme) and
+  `docs/guides/extending.md` (both extension tracks, with worked examples
+  and `pathlib_next.testing.PathContract` usage). Rewrote `docs/index.md`
+  and the README with a 30-second example per scheme and a capability
+  matrix. Class-level docstrings added across the package for the rendered
+  API reference.
+
+### Changed
+- `examples/example.py` (an unstructured scratch script) split into three
+  focused, runnable examples: `examples/local_and_mem.py` (self-contained,
+  no network), `examples/http_listing.py` and `examples/sftp_sync.py`
+  (network-touching, guarded under `if __name__ == "__main__"`,
+  configurable via env vars, fail soft when unreachable/unconfigured).
 
 ### Added
 - `Pathname.joinpath()`, `Pathname.full_match()` (3.13 parity, supports `**`
