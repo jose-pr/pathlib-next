@@ -38,6 +38,12 @@ implemented, or raise `NotImplementedError` cleanly):
 
 ```python
 iterdir()                       # yield child instances
+_scandir()                      # optional: yield (name, FileStat|None) pairs
+                                 #    instead, if listing your resource can
+                                 #    cheaply include stat metadata -- speeds
+                                 #    up walk()/glob() (see Track B's
+                                 #    "_scandir: listing with metadata" below,
+                                 #    which applies here too)
 stat(*, follow_symlinks=True)   # -> a FileStatLike (utils.stat.FileStat is a
                                  #    ready-made concrete one)
 _open(mode, buffering)          # -> a *binary* IOBase; open()/read_text()/
@@ -87,6 +93,32 @@ class MyPath(UriPath):
 Importing the module that defines your subclass is enough to register it
 (`UriPath._schemesmap()` walks `__subclasses__()` and caches the result) --
 `UriPath("myscheme://host/path")` then dispatches to `MyPath` automatically.
+
+### `_scandir`: listing with metadata
+
+If your remote listing call already returns type/size/mtime for every
+child in one round trip (an HTML directory index, WebDAV PROPFIND, SFTP
+`listdir_attr`, FTP MLSD, an S3 `list_objects_v2` page, ...), override
+`_scandir()` instead of (or alongside) `_listdir()`:
+
+```python
+def _scandir(self):
+    for name, meta in my_one_shot_listing_call(self.path):
+        yield name, FileStat(st_size=meta.size, st_mtime=meta.mtime,
+                              is_dir=meta.is_dir)
+```
+
+`UriPath.iterdir()` is derived from `_scandir()` and pre-seeds each child
+with its `FileStat` as a *single-use* hint: the child's first `stat()` call
+returns the hint directly (no request), and every call after that re-fetches
+for real -- so a live mutation is never masked by a stale value. `walk()`/
+`glob()` then classify directories vs. files from this same hint, turning a
+remote-tree walk from O(entries) round trips into O(dirs). If you don't
+override `_scandir()`, it falls back to `_listdir()` + one `stat()` per
+child (no round-trip savings, but nothing breaks) -- `_listdir()`/
+`iterdir()` remain fully supported on their own for schemes that have no
+richer listing call to offer. See `HttpPath`/`DavPath`/`SftpPath`/`FtpPath`/
+`S3Path` (`src/pathlib_next/uri/schemes/`) for worked examples.
 
 Optional: override `_initbackend()` to lazily create per-instance
 connection/session state (see `HttpBackend`/`SftpBackend`/`MemPathBackend`

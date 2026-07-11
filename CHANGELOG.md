@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   children exist. The native recursive `DELETE` is still available, and
   cheaper than the base class's client-side walk, via the new
   `DavPath.rm(recursive=True)` override (one request).
+- `Uri._make_child_relpath()` doubled the join slash for any scheme whose
+  `path` already ends in "/" (e.g. `f"{self.path}/{name}"` on an HTTP/DAV
+  directory path produced `"//name"`); also now treats an empty path with
+  an authority present as the same root as `"/"` (RFC 3986:
+  `"http://host"` == `"http://host/"`) instead of joining a bare, ambiguous
+  name with no leading slash.
 
 ### Changed
 - `PathSyncer.log()` now logs through `logging.getLogger("pathlib_next.sync")`
@@ -46,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Cache `Uri.suffix` and `Uri.stem` in slots.
   - Optimize `Source.__bool__` to use lazy index accesses and avoid tuple iteration.
   - Short-circuit `Query.__new__` when the input is already a matching `Query` instance.
+- New `Path._scandir()` / `UriPath._scandir()` protocol: schemes whose
+  listing call already returns type/size/mtime for every child (HTML
+  directory index, WebDAV PROPFIND, SFTP `listdir_attr`, FTP MLSD, an S3
+  `list_objects_v2` page) can now yield `(name, FileStat)` pairs directly,
+  and `walk()`/`glob()` answer `is_dir()` from that instead of a `stat()`
+  round trip per entry -- a remote-tree walk goes from O(entries) requests
+  to O(dirs). `HttpPath`, `DavPath`, `SftpPath`, `FtpPath`, and `S3Path` all
+  adopt it; `_listdir()`/`iterdir()` remain fully supported for schemes that
+  don't override `_scandir()` (no behavior change, no win). On the local
+  `http_server` benchmark fixture, HTTP glob/walk over the fixture tree are
+  ~89-94% faster than the already-optimized pre-`_scandir()` baseline (see
+  `benchmarks/bench.py`). `HttpPath` also drops its `_isdir` instance-cache
+  slot and its `is_dir()`/`is_file()` overrides (now derived generically
+  from `stat()`, like every other scheme) in favor of a single-use stat
+  hint seeded by `_scandir()`; `DavPath`'s now-redundant `iterdir()`/
+  `is_dir()`/`is_file()` overrides are removed for the same reason.
 
 ## [0.7.0] - 2026-07-11
 
