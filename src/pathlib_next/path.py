@@ -261,7 +261,18 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if cls is Path:
             from .fspath import LocalPath
 
-            cls = LocalPath
+            # LocalPath doesn't define its own __new__, so LocalPath.__new__
+            # resolves via *its* MRO to the real pathlib.Path.__new__
+            # (WindowsPath/PosixPath precede our Path in LocalPath's bases,
+            # see fspath.py) -- which is what actually parses `args` into
+            # _drv/_root/_parts on Python <3.12 (3.12+ does this in
+            # PurePath.__init__ instead, called separately afterward
+            # regardless). Calling `Pathname.__new__(cls)` here instead used
+            # to skip that parsing entirely and silently drop `args`,
+            # leaving a blank instance -- masked on 3.12+ because __init__
+            # does the real work there, but crashed on 3.9-3.11 the moment
+            # any pathlib internal (e.g. `/`) touched the missing state.
+            return LocalPath.__new__(LocalPath, *args, **kwargs)
         return Pathname.__new__(cls)
 
     def is_hidden(self):
