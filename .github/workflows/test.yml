@@ -1,0 +1,48 @@
+name: Test
+
+# On-demand / ad-hoc test workflow, kept separate from release.yaml's own
+# release-gate test job so it can be run without cutting a release. Two ways
+# to trigger it:
+#   - workflow_dispatch (optionally against a specific ref), for manual runs.
+#   - push of a tag matching "ci-*" (throwaway tag, delete after) so an agent
+#     without dashboard access can trigger + poll a run via the API/CLI.
+# Not triggered by push/PR on branches by default -- add that only if the
+# project actually wants CI on every commit.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to test (branch, tag, or SHA)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "ci-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (py${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package with all extras
+        run: python -m pip install -e ".[dev,uri,http,sftp]"
+      - name: Run tests
+        run: python -m pytest -q
