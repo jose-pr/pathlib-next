@@ -60,6 +60,10 @@ class Query(str):
         separator=SEPARATOR,
     ):
         if isinstance(query, Query):
+            if (encoding is None or encoding == query._encoding) and (
+                separator is None or separator == query._separator
+            ):
+                return query
             _encoding = query._encoding
             _separator = query._separator
         else:
