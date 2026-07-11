@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Hierarchical test contracts: `PurePathContract` (pure path operations) and `ReadPathContract` (read-only path operations), allowing contract-based verification of read-only and memory/archive paths.
+- Contract test suites wired for `DataUri`, `ZipUri`, `TarUri`, and `HttpPath`.
+- Dedicated unit tests for `Path.walk()`, `samefile()`, and `Stat` device queries.
+
+### Changed
+- Matrix expansion in GitHub Actions CI to test Python 3.10, 3.11, and 3.12 (on Ubuntu).
+- Added a "no-extras" CI job to run tests without optional dependencies installed.
+
 ### Fixed
 - README and docs landing page were still describing the pre-0.6.0 scheme set:
   the capability matrix, extras table, and quick starts now cover `data:`,
