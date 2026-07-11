@@ -24,6 +24,9 @@ theme:
 
 nav:
   - Home: index.md
+  - Guides:
+      - Schemes: guides/schemes.md
+      - Extending: guides/extending.md
   - Divergences from pathlib: divergences.md
   - API Reference: api/reference.md
   - Changelog: changelog.md
