@@ -6,17 +6,17 @@ meaningful for a read-only scheme) -- everything else (name/suffix parsing,
 `glob()`, `walk()`, `copy()`, ...) is derived from these primitives and
 works identically across all of them.
 
-| Capability | `LocalPath` | `file:` (`FileUri`) | `mem:` (`MemPath`) | `http(s):` (`HttpPath`) | `sftp:` (`SftpPath`) | `data:` (`DataUri`) | `ftp(s):` (`FtpPath`) | `zip:` (`ZipUri`) | `tar:` (`TarUri`) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Read (`read_text`/`read_bytes`/`open`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Write (`write_text`/`write_bytes`/`open("w")`) | Yes | Yes | Yes | No | Yes | No | Yes | New entries only, local outer archive only | No |
-| List (`iterdir`) | Yes | Yes | Yes | Yes (scrapes an HTML index) | Yes | No (`NotADirectoryError`) | Yes (MLSD, falls back to NLST) | Yes | Yes |
-| Stat (`stat`, `exists`, `is_dir`, `is_file`, ...) | Yes | Yes | Yes | Yes (via `HEAD`, falls back to `GET`) | Yes | Yes (`st_size` from decoded payload) | Yes (MLSD, falls back to SIZE for files) | Yes | Yes |
-| `mkdir` | Yes | Yes | Yes | No | Yes | No | Yes | Local outer archive only (zero-length `name/` entry) | No |
-| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | No | Yes | No | Yes | No | No |
-| `rename` | Yes | Yes | No (`move()` falls back to copy+unlink) | No | Yes | No | Yes | No | No |
-| `chmod` | Yes | Yes | No | No | Yes (no `follow_symlinks=False`; paramiko has no `lchmod`) | No | Yes (`SITE CHMOD`, server-dependent) | No | No |
-| Extra required | none | none | none | `http` | `sftp` | none (stdlib) | none (stdlib `ftplib`) | none (stdlib `zipfile`) | none (stdlib `tarfile`) |
+| Capability | `LocalPath` | `file:` (`FileUri`) | `mem:` (`MemPath`) | `http(s):` (`HttpPath`) | `sftp:` (`SftpPath`) | `data:` (`DataUri`) | `ftp(s):` (`FtpPath`) | `zip:` (`ZipUri`) | `tar:` (`TarUri`) | `dav(s):` (`DavPath`) | `s3:` (`S3Path`) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Read (`read_text`/`read_bytes`/`open`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Write (`write_text`/`write_bytes`/`open("w")`) | Yes | Yes | Yes | No | Yes | No | Yes | New entries only, local outer archive only | No | Yes | Yes |
+| List (`iterdir`) | Yes | Yes | Yes | Yes (scrapes an HTML index) | Yes | No (`NotADirectoryError`) | Yes (MLSD, falls back to NLST) | Yes | Yes | Yes (PROPFIND) | Yes (prefix + delimiter emulation) |
+| Stat (`stat`, `exists`, `is_dir`, `is_file`, ...) | Yes | Yes | Yes | Yes (via `HEAD`, falls back to `GET`) | Yes | Yes (`st_size` from decoded payload) | Yes (MLSD, falls back to SIZE for files) | Yes | Yes | Yes (PROPFIND) | Yes (`is_dir` is prefix emulation) |
+| `mkdir` | Yes | Yes | Yes | No | Yes | No | Yes | Local outer archive only (zero-length `name/` entry) | No | Yes (MKCOL) | Yes (zero-byte `key/` marker object) |
+| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | No | Yes | No | Yes | No | No | Yes (`rmdir` is recursive, see notes) | Yes (`rmdir` requires empty prefix) |
+| `rename` | Yes | Yes | No (`move()` falls back to copy+unlink) | No | Yes | No | Yes | No | No | Yes (MOVE) | Yes (server-side `copy_object`+delete, same bucket) |
+| `chmod` | Yes | Yes | No | No | Yes (no `follow_symlinks=False`; paramiko has no `lchmod`) | No | Yes (`SITE CHMOD`, server-dependent) | No | No | No | No |
+| Extra required | none | none | none | `http` | `sftp` | none (stdlib) | none (stdlib `ftplib`) | none (stdlib `zipfile`) | none (stdlib `tarfile`) | `http` (reused) | `s3` |
 
 Notes:
 
@@ -57,6 +57,22 @@ Notes:
   works when the outer archive is itself a local `file:` URI; every other
   outer scheme is read-only. `tar:` (with transparent `.tar.gz`/`.tar.bz2`/
   `.tar.xz` decompression) is read-only regardless of the outer scheme.
+- **`dav(s):`** is WebDAV (RFC 4918) layered on `HttpPath` -- PROPFIND
+  replaces HTML-index scraping for real stat/listdir metadata, and PUT/
+  DELETE/MKCOL/MOVE give it full write support (unlike plain `http(s):`).
+  Requests go out over the equivalent `http:`/`https:` URL; `as_uri()`
+  still reports `dav:`/`davs:`. Reuses the `http` extra, no new dependency.
+  **Caution:** `rmdir()` maps to WebDAV `DELETE`, which is recursive by
+  spec -- unlike `pathlib.Path.rmdir()`, it does not require the
+  collection to be empty first.
+- **`s3:`** (`s3://bucket/key/path`) has no real directories: `is_dir()`
+  is prefix emulation (any object key under `"<path>/"`), and `mkdir()`
+  creates a zero-byte `"<path>/"` marker object (the same convention the
+  AWS console itself uses for an empty "folder") -- `rmdir()` requires no
+  other keys under that prefix (pathlib's "must be empty" semantics, unlike
+  `dav:`'s recursive `DELETE`). A single `boto3` client is cached per
+  backend (documented thread-safe, unlike `sftp:`/`ftp:`'s per-thread
+  connection pools).
 - See [Divergences from pathlib](../divergences.md) for the "explicitly out
   of scope" list (`resolve`, `symlink_to`, `owner`, `expanduser`, ...) that
   applies uniformly across every non-`LocalPath` implementation.

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (Phase 7b new schemes, optional extras)
+- `dav:`/`davs:` scheme (`pathlib_next.uri.schemes.webdav.DavPath`):
+  extends `HttpPath` with WebDAV (RFC 4918) PROPFIND for real stat/listdir
+  metadata (replacing HTML-index scraping) and PUT/DELETE/MKCOL/MOVE for
+  full read/write access. Requests go to the equivalent `http:`/`https:`
+  URL; `as_uri()` still reports `dav:`/`davs:`. Reuses the `http` extra,
+  no new dependency. `rmdir()` is recursive by WebDAV spec, unlike
+  `pathlib.Path.rmdir()`'s "must be empty" contract -- documented, not
+  silent.
+- `s3:` scheme (`pathlib_next.uri.schemes.s3.S3Path`,
+  `s3://bucket/key/path`): read/write/list via `boto3`. New `s3` extra.
+  S3 has no real directories -- `is_dir()` is prefix emulation (any
+  object key under `"<path>/"`), `mkdir()` creates a zero-byte `"<path>/"`
+  marker object, `rmdir()` requires no other keys under that prefix.
+  `rename()` uses server-side `copy_object`+`delete_object` (same-bucket
+  only) instead of the generic download+upload+delete `move()` fallback.
+
 ## [0.6.0] - 2026-07-11
 
 ### Added (Phase 7a new schemes, stdlib-only, no new deps)
