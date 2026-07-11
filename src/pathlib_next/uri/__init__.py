@@ -129,6 +129,7 @@ class Uri(Pathname):
 
     @property
     def parts(self):
+        """The tuple of URI components: (source, path, query, fragment)."""
         return (self.source, self.path, self.query, self.fragment)
 
     def _load_parts(self):
@@ -313,14 +314,17 @@ class Uri(Pathname):
         return inst
 
     def with_source(self, source: Source):
+        """Return a new URI with the source replaced."""
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
 
     def with_segments(self, *segments: str):
+        """Return a new URI with the path segments replaced."""
         if not segments:
             return self.with_path("")
         return self.with_path("/".join(segments))
 
     def with_path(self, path: str | Pathname):
+        """Return a new URI with the path replaced."""
         return self._from_parsed_parts(
             self.source,
             path.as_posix() if isinstance(path, Pathname) else path,
@@ -329,11 +333,13 @@ class Uri(Pathname):
         )
 
     def with_query(self, query: str):
+        """Return a new URI with the query replaced."""
         if not isinstance(query, Query):
             query = Query(query)
         return self._from_parsed_parts(self.source, self.path, query, self.fragment)
 
     def with_fragment(self, fragment: str):
+        """Return a new URI with the fragment replaced."""
         return self._from_parsed_parts(self.source, self.path, self.query, fragment)
 
     @property
@@ -377,6 +383,7 @@ class Uri(Pathname):
 
     @property
     def normalized_path(self):
+        """Return the normalized path using posixpath rules."""
         if self._normalized_path is None:
             self._normalized_path = _posix.normpath(self.path)
         return self._normalized_path
@@ -422,6 +429,7 @@ class Uri(Pathname):
         )
 
     def is_local(self):
+        """Return True if the URI points to a local resource."""
         return self.source.is_local()
 
     def __eq__(self, other: Pathname | str):
@@ -494,6 +502,52 @@ class UriPath(Uri, Path):
             schemesmap.update(scls._get_schemesmap())
         return schemesmap
 
+    @classmethod
+    def _load_entry_point(cls, scheme: str) -> bool:
+        """Attempt to load a scheme class from package entry points.
+
+        Looks for entry points in the 'pathlib_next.schemes' group where
+        the name matches the requested scheme.
+        """
+        import importlib.metadata as _metadata
+        try:
+            eps = _metadata.entry_points(group="pathlib_next.schemes")
+        except TypeError:
+            # Python 3.9 fallback
+            eps = _metadata.entry_points().get("pathlib_next.schemes", ())
+
+        for ep in eps:
+            if ep.name == scheme:
+                ep.load()
+                return True
+        return False
+
+    @classmethod
+    def _load_builtin_scheme(cls, scheme: str) -> bool:
+        """Attempt to load a builtin scheme module dynamically on-demand."""
+        _BUILTIN_SCHEMES = {
+            "file": "pathlib_next.uri.schemes.file",
+            "data": "pathlib_next.uri.schemes.data",
+            "zip": "pathlib_next.uri.schemes.archive",
+            "tar": "pathlib_next.uri.schemes.archive",
+            "ftp": "pathlib_next.uri.schemes.ftp",
+            "http": "pathlib_next.uri.schemes.http",
+            "https": "pathlib_next.uri.schemes.http",
+            "dav": "pathlib_next.uri.schemes.webdav",
+            "davs": "pathlib_next.uri.schemes.webdav",
+            "sftp": "pathlib_next.uri.schemes.sftp",
+            "s3": "pathlib_next.uri.schemes.s3",
+        }
+        module_name = _BUILTIN_SCHEMES.get(scheme)
+        if module_name:
+            import importlib
+            try:
+                importlib.import_module(module_name)
+                return True
+            except ImportError:
+                pass
+        return False
+
     def __new__(
         cls,
         *args,
@@ -546,11 +600,13 @@ class UriPath(Uri, Path):
 
     @property
     def backend(self):
+        """The connection or session state backend instance."""
         if self._backend is None:
             self._backend = self._initbackend()
         return self._backend
 
     def with_backend(self, backend):
+        """Return a new path instance sharing the same backend state."""
         return self._from_parsed_parts(*self.parts, backend=backend)
 
     def __truediv__(self, key: str | Uri | os.PathLike):

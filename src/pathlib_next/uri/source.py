@@ -66,6 +66,10 @@ class Source(_ty.NamedTuple):
             if schemesmap is None:
                 schemesmap = UriPath._schemesmap()
             _cls = schemesmap.get(self.scheme, None)
+            if _cls is None:
+                if UriPath._load_entry_point(self.scheme) or UriPath._load_builtin_scheme(self.scheme):
+                    schemesmap = UriPath._schemesmap(reload=True)
+                    _cls = schemesmap.get(self.scheme, None)
             return _cls if _cls else UriPath
         return UriPath
 

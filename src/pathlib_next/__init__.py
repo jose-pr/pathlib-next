@@ -1,7 +1,6 @@
 try:
     from .uri import Uri as Uri
     from .uri import UriPath as UriPath
-    from .uri.schemes import *
 except ImportError:
     pass
 from .fspath import *
