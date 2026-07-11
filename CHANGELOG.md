@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `SyncEvent` members are now numbered sequentially (previously a mix of
   explicit ints and `enum.auto()`, which raised a `DeprecationWarning` on
   Python 3.13). Values are not part of any documented/persisted contract.
+- Optimized performance across pure paths and URIs:
+  - Cache `Uri.segments` in a slot to avoid re-splitting the path string on every access.
+  - Cache `Uri.suffix` and `Uri.stem` in slots.
+  - Optimize `Source.__bool__` to use lazy index accesses and avoid tuple iteration.
+  - Short-circuit `Query.__new__` when the input is already a matching `Query` instance.
 
 ## [0.7.0] - 2026-07-11
 
