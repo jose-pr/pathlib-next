@@ -1,3 +1,4 @@
+from .data import DataUri as DataUri
 from .file import FileUri as FileUri
 
 try:
