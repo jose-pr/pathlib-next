@@ -62,15 +62,16 @@ Notes:
   DELETE/MKCOL/MOVE give it full write support (unlike plain `http(s):`).
   Requests go out over the equivalent `http:`/`https:` URL; `as_uri()`
   still reports `dav:`/`davs:`. Reuses the `http` extra, no new dependency.
-  **Caution:** `rmdir()` maps to WebDAV `DELETE`, which is recursive by
-  spec -- unlike `pathlib.Path.rmdir()`, it does not require the
-  collection to be empty first.
+  `rmdir()` enforces pathlib's "must be empty" contract with a depth-1
+  PROPFIND before issuing `DELETE`; the native recursive `DELETE` (RFC
+  4918) is still available, and cheaper than a client-side walk, via
+  `rm(recursive=True)`.
 - **`s3:`** (`s3://bucket/key/path`) has no real directories: `is_dir()`
   is prefix emulation (any object key under `"<path>/"`), and `mkdir()`
   creates a zero-byte `"<path>/"` marker object (the same convention the
   AWS console itself uses for an empty "folder") -- `rmdir()` requires no
-  other keys under that prefix (pathlib's "must be empty" semantics, unlike
-  `dav:`'s recursive `DELETE`). A single `boto3` client is cached per
+  other keys under that prefix (pathlib's "must be empty" semantics, same
+  as `dav:`'s `rmdir()` above). A single `boto3` client is cached per
   backend (documented thread-safe, unlike `sftp:`/`ftp:`'s per-thread
   connection pools).
 - See [Divergences from pathlib](../divergences.md) for the "explicitly out

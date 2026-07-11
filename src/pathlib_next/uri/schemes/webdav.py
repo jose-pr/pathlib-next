@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno as _errno
 import io as _io
 import stat as _stat
+import typing as _ty
 import urllib.parse as _urlparse
 import xml.etree.ElementTree as _ET
 
@@ -61,9 +63,11 @@ class DavPath(HttpPath):
     `HttpPath`'s `HttpBackend` (session + requests_args) and the `http`
     extra -- no new dependency.
 
-    Caution: `rmdir()` maps to WebDAV `DELETE`, which is recursive by
-    spec (RFC 4918) -- unlike `pathlib.Path.rmdir()`, it does NOT require
-    the collection to be empty first.
+    `rmdir()` enforces pathlib's "must be empty" contract with a depth-1
+    PROPFIND before DELETE (WebDAV `DELETE` is recursive by spec, RFC 4918,
+    unlike `pathlib.Path.rmdir()`). The native recursive DELETE is still
+    available -- and cheaper than the base class's client-side walk -- via
+    `rm(recursive=True)`, overridden below to issue a single request.
     """
 
     __SCHEMES = ("dav", "davs")
@@ -164,7 +168,38 @@ class DavPath(HttpPath):
         resp.raise_for_status()
 
     def rmdir(self):
+        for _ in self._listdir():
+            raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         self.unlink()
+
+    def rm(
+        self,
+        /,
+        recursive: bool = False,
+        missing_ok: bool = False,
+        ignore_error: "bool | _ty.Callable[[Exception, DavPath], bool]" = False,
+    ):
+        if not recursive:
+            return super().rm(
+                recursive=recursive, missing_ok=missing_ok, ignore_error=ignore_error
+            )
+        # WebDAV DELETE is recursive by spec (RFC 4918): one request here
+        # replaces the base implementation's client-side stat+walk+unlink.
+        try:
+            resp = self.backend.request("DELETE", self._wire_uri())
+            if resp.status_code == 404:
+                if not missing_ok:
+                    raise FileNotFoundError(self)
+                return
+            resp.raise_for_status()
+        except Exception as error:
+            onerror = (
+                ignore_error
+                if callable(ignore_error)
+                else (lambda _e, _p: bool(ignore_error))
+            )
+            if not onerror(error, self):
+                raise
 
     def rename(self, target: "DavPath | Uri | str"):
         if not isinstance(target, Uri):

@@ -29,6 +29,27 @@ def test_lru_invalidate_b5():
     assert calls == [3, 3]  # recomputed after invalidation
 
 
+def test_lru_maxsize_shrink_evicts_oldest_n1():
+    # N1 regression: the maxsize setter called `cache.pop(last=False)` --
+    # OrderedDict.pop() takes a key, not a `last` kwarg -- so shrinking
+    # maxsize below the current fill raised TypeError instead of evicting.
+    calls = []
+
+    def fn(x):
+        calls.append(x)
+        return x * 2
+
+    lru = utils.LRU(fn, maxsize=3)
+    lru(1)
+    lru(2)
+    lru(3)
+    lru.maxsize = 1
+    assert lru.maxsize == 1
+    assert list(lru.cache.keys()) == [(3,)]
+    lru(3)
+    assert calls == [1, 2, 3]  # 3 still cached, not recomputed
+
+
 def test_sizeof_fmt_always_returns_str():
     # B-cleanup: small values used to return int, not str.
     assert isinstance(utils.sizeof_fmt(500), str)

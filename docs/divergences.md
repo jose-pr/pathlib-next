@@ -20,8 +20,7 @@ The divergences below apply to `Uri`/`UriPath` and `MemPath`.
 | `Path.move(target, ...)` | Not in `pathlib` at all | Our own extension: tries `rename()`, falls back to copy+unlink | N/A -- pure extension, no pathlib method to diverge from. |
 | `Path.rm(recursive=, missing_ok=, ignore_error=)` | Not in `pathlib` (closest: `shutil.rmtree`) | Our own extension | N/A -- pure extension. |
 | `PathSyncer` / `Query` / `Source` | N/A | Our own extensions | N/A -- pure extensions, no pathlib equivalent. |
-| `DavPath.rmdir()` | `pathlib.Path.rmdir()` requires the directory to be empty, raises `OSError` otherwise | WebDAV `DELETE` on a collection is recursive by spec (RFC 4918) -- deletes non-empty collections too | Not our choice -- inherent to the WebDAV protocol's `DELETE` semantics; no separate "delete if empty" verb exists to build an empty-check on top of. **Caution**, not a feature. |
-| `S3Path` directories | N/A (pathlib directories are real filesystem entries) | `is_dir()` is prefix emulation (any object key under `"<path>/"`); `mkdir()` creates a zero-byte `"<path>/"` marker object; `rmdir()` requires no other keys under that prefix (pathlib-parity "must be empty", unlike `DavPath.rmdir()` above) | S3 has no native directory concept -- this is the same prefix convention the AWS console itself uses for an empty "folder". |
+| `S3Path` directories | N/A (pathlib directories are real filesystem entries) | `is_dir()` is prefix emulation (any object key under `"<path>/"`); `mkdir()` creates a zero-byte `"<path>/"` marker object; `rmdir()` requires no other keys under that prefix (pathlib-parity "must be empty") | S3 has no native directory concept -- this is the same prefix convention the AWS console itself uses for an empty "folder". |
 
 ## Explicitly out of scope (not implemented on `Pathname`/`Path`)
 

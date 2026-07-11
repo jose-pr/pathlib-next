@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the capability matrix, extras table, and quick starts now cover `data:`,
   `ftp(s):`, `zip:`/`tar:`, `dav(s):`, and `s3:` (all shipped in 0.6.0/0.7.0
   but previously only documented in the Schemes guide).
+- `LRU.maxsize` setter raised `TypeError` when shrinking below the current
+  fill (`OrderedDict.pop()` was called with the `last=False` kwarg meant for
+  `popitem()`).
+- `DavPath.rmdir()` mapped directly to WebDAV `DELETE`, which is recursive
+  by spec (RFC 4918) -- it silently deleted non-empty collections instead
+  of enforcing pathlib's "must be empty" contract like every other scheme.
+  Now does a depth-1 PROPFIND first and raises `OSError` (`ENOTEMPTY`) if
+  children exist. The native recursive `DELETE` is still available, and
+  cheaper than the base class's client-side walk, via the new
+  `DavPath.rm(recursive=True)` override (one request).
+
+### Changed
+- `PathSyncer.log()` now logs through `logging.getLogger("pathlib_next.sync")`
+  at `INFO` instead of calling `print()` -- stdout consumers must configure
+  logging (e.g. `logging.basicConfig()`) to see sync progress again.
+  `EVENT_LOG_FORMAT` switched from `str.format` (`{event}`) to `%`-style
+  placeholders to match, and `log()` remains overridable for custom routing.
+- `SyncEvent` members are now numbered sequentially (previously a mix of
+  explicit ints and `enum.auto()`, which raised a `DeprecationWarning` on
+  Python 3.13). Values are not part of any documented/persisted contract.
 
 ## [0.7.0] - 2026-07-11
 

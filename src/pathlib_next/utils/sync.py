@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 import enum as _enum
+import logging as _logging
 import typing as _ty
 
 from ..path import Path
 from ..utils.stat import FileStat
+
+_logger = _logging.getLogger("pathlib_next.sync")
 
 
 class SyncEvent(_enum.Enum):
     """Events `PathSyncer.hook()` fires during a sync, for progress/logging
     callbacks."""
 
-    Copy = 1
-    RemovedMissing = 2
-    TypeMismatch = 6
-    SyncStart = 5
-    Synced = 3
-    CreatedDirectory = 4
+    Copy = _enum.auto()
+    RemovedMissing = _enum.auto()
+    Synced = _enum.auto()
+    CreatedDirectory = _enum.auto()
+    SyncStart = _enum.auto()
+    TypeMismatch = _enum.auto()
     CheckTargetChild = _enum.auto()
     CheckTargetChildren = _enum.auto()
     SyncChild = _enum.auto()
@@ -93,7 +96,7 @@ class PathSyncer(object):
         "follow_symlinks",
         "ignore_error",
     )
-    EVENT_LOG_FORMAT = "[{event}] Source:{source} Target:{target} DryRun:{dry_run}"
+    EVENT_LOG_FORMAT = "[%s] Source:%s Target:%s DryRun:%s"
 
     def __init__(
         self,
@@ -114,8 +117,12 @@ class PathSyncer(object):
             _ignore_error = ignore_error
         self.ignore_error = _ty.cast(_OnPathSyncerError, _ignore_error)
 
-    def log(self, msg: str, **kwargs: str):
-        print(msg.format_map(kwargs))
+    def log(self, msg: str, *args: object):
+        # Overridable hook: subclasses/instances may reassign `log` (or
+        # subclass) to route sync progress elsewhere. `*args` are passed
+        # to the logger lazily (stdlib %-style) so formatting is skipped
+        # entirely unless something is actually listening at INFO.
+        _logger.info(msg, *args)
 
     def hook(
         self,
@@ -134,13 +141,7 @@ class PathSyncer(object):
                 raise
         if self._hook:
             self._hook(source, target, event, dry_run)
-        self.log(
-            self.EVENT_LOG_FORMAT,
-            event=event,
-            source=source,
-            target=target,
-            dry_run=dry_run,
-        )
+        self.log(self.EVENT_LOG_FORMAT, event, source, target, dry_run)
 
     def sync(
         self,

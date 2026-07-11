@@ -53,6 +53,7 @@ class Uri(Pathname):
         "_uri",
         "_initiated",
         "_normalized_path",
+        "_segments_cache",
     )
 
     def __new__(cls, *uris, **options):
@@ -192,6 +193,7 @@ class Uri(Pathname):
         self._path = path
         self._query = query
         self._fragment = fragment
+        self._segments_cache = None
 
     def _from_parsed_parts(
         self, source: Source, path: str, query: str, fragment: str, /, **kwargs
@@ -319,9 +321,12 @@ class Uri(Pathname):
 
     @property
     def segments(self):
-        if not self.path:
-            return ()
-        return self.path.split("/")
+        if self._segments_cache is None:
+            if not self.path:
+                self._segments_cache = ()
+            else:
+                self._segments_cache = tuple(self.path.split("/"))
+        return self._segments_cache
 
     @property
     def parent(self):

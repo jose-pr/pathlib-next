@@ -37,7 +37,7 @@ class LRU(_ty.Generic[K, V]):
         with self.lock:
             self._maxsize = maxsize
             while len(cache) > maxsize:
-                cache.pop(last=False)
+                cache.popitem(last=False)
 
     def __call__(self, *args: K.args) -> V:
         cache = self.cache

@@ -248,3 +248,69 @@ def test_chmod_not_implemented():
     p = _dav("dav://host/docs/a.txt")
     with pytest.raises(NotImplementedError):
         p.chmod(0o644)
+
+
+# --- N4: rmdir() must enforce pathlib's "must be empty" contract instead
+# of relying on WebDAV DELETE's recursive-by-spec behavior. ---
+
+
+def test_rmdir_nonempty_raises_oserror():
+    session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/", "1")] = _FakeResponse(
+        207, _MULTISTATUS_LISTING
+    )
+    p = _dav("dav://host/docs/", session)
+    with pytest.raises(OSError):
+        p.rmdir()
+    # must not have issued DELETE
+    assert not any(call[0] == "DELETE" for call in session.calls)
+
+
+def test_rmdir_empty_deletes():
+    _MULTISTATUS_EMPTY = b"""<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/docs/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"""
+    session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/", "1")] = _FakeResponse(
+        207, _MULTISTATUS_EMPTY
+    )
+    session.responses[("DELETE", "http://host/docs/")] = _FakeResponse(204)
+    p = _dav("dav://host/docs/", session)
+    p.rmdir()
+    assert session.calls[-1][:2] == ("DELETE", "http://host/docs/")
+
+
+def test_rm_recursive_issues_single_delete():
+    session = _FakeSession()
+    session.responses[("DELETE", "http://host/docs/")] = _FakeResponse(204)
+    p = _dav("dav://host/docs/", session)
+    p.rm(recursive=True)
+    delete_calls = [call for call in session.calls if call[0] == "DELETE"]
+    assert len(delete_calls) == 1
+    assert delete_calls[0][:2] == ("DELETE", "http://host/docs/")
+    # no PROPFIND walk -- the whole point of the override
+    assert not any(call[0] == "PROPFIND" for call in session.calls)
+
+
+def test_rm_recursive_missing_ok():
+    session = _FakeSession()
+    session.responses[("DELETE", "http://host/missing/")] = _FakeResponse(404)
+    p = _dav("dav://host/missing/", session)
+    p.rm(recursive=True, missing_ok=True)
+
+
+def test_rm_recursive_missing_without_missing_ok_raises():
+    session = _FakeSession()
+    session.responses[("DELETE", "http://host/missing/")] = _FakeResponse(404)
+    p = _dav("dav://host/missing/", session)
+    with pytest.raises(FileNotFoundError):
+        p.rm(recursive=True)
