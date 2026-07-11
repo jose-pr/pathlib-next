@@ -171,6 +171,13 @@ If you maintain separate virtual environments per Python version locally
 (e.g. `.venv/3.9/`, `.venv/3.13/`), run the same `pytest -q` in each --
 CI does the equivalent across Python 3.9/3.13 on Linux, macOS, and Windows.
 
+### Benchmarks
+
+Run the benchmark suite using:
+```bash
+python benchmarks/bench.py
+```
+
 ### Releasing
 
 This project follows [Semantic Versioning](https://semver.org/) and keeps a

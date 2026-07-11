@@ -29,7 +29,10 @@ Documentation = "https://jose-pr.github.io/pathlib_next/"
 Issues = "https://github.com/jose-pr/pathlib_next/issues"
 
 [tool.hatch.build.targets.sdist]
-exclude = ["/.*"]
+exclude = ["/.*", "/benchmarks"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pathlib_next"]
 
 
 [tool.pytest.ini_options]
