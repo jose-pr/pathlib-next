@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (Phase 7a new schemes, stdlib-only, no new deps)
+- `data:` scheme (RFC 2397, `pathlib_next.uri.schemes.data.DataUri`):
+  read-only, no backend/connection -- the entire file content is embedded
+  in the URI (`data:[<mediatype>][;base64],<data>`). `stat().st_size` is
+  the decoded payload length; `iterdir()` raises `NotADirectoryError`
+  (it's always a single file); write operations raise `NotImplementedError`.
+- `ftp:`/`ftps:` scheme (`pathlib_next.uri.schemes.ftp.FtpPath`): full
+  read/write/list access via stdlib `ftplib`, with a thread-keyed LRU
+  connection cache mirroring `sftp.py`. Listing/stat prefer MLSD (RFC
+  3659); servers without it fall back to NLST (listing) and SIZE
+  (file-only stat). Writes buffer in memory and upload via STOR/APPE on
+  `close()`. `chmod()` uses the common but non-standard `SITE CHMOD`
+  extension (may not be supported by every server).
+
 ## [0.5.0] - 2026-07-11
 
 ### Fixed (critical -- found while writing Phase 6 examples)
