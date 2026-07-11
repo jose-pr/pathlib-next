@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (found by the new Phase 5 test suite, not in the original bug list)
+- `LocalPath.stat()`/`chmod()` inherit directly from `pathlib.Path` via MRO
+  and crashed with `TypeError` on Python 3.9 the moment anything passed
+  `follow_symlinks=` (e.g. `Path.walk()`'s default `follow_symlinks=False`)
+  -- now shimmed with `lstat()`/`lchmod()` on <3.10, same as the existing
+  `FileUri` shim (which now just delegates to `LocalPath`).
+- `MemPath.__init__` decided whether to propagate a parent's backend with
+  `if _backend and backend is None:` -- an empty (but valid) backend dict is
+  falsy, so joining off a freshly-created, empty `MemPath` silently gave the
+  child a disconnected new backend instead of sharing the parent's.
+- `MemPath.stat()` never set `st_size` for files (always defaulted to `0`),
+  breaking any size-based checksum comparison (notably `PathSyncer`'s
+  typical usage).
+- `glob()`'s core algorithm decided whether to recurse into the *parent*
+  directory using whether the *leaf* segment is a wildcard, instead of
+  whether the *parent path itself* contains one. Since a wildcarded leaf
+  with a literal parent directory is the overwhelmingly common case
+  (`glob("*.py")`), this always took the "recurse into parent" branch,
+  which only degenerated back to the correct single directory when the
+  parent has a non-empty literal name to re-match against -- true for
+  essentially every real filesystem path except an OS root. It silently
+  returned the wrong result on `MemPath`'s virtual root (empty name).
+- `HttpPath.iterdir()` gave every subdirectory entry an empty `.name`:
+  directory-listing entries for subdirectories carry a trailing `/`
+  (`htmllistparse`'s convention), which wasn't stripped before building the
+  child's path, and `Pathname.name` derives from the last path segment --
+  empty for a trailing-slash path.
+- `SftpPath.rename()` resolved a plain string target relative to `self`
+  (joining it as a child, e.g. `"/a.txt".rename("b.txt")` produced
+  `"/a.txt/b.txt"`) instead of `self`'s parent (sibling rename).
+
+### Added (test suite)
+- Full pytest suite (`tests/`): pure-path parity against `pathlib.PurePosixPath`
+  (`test_parity_pure.py`), local I/O parity against `pathlib.Path`/`os.walk`
+  (`test_parity_io.py`), a reusable filesystem-contract mixin run against
+  `LocalPath`/`MemPath`/`FileUri` and exported as `pathlib_next.testing.
+  PathContract` for third-party `Path`/`UriPath` implementers
+  (`test_contract.py`), glob vs. stdlib ground truth (`test_glob.py`), URI
+  parsing/scheme-dispatch/query/source coverage, MemPath- and SFTP-specific
+  unit tests (SFTP mocked, no real server), HTTP tests against a real stdlib
+  `ThreadingHTTPServer`, and `PathSyncer` coverage. 300 tests, ~85% line
+  coverage, green on both Python 3.9 and 3.13.
+
 ### Added
 - `Pathname.joinpath()`, `Pathname.full_match()` (3.13 parity, supports `**`
   matching any number of segments), `Pathname.anchor`/`drive`/`root`
