@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-11
+
 ### Added (Phase 7b new schemes, optional extras)
 - `dav:`/`davs:` scheme (`pathlib_next.uri.schemes.webdav.DavPath`):
   extends `HttpPath` with WebDAV (RFC 4918) PROPFIND for real stat/listdir
@@ -252,7 +254,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jose-pr/pathlib_next/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jose-pr/pathlib_next/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jose-pr/pathlib_next/compare/v0.4.0...v0.4.1
