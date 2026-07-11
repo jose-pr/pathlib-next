@@ -25,11 +25,12 @@ class Source(_ty.NamedTuple):
     port: int | None
 
     def __bool__(self):
-        for val in self:
-            if val == "" or val is None:
-                continue
-            return True
-        return False
+        return (
+            (self[0] != "" and self[0] is not None)
+            or (self[1] != "" and self[1] is not None)
+            or (self[2] != "" and self[2] is not None)
+            or (self[3] != "" and self[3] is not None)
+        )
 
     def __str__(self) -> str:
         return _uritools.uricompose(
