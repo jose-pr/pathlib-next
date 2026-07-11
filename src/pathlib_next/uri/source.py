@@ -16,6 +16,9 @@ if _ty.TYPE_CHECKING:
 
 
 class Source(_ty.NamedTuple):
+    """A URI's scheme/userinfo/host/port -- everything before the path.
+    Falsy (`bool(source) is False`) when every field is empty/None."""
+
     scheme: str | None
     userinfo: str | None
     host: str | _IPAddress | None

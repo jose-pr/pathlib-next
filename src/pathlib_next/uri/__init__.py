@@ -38,6 +38,11 @@ def _uriencode(text: str, safe=""):
 
 
 class Uri(Pathname):
+    """A pure (no I/O) RFC 3986 URI, lazily parsed into `source` (scheme/
+    userinfo/host/port), `path`, `query`, and `fragment` on first access.
+    Join semantics (multiple constructor args, or `/`) are pathlib-
+    `joinpath`-like, not RFC 3986 reference resolution -- see
+    `_load_parts`'s docstring and `docs/divergences.md`."""
 
     __slots__ = (
         "_raw_uris",
@@ -402,6 +407,13 @@ class Uri(Pathname):
 
 
 class UriPath(Uri, Path):
+    """`Uri` + `Path` (I/O) + scheme dispatch. `UriPath(...)` constructs
+    the concrete subclass registered for the URI's scheme (via `__SCHEMES`)
+    -- e.g. `UriPath("http://...")` returns an `HttpPath`. Subclass this
+    and set `__SCHEMES` to add a new scheme (Track B of extending this
+    library; see `docs/guides/extending.md`); implement the I/O surface
+    (`_listdir`, `stat`, `_open`, ...) documented in `AGENTS.md`."""
+
     __slots__ = ("_backend",)
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None

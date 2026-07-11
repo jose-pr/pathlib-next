@@ -14,6 +14,11 @@ if _ty.TYPE_CHECKING:
 
 
 class FileStat(_FStat):
+    """Concrete, slotted `FileStatLike` for backends without a real
+    `os.stat_result` (e.g. `MemPath`, `HttpPath`). `from_path()` builds one
+    from any object with a `stat()` method, or passes a `FileStat` through
+    unchanged."""
+
     __slots__ = (
         "st_mode",
         "st_nlink",

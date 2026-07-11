@@ -9,10 +9,18 @@ from .path import Path, Pathname
 from .utils.stat import FileStat
 
 
-class MemPathBackend(dict): ...
+class MemPathBackend(dict):
+    """Nested-dict storage backing one or more `MemPath` trees. A `dict`
+    value is a directory; a `bytearray` value is a file's content. Share
+    one instance across `MemPath`s (via `backend=`) to give them the same
+    virtual filesystem."""
 
 
 class MemBytesIO(io.BytesIO):
+    """A `BytesIO` that writes its buffer back into the backing
+    `bytearray` (`dest`) on close, so `MemPath` files persist across
+    `open()` calls."""
+
     def __init__(self, dest: bytearray) -> None:
         self._bytes = dest
         super().__init__()
@@ -28,6 +36,11 @@ class MemBytesIO(io.BytesIO):
 
 
 class MemPath(Path):
+    """In-memory `Path` implementation over nested dicts (see
+    `MemPathBackend`) -- a lightweight virtual filesystem for mocks, tests,
+    or transient storage, and the reference exemplar for Track A of
+    extending this library (subclassing `Path` directly; see
+    `docs/guides/extending.md`)."""
 
     __slots__ = ("_backend", "_segments", "_normalized")
 

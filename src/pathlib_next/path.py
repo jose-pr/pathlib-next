@@ -24,6 +24,9 @@ _P = _ty.TypeVar("_P")
 
 
 class FsPathLike(_ty.Protocol):
+    """Anything implementing `__fspath__` -- registered with `os.PathLike`
+    so `os.fspath()` and friends accept it."""
+
     __slots__ = ()
 
     @_utils.notimplemented

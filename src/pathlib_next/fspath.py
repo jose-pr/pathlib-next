@@ -59,10 +59,16 @@ class _BaseFSPathname(_path.PurePath, _proto.Pathname):
 
 
 class PosixPathname(_path.PurePosixPath, _BaseFSPathname):
+    """Pure (no I/O) POSIX-flavour path, implementing the `Pathname`
+    protocol on top of `pathlib.PurePosixPath`."""
+
     __slots__ = ()
 
 
 class WindowsPathname(_path.PureWindowsPath, _BaseFSPathname):
+    """Pure (no I/O) Windows-flavour path, implementing the `Pathname`
+    protocol on top of `pathlib.PureWindowsPath`."""
+
     __slots__ = ()
 
 
@@ -71,6 +77,11 @@ class LocalPath(
     _proto.Path,
     _BaseFSPathname,
 ):
+    """The real local filesystem path: `pathlib.WindowsPath`/`PosixPath`
+    with this library's `Path` mixed in via MRO. Behaves exactly like
+    `pathlib.Path` for anything not explicitly overridden here (see
+    `docs/divergences.md`)."""
+
     __slots__ = ()
 
     def stat(self, *, follow_symlinks=True):

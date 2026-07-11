@@ -24,6 +24,9 @@ class _FileEntry(_ty.NamedTuple):
 
 
 class HttpBackend(_ty.NamedTuple):
+    """Per-instance `requests.Session` + extra request kwargs shared by an
+    `HttpPath` tree (see `with_session()`)."""
+
     session: _req.Session
     requests_args: dict
 
@@ -37,6 +40,10 @@ class HttpBackend(_ty.NamedTuple):
 
 
 class HttpPath(UriPath):
+    """`http`/`https` scheme: read-only access over HTTP, listing
+    directories by scraping an Apache/nginx-style HTML index (via
+    `htmllistparse`). Requires the `http` extra."""
+
     __SCHEMES = ("http", "https")
     __slots__ = ("_isdir", "_session", "_requests_args")
     _isdir: bool

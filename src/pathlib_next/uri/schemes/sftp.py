@@ -10,6 +10,10 @@ from .. import Source, Uri, UriPath
 
 
 class BaseSftpBackend(object):
+    """Protocol for obtaining a paramiko `SFTPClient` for a `Source`.
+    Subclass this to plug in custom connection handling (e.g. tests mock
+    it directly, no real server); `SftpBackend` is the real implementation."""
+
     __slots__ = ()
 
     @_utils.notimplemented
@@ -17,6 +21,9 @@ class BaseSftpBackend(object):
 
 
 class SftpBackend(BaseSftpBackend):
+    """Connects via `paramiko.SSHClient` using `connect_opts` merged with
+    the `Source`'s host/port/userinfo."""
+
     __slots__ = ("connect_opts", "hostkeypolicy")
     connect_opts: dict[str, str]
     hostkeypolicy: _paramiko.MissingHostKeyPolicy
@@ -59,6 +66,9 @@ _CACHED_CLIENTS = _utils.LRU(_create_sftpclient, maxsize=128)
 
 
 class SftpPath(UriPath):
+    """`sftp:` scheme: full read/write access via paramiko, with a
+    thread-keyed LRU connection cache (`_CACHED_CLIENTS`). Requires the
+    `sftp` extra."""
 
     __SCHEMES = ("sftp",)
     __slots__ = ()

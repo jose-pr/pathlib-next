@@ -105,6 +105,8 @@ class Stat(_ty.Protocol):
 
 
 class Chmod(_ty.Protocol):
+    """Composable protocol for objects supporting permission changes."""
+
     __slots__ = ()
 
     @_utils.notimplemented

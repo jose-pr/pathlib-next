@@ -8,6 +8,9 @@ from ..utils.stat import FileStat
 
 
 class SyncEvent(_enum.Enum):
+    """Events `PathSyncer.hook()` fires during a sync, for progress/logging
+    callbacks."""
+
     Copy = 1
     RemovedMissing = 2
     TypeMismatch = 6
@@ -21,6 +24,11 @@ class SyncEvent(_enum.Enum):
 
 
 class PathAndStat(object):
+    """A `Path` plus its cached `stat()` result (`None` if it doesn't
+    exist). `is_*` attribute access (e.g. `.is_file()`) delegates to the
+    cached stat, returning a false-returning callable if the path doesn't
+    exist; any other unknown attribute raises `AttributeError` as normal."""
+
     __slots__ = ("_path", "_stat")
 
     def __init__(self, path: Path, *, follow_symlink=None) -> None:
@@ -72,6 +80,12 @@ class _OnPathSyncerError(_ty.Protocol):
 
 
 class PathSyncer(object):
+    """One-way checksum-driven tree sync: copies/creates in `target`
+    whatever differs from `source` (by `checksum`), optionally removing
+    files in `target` that are missing from `source`. Works across any two
+    `Path` implementations (e.g. `MemPath` -> `LocalPath`, or between two
+    `UriPath` schemes) -- see `sync()`."""
+
     __slots__ = (
         "checksum",
         "_hook",

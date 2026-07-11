@@ -18,6 +18,8 @@ V = _ty.TypeVar("V")
 
 
 class LRU(_ty.Generic[K, V]):
+    """Thread-safe memoizing LRU cache over a function, callable like the
+    function itself; `invalidate(*args)` evicts and recomputes an entry."""
 
     def __init__(self, func: _ty.Callable[K, V], maxsize=128):
         self.cache = collections.OrderedDict()

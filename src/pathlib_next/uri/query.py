@@ -41,6 +41,9 @@ def _querydict(
 
 
 class Query(str):
+    """A URI query string (`str` subclass) that can also be built from a
+    dict/list of pairs and decoded back with `to_dict()`/iteration."""
+
     __slots__ = ("_encoding", "_separator")
     SEPARATOR = "&"
     ENCODING = "utf-8"

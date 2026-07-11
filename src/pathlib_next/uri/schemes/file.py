@@ -8,6 +8,9 @@ from .. import Source, UriPath
 
 
 class FileUri(UriPath):
+    """`file:` scheme: a `UriPath` wrapping a `LocalPath` (`filepath`),
+    delegating all I/O to it."""
+
     __SCHEMES = ("file",)
     __slots__ = ("_filepath",)
 
