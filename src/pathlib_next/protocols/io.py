@@ -52,11 +52,16 @@ class BinaryOpen(_ty.Protocol):
         with self.open(mode="rb") as f:
             return f.read()
 
-    def read_text(self, encoding: str = None, errors: str = None) -> str:
+    def read_text(
+        self, encoding: str = None, errors: str = None, newline: str = None
+    ) -> str:
         """
-        Open in text mode, read it, and close the file.
+        Open in text mode, read it, and close the file. (newline= is 3.13
+        parity.)
         """
-        with self.open(mode="r", encoding=encoding, errors=errors) as f:
+        with self.open(
+            mode="r", encoding=encoding, errors=errors, newline=newline
+        ) as f:
             return f.read()
 
     def write_bytes(self, data: bytes):

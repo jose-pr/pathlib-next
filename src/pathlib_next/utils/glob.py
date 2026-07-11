@@ -28,6 +28,32 @@ def compile_pattern(pat: str, case_sensitive: bool):
     return _re.compile(_fnmatch.translate(pat), flags)
 
 
+def full_match(
+    segments: _ty.Sequence[str], pattern: str, case_sensitive: bool
+) -> bool:
+    """Match `segments` against a glob pattern that may contain "**"
+    components matching zero or more segments (pathlib 3.13's
+    PurePath.full_match semantics)."""
+    return _full_match(tuple(segments), tuple(pattern.split("/")), case_sensitive)
+
+
+def _full_match(
+    segs: _ty.Tuple[str, ...], pats: _ty.Tuple[str, ...], case_sensitive: bool
+) -> bool:
+    if not pats:
+        return not segs
+    pat = pats[0]
+    if pat == RECURSIVE:
+        return _full_match(segs, pats[1:], case_sensitive) or (
+            bool(segs) and _full_match(segs[1:], pats, case_sensitive)
+        )
+    if not segs:
+        return False
+    if not compile_pattern(pat, case_sensitive).match(segs[0]):
+        return False
+    return _full_match(segs[1:], pats[1:], case_sensitive)
+
+
 def glob(
     path: _Globable,
     *,

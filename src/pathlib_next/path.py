@@ -178,6 +178,28 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         except (TypeError, NotImplementedError) as _err:
             return NotImplemented
 
+    def joinpath(self, *args: str | _ty.Self) -> _ty.Self:
+        """Combine this path with one or more paths/segments."""
+        return type(self)(self, *args)
+
+    @property
+    def root(self) -> str:
+        """The root of the path, if any (e.g. "/"). See `docs/divergences.md`
+        for how this is derived generically vs. LocalPath's real one."""
+        segments = self.segments
+        return "/" if segments and not segments[0] else ""
+
+    @property
+    def drive(self) -> str:
+        """No generic concept of a drive; always "". LocalPath gets a real
+        one from pathlib on Windows."""
+        return ""
+
+    @property
+    def anchor(self) -> str:
+        """`drive + root`."""
+        return self.drive + self.root
+
     @property
     @_abc.abstractmethod
     def parent(self) -> _ty.Self:
@@ -203,6 +225,16 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         if not isinstance(path_pattern, _re.Pattern):
             path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
         return path_pattern.match(path) is not None
+
+    def full_match(self, pattern: str, *, case_sensitive: bool = None) -> bool:
+        """Return True if this path matches the glob-style `pattern`
+        against the whole path (3.13 parity). Unlike match(), this isn't a
+        right-anchored partial match, and "**" matches any number of path
+        segments (including zero).
+        """
+        if case_sensitive is None:
+            case_sensitive = self._is_case_sensitive
+        return _glob.full_match(self.segments, pattern, case_sensitive)
 
     def as_posix(self) -> str:
         return "/".join(self.segments)
@@ -232,12 +264,23 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
     def is_hidden(self):
         return self.name.startswith(".")
 
-    @_utils.notimplemented
     def samefile(self, other_path: str | _ty.Self):
-        """Return whether other_path is the same or not as this file
-        (as returned by os.path.samefile()).
+        """Return whether other_path is the same or not as this file, by
+        comparing (st_dev, st_ino) when the backend's stat() provides them.
+        Raises NotImplementedError otherwise (e.g. our own FileStat doesn't
+        carry st_dev/st_ino) -- LocalPath gets a real implementation from
+        pathlib.Path via MRO instead of this one.
         """
-        ...
+        other = other_path if isinstance(other_path, Path) else type(self)(other_path)
+        st1 = self.stat()
+        st2 = other.stat()
+        ident1 = (getattr(st1, "st_dev", None), getattr(st1, "st_ino", None))
+        ident2 = (getattr(st2, "st_dev", None), getattr(st2, "st_ino", None))
+        if None in ident1 or None in ident2:
+            raise NotImplementedError(
+                "samefile() requires stat() to provide st_dev/st_ino"
+            )
+        return ident1 == ident2
 
     def __iter__(self):
         return self.iterdir()
@@ -257,14 +300,47 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
-        recursive: bool = False,
+        recursive: bool = None,
         dironly: bool = None,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
+
+        If `pattern` contains a "**" component, recursion is auto-enabled
+        (pathlib parity). Pass `recursive=False` explicitly to disable
+        recursion even when "**" is present, or `recursive=True` to force
+        it for a pattern that doesn't contain "**".
+        Note for remote schemes (http/sftp): a recursive glob walks the
+        whole remote subtree, one request/roundtrip per directory.
         """
+        if recursive is None:
+            if isinstance(pattern, str):
+                segments = pattern.split("/")
+            elif hasattr(pattern, "segments"):
+                segments = pattern.segments
+            else:
+                segments = ()
+            recursive = _glob.RECURSIVE in segments
         yield from _glob.glob(
             self / pattern,
+            case_sensitive=case_sensitive,
+            include_hidden=include_hidden,
+            recursive=recursive,
+            dironly=dironly,
+        )
+
+    def rglob(
+        self,
+        pattern: str,
+        *,
+        case_sensitive: bool = None,
+        include_hidden: bool = False,
+        recursive: bool = True,
+        dironly: bool = None,
+    ):
+        """Equivalent to `glob(f"**/{pattern}", recursive=True)`."""
+        yield from self.glob(
+            f"**/{pattern}",
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
@@ -406,25 +482,43 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
     @_utils.notimplemented
     def rename(self, target: "_ty.Self | str"): ...
 
-    def copy(self, target: "Path | str", *, overwrite=False):
+    def copy(
+        self,
+        target: "Path | str",
+        *,
+        overwrite=False,
+        follow_symlinks=True,
+        preserve_metadata=True,
+    ):
+        """Copy this file's content to `target`.
+
+        `follow_symlinks`/`preserve_metadata` are named to match CPython
+        3.14's Path.copy() (added after this method); `overwrite` is our
+        own extension (3.14 has no equivalent -- it always raises if the
+        destination exists). `preserve_metadata` defaults to True here
+        (unlike 3.14's False) to match this method's pre-existing behavior
+        of always propagating st_mode; only st_mode is preserved, not
+        timestamps/xattrs -- full metadata preservation is not implemented.
+        """
         if isinstance(target, str):
             target = type(self)(target)
         src = self
-        if src is None:
-            return
 
         if target.exists():
+            if target.is_dir():
+                raise IsADirectoryError(target)
             if overwrite:
                 target.unlink()
             else:
                 raise FileExistsError(target)
         BinaryOpen.copy(src, target)
 
-        try:
-            stat = src.stat()
-            target.chmod(stat.st_mode)
-        except NotImplementedError:
-            pass
+        if preserve_metadata:
+            try:
+                stat = src.stat(follow_symlinks=follow_symlinks)
+                target.chmod(stat.st_mode)
+            except NotImplementedError:
+                pass
 
     def move(self, target: "Path|str", *, overwrite=False):
         if isinstance(target, str):

@@ -73,11 +73,14 @@ class LocalPath(
         *,
         case_sensitive: bool = None,
         include_hidden: bool = False,
-        recursive: bool = False,
+        recursive: bool = None,
         dironly: bool = None,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
+
+        A "**" pattern component auto-enables recursion (pathlib parity);
+        see Path.glob()'s docstring for the `recursive=` override rules.
         """
         if not isinstance(pattern, (str, _re.Pattern)):
             pattern = _os.fspath(pattern)
