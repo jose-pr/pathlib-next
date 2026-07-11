@@ -87,5 +87,6 @@ class BinaryOpen(_ty.Protocol):
             return f.write(data)
 
     def copy(self, target: "BinaryOpen"):
+        """Copy the binary content from this object to a target object."""
         with target.open("wb") as output, self.open("rb") as input:
             _shutil.copyfileobj(input, output)

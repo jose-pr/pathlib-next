@@ -28,7 +28,12 @@ nav:
       - Schemes: guides/schemes.md
       - Extending: guides/extending.md
   - Divergences from pathlib: divergences.md
-  - API Reference: api/reference.md
+  - API Reference:
+      - Core Path: api/path.md
+      - URI & Schemes: api/uri.md
+      - Memory Path: api/mempath.md
+      - Utilities: api/utils.md
+      - Testing Contracts: api/testing.md
   - Changelog: changelog.md
 
 plugins:
@@ -40,7 +45,7 @@ plugins:
             show_source: true
             show_root_heading: true
             merge_init_into_class: true
-            show_if_no_docstring: true
+            show_if_no_docstring: false
 
 markdown_extensions:
   - admonition

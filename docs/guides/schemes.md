@@ -13,7 +13,7 @@ works identically across all of them.
 | List (`iterdir`) | Yes | Yes | Yes | Yes (scrapes an HTML index) | Yes | No (`NotADirectoryError`) | Yes (MLSD, falls back to NLST) | Yes | Yes | Yes (PROPFIND) | Yes (prefix + delimiter emulation) |
 | Stat (`stat`, `exists`, `is_dir`, `is_file`, ...) | Yes | Yes | Yes | Yes (via `HEAD`, falls back to `GET`) | Yes | Yes (`st_size` from decoded payload) | Yes (MLSD, falls back to SIZE for files) | Yes | Yes | Yes (PROPFIND) | Yes (`is_dir` is prefix emulation) |
 | `mkdir` | Yes | Yes | Yes | No | Yes | No | Yes | Local outer archive only (zero-length `name/` entry) | No | Yes (MKCOL) | Yes (zero-byte `key/` marker object) |
-| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | No | Yes | No | Yes | No | No | Yes (`rmdir` is recursive, see notes) | Yes (`rmdir` requires empty prefix) |
+| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | No | Yes | No | Yes | No | No | Yes (`rmdir` requires empty, see notes) | Yes (`rmdir` requires empty prefix) |
 | `rename` | Yes | Yes | No (`move()` falls back to copy+unlink) | No | Yes | No | Yes | No | No | Yes (MOVE) | Yes (server-side `copy_object`+delete, same bucket) |
 | `chmod` | Yes | Yes | No | No | Yes (no `follow_symlinks=False`; paramiko has no `lchmod`) | No | Yes (`SITE CHMOD`, server-dependent) | No | No | No | No |
 | Extra required | none | none | none | `http` | `sftp` | none (stdlib) | none (stdlib `ftplib`) | none (stdlib `zipfile`) | none (stdlib `tarfile`) | `http` (reused) | `s3` |

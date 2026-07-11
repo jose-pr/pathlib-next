@@ -94,5 +94,5 @@ differences, e.g. `http:` being read-only, are listed in
   stat/mkdir/delete/rename) per scheme.
 - **[Extending](guides/extending.md)** -- add your own path type, two ways:
   subclass `Path` directly, or subclass `UriPath` for a new URI scheme.
-- **[API Reference](api/reference.md)** -- generated from docstrings.
+- **[API Reference](api/path.md)** -- generated from docstrings.
 - **[Changelog](changelog.md)**.

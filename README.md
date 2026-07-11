@@ -140,9 +140,7 @@ in depth, with worked examples, in
 - Subclass `UriPath` and set `__SCHEMES` for a new URI scheme (`FileUri`/
   `HttpPath`/`SftpPath` are the built-in examples).
 
-`pathlib_next.testing.PathContract` is a reusable pytest mixin covering the
-baseline contract every implementation must satisfy -- subclass it with a
-`root` fixture to verify your own.
+`pathlib_next.testing` provides reusable pytest mixins (`PurePathContract`, `ReadPathContract`, and `PathContract`) covering the baseline contracts for various levels of capabilities -- subclass one of them with a `root` fixture to verify your own implementation.
 
 ## API overview
 

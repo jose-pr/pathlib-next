@@ -133,11 +133,20 @@ fallback).
 
 ## Testing your implementation
 
-`pathlib_next.testing.PathContract` is a pytest mixin covering the
-baseline contract every `Path` implementation (either track) must satisfy
--- `mkdir`/`is_dir`, read/write round-trips, `iterdir`, `unlink`/`rmdir`
-error semantics, `rm(recursive=)`, `copy`/`move`, `touch(exist_ok=False)`,
-`mkdir(parents=)`. Subclass it with a `root` fixture:
+To ensure custom implementations comply with `pathlib_next`'s expected behaviors, the library offers three contract levels in `pathlib_next.testing` which can be mixed into your `pytest` suite:
+
+1. **`PurePathContract`**: Covers logical pure-path operations (joining, parents, stems, suffix checks, and glob matching) that do not require any physical I/O.
+2. **`ReadPathContract`**: Extends `PurePathContract` to verify read-only I/O capabilities (such as `exists()`, `is_file()`, `is_dir()`, `read_text()`, `iterdir()`, and `stat()`). This level requires a pre-populated `root` fixture.
+3. **`PathContract`**: Extends `ReadPathContract` to verify full read/write/modify capabilities (such as `mkdir()`, `write_text()`, `unlink()`, `rm()`, `copy()`, `move()`, and `touch()`).
+
+### Which Contract is Run by Built-in Schemes?
+- **Full `PathContract`**: Executed against `LocalPath`, `MemPath`, `FileUri`, and `SftpPath`.
+- **`ReadPathContract`**: Executed against `DataUri` (with directory listing skipped), `ZipUri` (read-only mode), `TarUri`, and `HttpPath` (against a local test HTTP server).
+- **Unit Mocks only**: `FtpPath`, `DavPath`, and `S3Path` are tested via unit fakes because fully spinning up their real servers locally to satisfy the generic test suite is non-trivial.
+
+### Example: Running the full contract
+
+Subclass the appropriate contract with a `root` fixture providing a writable directory:
 
 ```python
 import pytest
@@ -149,5 +158,4 @@ class TestMyPath(PathContract):
         return MyPath(tmp_path)   # an empty, writable directory
 ```
 
-See `pathlib_next`'s own `tests/test_contract.py` for the worked example
-running this against `LocalPath`, `MemPath`, and `FileUri` together.
+See `pathlib_next`'s own `tests/test_contract.py` for concrete examples wiring these contracts to existing schemes.
