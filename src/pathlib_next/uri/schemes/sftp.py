@@ -112,6 +112,9 @@ class SftpPath(UriPath):
         # called under its old name `_rename`, so every move() fell back to
         # copy+unlink. `target.path`, not as_posix(): Uri.as_posix() prefixes
         # "host:" for the sftp wire protocol, which only wants the raw path.
+        # A plain str target is resolved relative to self's *parent*
+        # (sibling rename -- "rename this file to a new name in the same
+        # directory"), not to self itself (which would join it as a child).
         if not isinstance(target, Uri):
-            target = Uri(self, target)
+            target = Uri(self.parent, target)
         return self._sftpclient.rename(self.path, target.path)
