@@ -9,6 +9,10 @@ try:
 except ImportError:
     pass
 try:
+    from .webdav import DavPath as DavPath
+except ImportError:
+    pass
+try:
     from .sftp import SftpPath as SftpPath
 except ImportError:
     pass
