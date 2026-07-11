@@ -16,23 +16,24 @@ tree, an HTTP index, or an SFTP server. Every intentional divergence from
 
 ## Features
 
-| Capability | `LocalPath` | `file:` | `mem:` (`MemPath`) | `http(s):` | `sftp:` |
-| --- | --- | --- | --- | --- | --- |
-| Read | Yes | Yes | Yes | Yes | Yes |
-| Write | Yes | Yes | Yes | No | Yes |
-| List (`iterdir`) | Yes | Yes | Yes | Yes (HTML index) | Yes |
-| Stat / exists / is_dir / is_file | Yes | Yes | Yes | Yes | Yes |
-| `mkdir` | Yes | Yes | Yes | No | Yes |
-| Delete | Yes | Yes | Yes | No | Yes |
-| `rename` | Yes | Yes | No (copy+unlink fallback) | No | Yes |
-| Extra required | none | none | none | `http` | `sftp` |
+| Scheme | Read | Write | List | Stat | mkdir | Delete | rename | Extra required |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `LocalPath` / `file:` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | none |
+| `mem:` (`MemPath`) | Yes | Yes | Yes | Yes | Yes | Yes | No | none |
+| `data:` (RFC 2397) | Yes | No | No | Yes | No | No | No | none |
+| `zip:` / `tar:` (archive `!/` paths) | Yes | zip: new entries, local archive | Yes | Yes | zip: local | No | No | none |
+| `ftp(s):` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | none |
+| `http(s):` | Yes | No | Yes (HTML index) | Yes | No | No | No | `http` |
+| `dav(s):` (WebDAV) | Yes | Yes | Yes (PROPFIND) | Yes | Yes | Yes | Yes | `http` |
+| `sftp:` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | `sftp` |
+| `s3:` | Yes | Yes | Yes (prefix emulation) | Yes | Yes | Yes | Yes (same bucket) | `s3` |
 
 Every scheme shares the same `glob()`, `walk()`, `copy()`/`move()`, `rm()`
 implementations -- see the full matrix and notes in
 [Schemes](https://jose-pr.github.io/pathlib_next/guides/schemes/).
 
-- **Unified path interface** across local files, in-memory paths, and
-  `sftp`/`http`/`file` URIs.
+- **Unified path interface** across local files, in-memory paths, archive
+  members, and `file`/`data`/`ftp`/`http`/`dav`/`sftp`/`s3` URIs.
 - **`MemPath`** -- a lightweight virtual filesystem for mocks, tests, or
   transient storage.
 - **`PathSyncer`** -- one-way checksum-driven tree sync between any two
@@ -53,12 +54,14 @@ Optional features/extras:
 
 | Extra/flag | Adds | Needed for |
 | --- | --- | --- |
-| `uri` | `uritools` | URI parsing capabilities |
-| `http` | `requests`, `bs4`, `htmllistparse` | Read and list files over HTTP/HTTPS |
-| `sftp` | `paramiko` | SFTP path operations and transfers |
+| `uri` | `uritools` | URI parsing (any `UriPath` scheme) |
+| `http` | `requests`, `bs4`, `htmllistparse` | `http(s):` and `dav(s):` (WebDAV) paths |
+| `sftp` | `paramiko` | `sftp:` path operations and transfers |
+| `s3` | `boto3` | `s3://bucket/key` paths |
 
 `import pathlib_next` and `LocalPath`/`MemPath` work with no extras
-installed.
+installed; `data:`, `ftp(s):`, and `zip:`/`tar:` only need the `uri` extra
+(they're stdlib-based otherwise).
 
 ## Quick start
 
@@ -111,6 +114,21 @@ p = UriPath("sftp://user@host/var/log/app.log")
 print(p.read_text())
 ```
 
+**`zip:`/`tar:`** -- address a member *inside* an archive (Java-style `!/`
+separator; the archive half is itself any URI -- `file:`, `http:`, `sftp:`, ...):
+
+```python
+from pathlib_next.uri import UriPath
+
+member = UriPath("zip:file:./backup.zip!/etc/config.ini")
+print(member.read_text())
+```
+
+Also built in: `data:` (RFC 2397 inline payloads), `ftp(s):` (stdlib
+`ftplib`), `dav(s):` (WebDAV, full read/write over HTTP), and `s3:`
+(`boto3`) -- one example per scheme in
+[Schemes](https://jose-pr.github.io/pathlib_next/guides/schemes/).
+
 ## Extending
 
 Two first-class ways to add a new path-addressable resource -- both covered
@@ -132,6 +150,7 @@ baseline contract every implementation must satisfy -- subclass it with a
 | --- | --- |
 | `pathlib_next.path` | Base Path implementation and protocols |
 | `pathlib_next.uri` | URI/URL specific path support and Query utils |
+| `pathlib_next.uri.schemes` | Built-in schemes: `file`, `data`, `ftp`, `zip`/`tar`, `http`, `dav`, `sftp`, `s3` |
 | `pathlib_next.mempath` | In-memory transient path structure |
 | `pathlib_next.utils.sync` | Synchronization functions and PathSyncer class |
 | `pathlib_next.testing` | `PathContract`, a pytest mixin for verifying custom implementations |

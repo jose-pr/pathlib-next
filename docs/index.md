@@ -17,13 +17,14 @@ pip install pathlib_next
 
 | Extra | Adds | Needed for |
 | --- | --- | --- |
-| `uri` | `uritools` | `Uri`/`UriPath` parsing |
-| `http` | `requests`, `bs4`, `htmllistparse` | `http://`/`https://` paths |
+| `uri` | `uritools` | `Uri`/`UriPath` parsing (any URI scheme) |
+| `http` | `requests`, `bs4`, `htmllistparse` | `http(s)://` and `dav(s)://` (WebDAV) paths |
 | `sftp` | `paramiko` | `sftp://` paths |
+| `s3` | `boto3` | `s3://bucket/key` paths |
 
 `import pathlib_next` and `pathlib_next.LocalPath`/`MemPath` work with **no
-extras installed** -- extras are only needed for the URI schemes that use
-them.
+extras installed**; `data:`, `ftp(s):`, and `zip:`/`tar:` archive paths only
+need the `uri` extra (they're stdlib-based otherwise).
 
 ## 30-second tour
 
@@ -67,7 +68,19 @@ p = UriPath("sftp://user@host/var/log/app.log")
 print(p.read_text())
 ```
 
-All four are the *same* `Path` contract -- `exists()`, `is_dir()`,
+**Archives** -- a member inside a zip/tar, itself addressed by any URI:
+
+```python
+from pathlib_next.uri import UriPath
+
+member = UriPath("zip:file:./backup.zip!/etc/config.ini")
+print(member.read_text())
+```
+
+Also built in: `data:` (RFC 2397 inline payloads), `ftp(s):` (stdlib
+`ftplib`), `dav(s):` (WebDAV, full read/write), and `s3:` (`boto3`).
+
+All of these are the *same* `Path` contract -- `exists()`, `is_dir()`,
 `iterdir()`, `glob()`, `read_text()`/`write_text()`, `copy()`/`move()`,
 `rm()`, all behave the same way regardless of backend (capability
 differences, e.g. `http:` being read-only, are listed in

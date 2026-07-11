@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- README and docs landing page were still describing the pre-0.6.0 scheme set:
+  the capability matrix, extras table, and quick starts now cover `data:`,
+  `ftp(s):`, `zip:`/`tar:`, `dav(s):`, and `s3:` (all shipped in 0.6.0/0.7.0
+  but previously only documented in the Schemes guide).
+
 ## [0.7.0] - 2026-07-11
 
 ### Added (Phase 7b new schemes, optional extras)
