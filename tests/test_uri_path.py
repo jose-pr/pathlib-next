@@ -27,6 +27,21 @@ def test_with_source_backend_preserved(tmp_path):
     assert retargeted.backend is root.backend
 
 
+# --- B27 (documented divergence): Uri("a").parent -> "" (empty path,
+# round-trips) instead of pathlib's "." ---
+
+
+def test_parent_of_single_segment_is_empty_not_dot():
+    p = Uri("a")
+    assert p.parent.path == ""
+    assert p.parent.as_posix() == ""
+
+
+def test_empty_uri_round_trips_through_parent():
+    empty = Uri("")
+    assert empty.parent.path == empty.path == ""
+
+
 # --- B28 (documented divergence): with_name/with_suffix/with_stem keep
 # query/fragment ---
 
