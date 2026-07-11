@@ -156,3 +156,111 @@ def test_rename_accepts_str_target():
     p = _sftp("sftp://host/a.txt", backend=backend)
     p.rename("b.txt")
     assert backend._client.rename_calls == [("/a.txt", "/b.txt")]
+
+
+def test_sftp_backend_connect_and_client():
+    import unittest.mock
+    mock_ssh = unittest.mock.MagicMock()
+    mock_transport = unittest.mock.MagicMock()
+    mock_sftp = unittest.mock.MagicMock()
+    
+    mock_ssh.get_transport.return_value = mock_transport
+    mock_transport.open_sftp_client.return_value = mock_sftp
+    
+    with unittest.mock.patch("paramiko.SSHClient", return_value=mock_ssh):
+        backend = SftpBackend({"timeout": 10}, "policy")
+        source = Source("sftp", "user:pass", "host", 2222)
+        
+        # Test transport()
+        transport = backend.transport(source)
+        assert transport is mock_transport
+        mock_ssh.set_missing_host_key_policy.assert_called_with("policy")
+        mock_ssh.connect.assert_called_with(
+            timeout=10,
+            hostname="host",
+            port=2222,
+            username="user",
+            password="pass"
+        )
+        
+        # Test client()
+        client = backend.client(source)
+        assert client is mock_sftp
+        mock_transport.open_sftp_client.assert_called_once()
+        
+        # Test transport raising if None
+        mock_ssh.get_transport.return_value = None
+        with pytest.raises(Exception):
+            backend.transport(source)
+
+
+def test_sftppath_operations():
+    class _OperationsFakeSftpClient(_FakeSftpClient):
+        def __init__(self):
+            super().__init__()
+            self.actions = []
+
+        def listdir(self, path):
+            self.actions.append(("listdir", path))
+            return ["file1", "file2"]
+
+        def stat(self, path):
+            self.actions.append(("stat", path))
+            from pathlib_next.utils.stat import FileStat
+            return FileStat(is_dir=True)
+
+        def lstat(self, path):
+            self.actions.append(("lstat", path))
+            from pathlib_next.utils.stat import FileStat
+            return FileStat(is_dir=False)
+
+        def open(self, path, mode, buffering):
+            self.actions.append(("open", path, mode, buffering))
+            import io
+            return io.BytesIO(b"data")
+
+        def mkdir(self, path, mode):
+            self.actions.append(("mkdir", path, mode))
+
+        def remove(self, path):
+            self.actions.append(("remove", path))
+
+        def rmdir(self, path):
+            self.actions.append(("rmdir", path))
+
+    class _OperationsFakeBackend(BaseSftpBackend):
+        def __init__(self):
+            self._client = _OperationsFakeSftpClient()
+        def client(self, source):
+            return self._client
+
+    backend = _OperationsFakeBackend()
+    p = _sftp("sftp://host/dir", backend=backend)
+
+    # listdir via iterdir
+    children = list(p.iterdir())
+    assert [c.name for c in children] == ["file1", "file2"]
+    assert backend._client.actions[-1] == ("listdir", "/dir")
+
+    # stat
+    p.stat(follow_symlinks=True)
+    assert backend._client.actions[-1] == ("stat", "/dir")
+    p.stat(follow_symlinks=False)
+    assert backend._client.actions[-1] == ("lstat", "/dir")
+
+    # open
+    p.open("r", 1024)
+    assert backend._client.actions[-1] == ("open", "/dir", "r", 1024)
+
+    # mkdir
+    p.mkdir(0o755)
+    assert any(a[0] == "mkdir" for a in backend._client.actions)
+
+    # unlink
+    p.unlink(missing_ok=True)
+    assert backend._client.actions[-1] == ("remove", "/dir")
+
+    # rmdir
+    p.rmdir()
+    assert backend._client.actions[-1] == ("rmdir", "/dir")
+

@@ -98,3 +98,46 @@ def test_iter_is_iterdir(tmp_path):
     root = FileUri(tmp_path.as_uri())
     names = {p.name for p in root}
     assert names == {"a.txt"}
+
+
+def test_relative_to_errors():
+    u1 = Uri("http://host1/a/b")
+    u2 = Uri("http://host2/c")
+    # Different anchors/hosts -> ValueError
+    with pytest.raises(ValueError) as exc:
+        u1.relative_to(u2, walk_up=True)
+    assert "have different anchors" in str(exc.value)
+
+    # Different subpaths -> ValueError
+    u3 = Uri("http://host1/a/b")
+    u4 = Uri("http://host1/c")
+    with pytest.raises(ValueError) as exc:
+        u3.relative_to(u4, walk_up=False)
+    assert "is not in the subpath of" in str(exc.value)
+
+    # Walk up containing '..' segment -> ValueError
+    u5 = Uri("a/b")
+    u6 = Uri("../d")
+    with pytest.raises(ValueError) as exc:
+        u5.relative_to(u6, walk_up=True)
+    assert "cannot be walked" in str(exc.value)
+
+
+def test_uri_with_fragment_and_segments():
+    u = Uri("http://host/a?query=1#frag")
+    # test with_fragment
+    u_f = u.with_fragment("newfrag")
+    assert u_f.fragment == "newfrag"
+    assert u_f.query == "query=1"
+
+    # test with_segments empty
+    u_seg = u.with_segments()
+    assert u_seg.path == ""
+
+
+def test_uripath_unimplemented_unlink():
+    # UriPath itself is abstract and doesn't implement unlink
+    p = UriPath("custom://host/a")
+    with pytest.raises(NotImplementedError):
+        p.unlink()
+

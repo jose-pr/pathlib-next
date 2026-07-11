@@ -88,6 +88,30 @@ def test_parent_and_parents(cls):
     parents = [pp.as_posix() for pp in p.parents]
     assert parents[:2] == ["a/b", "a"]
     assert len(parents) == 3  # trailing root/"." element, like pathlib
+    
+    # Slicing
+    try:
+        sliced = p.parents[0:2]
+        assert [x.as_posix() for x in sliced] == ["a/b", "a"]
+    except TypeError:
+        # Python 3.9 stdlib pathlib.PurePath.parents doesn't support slicing
+        pass
+    
+    # Negative indexing
+    try:
+        assert p.parents[-1].as_posix() == "" or p.parents[-1].as_posix() == "."
+        assert p.parents[-2].as_posix() == "a"
+        assert p.parents[-3].as_posix() == "a/b"
+    except IndexError:
+        # Python 3.9 stdlib pathlib.PurePath.parents doesn't support negative indexing
+        pass
+    
+    # IndexError out of bounds
+    with pytest.raises(IndexError):
+        _ = p.parents[3]
+    with pytest.raises(IndexError):
+        _ = p.parents[-4]
+
 
 
 @pytest.mark.parametrize("cls", IMPLS)

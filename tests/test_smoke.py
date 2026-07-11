@@ -93,3 +93,36 @@ def test_example_glob_local(tmp_path):
     glob_test = UriPath(f"file:{tmp_path.as_posix()}/**/*.py")
     found = list(glob.glob(glob_test, recursive=True))
     assert len(found) == 2
+
+
+def test_optional_schemes_presence_or_absence():
+    from pathlib_next.uri import schemes
+    # Check http
+    try:
+        import requests  # noqa: F401
+        assert hasattr(schemes, "HttpPath")
+    except ImportError:
+        assert not hasattr(schemes, "HttpPath")
+
+    # Check sftp
+    try:
+        import paramiko  # noqa: F401
+        assert hasattr(schemes, "SftpPath")
+    except ImportError:
+        assert not hasattr(schemes, "SftpPath")
+
+    # Check s3
+    try:
+        import boto3  # noqa: F401
+        assert hasattr(schemes, "S3Path")
+    except ImportError:
+        assert not hasattr(schemes, "S3Path")
+
+    # Check webdav
+    try:
+        import requests  # noqa: F401
+        assert hasattr(schemes, "DavPath")
+    except ImportError:
+        assert not hasattr(schemes, "DavPath")
+
+
