@@ -1,5 +1,6 @@
 from .data import DataUri as DataUri
 from .file import FileUri as FileUri
+from .ftp import FtpPath as FtpPath
 
 try:
     from .http import HttpPath as HttpPath
