@@ -157,3 +157,49 @@ def test_move_rename_fallback(tmp_path):
     (root / "src.txt").move(root / "dst.txt")
     assert not (root / "src.txt").exists()
     assert (root / "dst.txt").read_text() == "data"
+
+
+def test_copy_recursive(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    src = root / "src"
+    src.mkdir()
+    (src / "f1.txt").write_text("1")
+    (src / "sub").mkdir()
+    (src / "sub" / "f2.txt").write_text("2")
+
+    dst = root / "dst"
+    src.copy(dst, recursive=True)
+
+    assert (dst / "f1.txt").read_text() == "1"
+    assert (dst / "sub" / "f2.txt").read_text() == "2"
+
+    # Test FileExistsError when not overwrite
+    with pytest.raises(FileExistsError):
+        src.copy(dst, recursive=True)
+
+    # Test overwrite
+    (src / "f1.txt").write_text("1-updated")
+    src.copy(dst, recursive=True, overwrite=True)
+    assert (dst / "f1.txt").read_text() == "1-updated"
+
+
+def test_move_recursive_fallback(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    src = root / "src"
+    src.mkdir()
+    (src / "f1.txt").write_text("1")
+    (src / "sub").mkdir()
+    (src / "sub" / "f2.txt").write_text("2")
+
+    class NoRenamePath(pathlib_next.LocalPath):
+        def rename(self, target):
+            raise NotImplementedError("rename not supported")
+
+    src_no_rename = NoRenamePath(src)
+    dst = root / "dst_moved"
+
+    src_no_rename.move(dst)
+    assert not src.exists()
+    assert (dst / "f1.txt").read_text() == "1"
+    assert (dst / "sub" / "f2.txt").read_text() == "2"
+

@@ -227,3 +227,49 @@ def test_stat_protocol_helpers():
     assert not p_err.is_file()
     assert not p_err.is_symlink()
 
+
+def test_checksum_helpers(tmp_path):
+    from pathlib_next import LocalPath
+    from pathlib_next.utils import md5, sha256
+    import hashlib
+
+    p = LocalPath(tmp_path / "test.txt")
+    p.write_bytes(b"hello world")
+
+    expected_md5 = hashlib.md5(b"hello world").hexdigest()
+    expected_sha256 = hashlib.sha256(b"hello world").hexdigest()
+
+    assert md5(p) == expected_md5
+    assert sha256(p) == expected_sha256
+
+
+def test_archive_helpers(tmp_path):
+    from pathlib_next import LocalPath
+    from pathlib_next.utils import make_archive, unpack_archive
+    from pathlib_next.mempath import MemPath
+
+    # 1. LocalPath to LocalPath
+    src = LocalPath(tmp_path / "src")
+    src.mkdir()
+    (src / "file1.txt").write_text("hello")
+    (src / "sub").mkdir()
+    (src / "sub" / "file2.txt").write_text("world")
+
+    for fmt in ("zip", "tar"):
+        archive_path = LocalPath(tmp_path / f"archive.{fmt}")
+        make_archive(src, fmt, archive_path)
+        assert archive_path.exists()
+
+        dest = LocalPath(tmp_path / f"dest_{fmt}")
+        unpack_archive(archive_path, dest)
+        assert (dest / "file1.txt").read_text() == "hello"
+        assert (dest / "sub" / "file2.txt").read_text() == "world"
+
+    # 2. Scheme-agnostic check: MemPath as destination
+    mem_dest = MemPath("/extracted")
+    zip_archive = LocalPath(tmp_path / "archive.zip")
+    unpack_archive(zip_archive, mem_dest)
+    assert (mem_dest / "file1.txt").read_text() == "hello"
+    assert (mem_dest / "sub" / "file2.txt").read_text() == "world"
+
+

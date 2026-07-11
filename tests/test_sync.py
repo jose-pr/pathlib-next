@@ -135,3 +135,13 @@ def test_pathandstat_missing_path_is_methods_return_false():
     pas = PathAndStat(MemPath("/missing.txt"))
     assert pas.exists() is False
     assert pas.is_file() is False
+
+
+def test_sync_default_checksum(tmp_path):
+    source = _mem_tree()
+    target = pathlib_next.LocalPath(tmp_path)
+    syncer = PathSyncer()
+    syncer.sync(source, target)
+    assert (tmp_path / "a.txt").read_text() == "aaa"
+    assert (tmp_path / "sub" / "b.txt").read_text() == "bb"
+
