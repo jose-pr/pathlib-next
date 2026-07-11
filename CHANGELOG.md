@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-11
+
 ### Added (Phase 7a new schemes, stdlib-only, no new deps)
 - `data:` scheme (RFC 2397, `pathlib_next.uri.schemes.data.DataUri`):
   read-only, no backend/connection -- the entire file content is embedded
@@ -233,7 +235,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jose-pr/pathlib_next/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jose-pr/pathlib_next/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.4.0
