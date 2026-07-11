@@ -147,10 +147,11 @@ def test_as_uri_round_trips_zip(zip_archive):
 def test_zip_write_new_entry_to_local_archive(zip_archive):
     root = UriPath(_zip_uri(zip_archive))
     (root / "new.txt").write_text("new content")
-    # Reopen fresh (separate backend/handle) to confirm it was persisted.
-    reopened = UriPath(_zip_uri(zip_archive))
-    assert (reopened / "new.txt").read_text() == "new content"
-    assert sorted(p.name for p in reopened.iterdir()) == ["docs", "new.txt", "top.txt"]
+    # Confirm it actually landed on disk, independent of our own backend
+    # registry/cache (see registry tests below for cross-instance sharing).
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert zf.read("new.txt") == b"new content"
+        assert sorted(zf.namelist()) == ["docs/readme.txt", "new.txt", "top.txt"]
 
 
 def test_zip_mkdir_local_archive(zip_archive):
@@ -196,3 +197,116 @@ def test_tar_mkdir_raises_not_implemented(tar_archive):
     p = UriPath(_tar_uri(tar_archive)) / "newdir"
     with pytest.raises(NotImplementedError):
         p.mkdir()
+
+
+# --- backend registry: independently-constructed instances share one handle ---
+
+
+def test_independently_constructed_instances_share_one_backend(zip_archive):
+    a = UriPath(_zip_uri(zip_archive))
+    b = UriPath(_zip_uri(zip_archive))
+    assert a.backend is b.backend
+
+
+def test_write_via_one_instance_is_immediately_visible_via_another(zip_archive):
+    a = UriPath(_zip_uri(zip_archive))
+    b = UriPath(_zip_uri(zip_archive))
+    (a / "new.txt").write_text("written via a")
+    assert (b / "new.txt").read_text() == "written via a"
+
+
+def test_different_archives_get_different_backends(zip_archive, tmp_path):
+    other = tmp_path / "b.zip"
+    with zipfile.ZipFile(other, "w") as zf:
+        zf.writestr("x.txt", "x")
+    a = UriPath(_zip_uri(zip_archive))
+    b = UriPath(_zip_uri(other))
+    assert a.backend is not b.backend
+
+
+# --- zip mutations: unlink / rmdir / rename / overwrite ---
+
+
+def test_zip_unlink_removes_entry(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "top.txt").unlink()
+    assert not (root / "top.txt").exists()
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert "top.txt" not in zf.namelist()
+        assert "docs/readme.txt" in zf.namelist()  # untouched
+
+
+def test_zip_unlink_missing_raises_file_not_found(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    with pytest.raises(FileNotFoundError):
+        (root / "nope.txt").unlink()
+
+
+def test_zip_unlink_missing_ok(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "nope.txt").unlink(missing_ok=True)  # no raise
+
+
+def test_zip_rmdir_removes_empty_dir_marker(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "empty").mkdir()
+    (root / "empty").rmdir()
+    assert not (root / "empty").exists()
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert "empty/" not in zf.namelist()
+
+
+def test_zip_rmdir_nonempty_raises_os_error(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    with pytest.raises(OSError):
+        (root / "docs").rmdir()
+    assert (root / "docs" / "readme.txt").exists()  # untouched
+
+
+def test_zip_rmdir_missing_raises_file_not_found(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    with pytest.raises(FileNotFoundError):
+        (root / "nosuchdir").rmdir()
+
+
+def test_zip_rename_file_entry(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "top.txt").rename("renamed.txt")
+    assert not (root / "top.txt").exists()
+    assert (root / "renamed.txt").read_text() == "top level"
+
+
+def test_zip_rename_directory_moves_nested_entries(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "docs").rename(root / "moved")
+    assert not (root / "docs").exists()
+    assert (root / "moved").is_dir()
+    assert (root / "moved" / "readme.txt").read_text() == "hello world"
+
+
+def test_zip_overwrite_existing_entry_replaces_content_not_duplicates(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "top.txt").write_text("replaced content")
+    assert (root / "top.txt").read_text() == "replaced content"
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert zf.namelist().count("top.txt") == 1
+        assert zf.read("top.txt") == b"replaced content"
+
+
+def test_zip_mutations_require_local_outer_archive(zip_archive):
+    b64 = base64.b64encode(zip_archive.read_bytes()).decode()
+    p = UriPath(f"zip:data:application/zip;base64,{b64}!/top.txt")
+    with pytest.raises(NotImplementedError):
+        p.unlink()
+    with pytest.raises(NotImplementedError):
+        p.rename("x.txt")
+
+
+def test_tar_has_no_mutation_support(tar_archive):
+    p = UriPath(_tar_uri(tar_archive)) / "top.txt"
+    with pytest.raises(NotImplementedError):
+        p.unlink()
+    with pytest.raises(NotImplementedError):
+        p.rmdir()
+    with pytest.raises(NotImplementedError):
+        p.rename("x.txt")

@@ -82,8 +82,9 @@ class TestHttpContract(ReadPathContract):
         return HttpPath(http_server)
 
 
-# Zip read-only contract
-class TestZipContract(ReadPathContract):
+# Zip read/write contract (local outer archive -- full mutation support:
+# unlink/rmdir/rename/overwrite, see polish_perf/09)
+class TestZipContract(PathContract):
     @pytest.fixture
     def root(self, tmp_path, fixture_tree):
         zip_file = tmp_path / "tree.zip"
