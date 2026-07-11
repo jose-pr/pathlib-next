@@ -308,6 +308,25 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         """
         ...
 
+    def _scandir(self) -> "_ty.Iterator[_ty.Tuple[str, _ty.Optional[FileStat]]]":
+        """Yield (name, stat_or_None) for each directory entry. Used by
+        `walk()`/`glob()` instead of `iterdir()` so schemes whose listing
+        call already returns metadata (HttpPath, DavPath, SftpPath, FtpPath,
+        S3Path) can answer `is_dir()` on the results without a further
+        round trip per entry. Default: falls back to `iterdir()` + one
+        `stat()` per child (no round-trip savings, but no subclass is
+        required to implement this) -- see `docs/guides/extending.md`.
+        """
+        for entry in self.iterdir():
+            try:
+                # follow_symlink=False to match walk()'s own default -- an
+                # explicit walk(follow_symlinks=True) always re-stats each
+                # entry itself regardless of what's yielded here.
+                stat = FileStat.from_path(entry, follow_symlink=False)
+            except OSError:
+                stat = None
+            yield entry.name, stat
+
     def glob(
         self,
         pattern: str | _ty.Self,
@@ -367,7 +386,17 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         on_error: _ty.Callable[[OSError], None] = None,
         follow_symlinks=False,
     ):
-        """Walk the directory tree from this directory, similar to os.walk()."""
+        """Walk the directory tree from this directory, similar to os.walk().
+
+        Uses `_scandir()` rather than `iterdir()` + a `stat()` per entry --
+        for schemes whose listing already carries type metadata (HTTP/DAV
+        indexes, SFTP `listdir_attr`, FTP MLSD, S3 list pages), this turns a
+        remote-tree walk from O(entries) round trips into O(dirs). The
+        pre-seeded stat is trusted only when `follow_symlinks` is False
+        (matching `walk()`'s own default and the lstat-like semantics of
+        those listing calls); an explicit `follow_symlinks=True` always
+        re-`stat()`s each entry so a symlink is still resolved.
+        """
         paths: "list[_ty.Self|tuple[_ty.Self, list[str], list[str]]]" = [self]
 
         while paths:
@@ -376,7 +405,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 yield path
                 continue
             try:
-                scandir_it = path.iterdir()
+                # `_scandir()` is a generator -- listing this directory may
+                # not actually happen (and so may not raise) until the first
+                # `next()`, not at this call. Materializing it here (rather
+                # than iterating lazily below) keeps any such error inside
+                # this try, matching the on_error contract regardless of
+                # whether a given implementation happens to fail eagerly or
+                # lazily.
+                entries = list(path._scandir())
             except OSError as error:
                 if on_error is not None:
                     on_error(error)
@@ -384,18 +420,21 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
             dirnames: "list[str]" = []
             filenames: "list[str]" = []
-            for entry in scandir_it:
+            for name, stat in entries:
                 try:
-                    stat = FileStat.from_path(entry, follow_symlink=follow_symlinks)
-                    is_dir = stat.is_dir()
+                    if stat is None or follow_symlinks:
+                        stat = FileStat.from_path(
+                            path / name, follow_symlink=follow_symlinks
+                        )
+                    is_dir = stat.is_dir() if stat is not None else False
                 except OSError:
                     # Carried over from os.path.isdir().
                     is_dir = False
 
                 if is_dir:
-                    dirnames.append(entry.name)
+                    dirnames.append(name)
                 else:
-                    filenames.append(entry.name)
+                    filenames.append(name)
 
             if top_down:
                 yield path, dirnames, filenames

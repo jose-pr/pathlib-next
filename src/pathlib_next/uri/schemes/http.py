@@ -45,8 +45,7 @@ class HttpPath(UriPath):
     `htmllistparse`). Requires the `http` extra."""
 
     __SCHEMES = ("http", "https")
-    __slots__ = ("_isdir", "_session", "_requests_args")
-    _isdir: bool
+    __slots__ = ()
 
     if _ty.TYPE_CHECKING:
         backend: HttpBackend
@@ -61,20 +60,25 @@ class HttpPath(UriPath):
         _, listing = _htmlparse(soup)
         return listing
 
-    def iterdir(self):
-        _self = self.path.removesuffix("/")
-        cls = type(self)
-        for path in self._listdir():
+    def _scandir(self):
+        # `_listdir()`'s single GET already carries type/size/mtime for
+        # every child -- reuse it instead of `iterdir()` + a HEAD per child.
+        for entry in self._listdir():
             # Directory-listing entries for subdirectories conventionally
             # carry a trailing "/" (e.g. htmllistparse's FileEntry.name ==
             # "sub/"). Without stripping it, the child's own .path would end
             # in "/" too, and Pathname.name derives from segments[-1] --
             # which is "" for a trailing-slash path, so every subdirectory
             # entry silently got name == "".
-            name = path.name.removesuffix("/")
-            inst = type(self).__new__(cls, backend=self.backend)
-            inst._init(self.source, f"{_self}/{name}", "", "")
-            yield inst
+            is_dir = entry.name.endswith("/")
+            name = entry.name.removesuffix("/")
+            if not name:
+                continue
+            yield name, FileStat(
+                st_size=0 if is_dir else (entry.size or 0),
+                st_mtime=_utils.parsedate(entry.modified),
+                is_dir=is_dir,
+            )
 
     def _is_dir(self, resp: _req.Response):
         return (
@@ -85,6 +89,10 @@ class HttpPath(UriPath):
         )
 
     def stat(self, *, follow_symlinks=True, walk_up_last_modified=False):
+        hint = self._pop_stat_hint()
+        if hint is not None:
+            return hint
+
         check = (
             [self.with_path(self.path.removesuffix("/")), self]
             if self.path.endswith("/")
@@ -114,15 +122,7 @@ class HttpPath(UriPath):
         else:
             resp.raise_for_status()
 
-        # Only cache _isdir once the request is confirmed successful --
-        # previously this was cached unconditionally right after the HEAD
-        # loop, even when every candidate in `check` had failed (e.g. 404),
-        # poisoning is_dir() for any later call on this instance before the
-        # FileNotFoundError above was raised.
-        if self._isdir is None:
-            self._isdir = is_dir
-
-        st_size = 0 if self._isdir else int(resp.headers.get("Content-Length", 0))
+        st_size = 0 if is_dir else int(resp.headers.get("Content-Length", 0))
         lm = resp.headers.get("Last-Modified")
         if lm is None and walk_up_last_modified:
             parent = self.parent
@@ -139,9 +139,7 @@ class HttpPath(UriPath):
                 except (StopIteration, OSError):
                     pass
 
-        return FileStat(
-            st_size=st_size, st_mtime=_utils.parsedate(lm), is_dir=self._isdir
-        )
+        return FileStat(st_size=st_size, st_mtime=_utils.parsedate(lm), is_dir=is_dir)
 
     def _open(
         self,
@@ -159,14 +157,6 @@ class HttpPath(UriPath):
             if buffer_size == 0
             else _io.BufferedReader(resp, buffer_size=buffer_size)
         )
-
-    def is_dir(self):
-        if self._isdir is None:
-            self.stat()
-        return bool(self._isdir)
-
-    def is_file(self):
-        return not self.is_dir()
 
     def with_session(self, session: _req.Session, **requests_args):
         return type(self)(self, backend=HttpBackend(session, requests_args))

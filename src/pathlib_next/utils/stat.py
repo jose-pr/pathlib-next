@@ -79,19 +79,25 @@ class FileStat(_FStat):
         return "<%s %s>" % (type(self).__name__, ", ".join(props))
 
     @classmethod
+    def from_stat(cls, stat: _ty.Any) -> "FileStat":
+        """Copy any stat-like object's (`os.stat_result`, paramiko's
+        `SFTPAttributes`, ...) recognized fields into a fresh `FileStat`,
+        so downstream code (e.g. `.is_dir()`) can rely on a uniform type.
+        Passes an already-`FileStat` through unchanged."""
+        if isinstance(stat, FileStat):
+            return stat
+        result = FileStat.__new__(FileStat)
+        for prop in FileStat.__slots__:
+            setattr(result, prop, getattr(stat, prop, 0))
+        return result
+
+    @classmethod
     def from_path(cls, path: "Path", *, follow_symlink=True):
         try:
             stat: _os_stat = path.stat(follow_symlinks=follow_symlink)
-            if isinstance(stat, FileStat):
-                return stat
-            else:
-                result = FileStat.__new__(FileStat)
-                for prop in FileStat.__slots__:
-                    val = getattr(stat, prop, 0)
-                    setattr(result, prop, val)
-                return result
         except FileNotFoundError:
             return None
+        return cls.from_stat(stat)
 
     def is_dir(self):
         """

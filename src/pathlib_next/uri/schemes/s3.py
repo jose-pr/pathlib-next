@@ -90,6 +90,9 @@ class S3Path(UriPath):
         return self.backend.client()
 
     def stat(self, *, follow_symlinks=True):
+        hint = self._pop_stat_hint()
+        if hint is not None:
+            return hint
         key = self.key
         if key == "":
             try:
@@ -116,7 +119,9 @@ class S3Path(UriPath):
             return FileStat(is_dir=True)
         raise FileNotFoundError(self)
 
-    def _listdir(self):
+    def _scandir(self):
+        # Each list_objects_v2 page already carries size/mtime for every
+        # object -- reuse it instead of `iterdir()` + a HEAD per child.
         prefix = f"{self.key}/" if self.key else ""
         seen = set()
         paginator = self._client.get_paginator("list_objects_v2")
@@ -127,12 +132,20 @@ class S3Path(UriPath):
                 name = common["Prefix"][len(prefix) :].rstrip("/")
                 if name and name not in seen:
                     seen.add(name)
-                    yield name
+                    yield name, FileStat(is_dir=True)
             for obj in page.get("Contents", []):
                 name = obj["Key"][len(prefix) :]
                 if name and name not in seen:
                     seen.add(name)
-                    yield name
+                    lm = obj.get("LastModified")
+                    mtime = int(lm.timestamp()) if lm else 0
+                    yield name, FileStat(
+                        st_size=obj.get("Size", 0) or 0, st_mtime=mtime, is_dir=False
+                    )
+
+    def _listdir(self):
+        for name, _stat in self._scandir():
+            yield name
 
     def _open(self, mode="r", buffering=-1):
         if "r" in mode:

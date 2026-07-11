@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno as _errno
 import io as _io
-import stat as _stat
 import typing as _ty
 import urllib.parse as _urlparse
 import xml.etree.ElementTree as _ET
@@ -100,6 +99,9 @@ class DavPath(HttpPath):
         return _ET.fromstring(resp.content)
 
     def stat(self, *, follow_symlinks=True):
+        hint = self._pop_stat_hint()
+        if hint is not None:
+            return hint
         root = self._propfind(depth="0")
         responses = root.findall("D:response", _NS)
         if not responses:
@@ -107,32 +109,25 @@ class DavPath(HttpPath):
         _href, is_dir, size, lm = _parse_response(responses[0])
         return FileStat(st_size=size, st_mtime=_utils.parsedate(lm), is_dir=is_dir)
 
-    def is_dir(self):
-        # Shadow HttpPath.is_dir()'s _isdir-slot cache (never populated by
-        # our stat() override) -- derive from stat() like any other scheme.
-        return _stat.S_ISDIR(self._st_mode() or 0)
-
-    def is_file(self):
-        return _stat.S_ISREG(self._st_mode() or 0)
-
-    def _listdir(self):
+    def _scandir(self):
+        # One PROPFIND (Depth: 1) already carries type/size/mtime for every
+        # child -- reuse it instead of `iterdir()` + a stat per child.
         root = self._propfind(depth="1")
         self_path = _urlparse.urlsplit(self._wire_uri()).path.rstrip("/")
         for elem in root.findall("D:response", _NS):
-            href, _is_dir, _size, _lm = _parse_response(elem)
+            href, is_dir, size, lm = _parse_response(elem)
             href_path = _urlparse.urlsplit(href).path.rstrip("/")
             if not href_path or href_path == self_path:
                 continue  # the "." entry describing self, per RFC 4918
             name = href_path.rsplit("/", 1)[-1]
             if name:
-                yield name
+                yield name, FileStat(
+                    st_size=size, st_mtime=_utils.parsedate(lm), is_dir=is_dir
+                )
 
-    def iterdir(self):
-        # Reinstate the plain name+_make_child_relpath contract (HttpPath
-        # overrides this to expect FileEntry-like objects from _listdir(),
-        # which ours doesn't return).
-        for name in self._listdir():
-            yield self._make_child_relpath(name)
+    def _listdir(self):
+        for name, _stat_ in self._scandir():
+            yield name
 
     def _open(self, mode="r", buffering=-1):
         if "r" in mode:

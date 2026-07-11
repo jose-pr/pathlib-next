@@ -6,6 +6,7 @@ import typing as _ty
 import paramiko as _paramiko
 
 from ... import utils as _utils
+from ...utils.stat import FileStat
 from .. import Source, Uri, UriPath
 
 
@@ -88,10 +89,23 @@ class SftpPath(UriPath):
         return client
 
     def _listdir(self):
-        for path in self._sftpclient.listdir(self.path):
-            yield path
+        for name, _stat in self._scandir():
+            yield name
+
+    def _scandir(self):
+        # listdir_attr() gets SFTPAttributes (lstat-like -- symlinks are not
+        # resolved) for every child in one round trip, instead of a plain
+        # name list (listdir()) plus a separate stat()/lstat() per child.
+        for attr in self._sftpclient.listdir_attr(self.path):
+            yield attr.filename, FileStat.from_stat(attr)
 
     def stat(self, *, follow_symlinks=True):
+        hint = self._pop_stat_hint()
+        if hint is not None and not follow_symlinks:
+            # The hint comes from listdir_attr(), which never resolves
+            # symlinks -- only safe to reuse for a follow_symlinks=False
+            # (lstat-equivalent) request.
+            return hint
         if follow_symlinks:
             return self._sftpclient.stat(self.path)
         else:

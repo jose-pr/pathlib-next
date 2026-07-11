@@ -124,27 +124,41 @@ class FtpPath(UriPath):
             return None
         return None
 
-    def _listdir(self):
+    def _facts_to_filestat(self, facts: dict) -> FileStat:
+        kind = facts.get("type", "file")
+        size = int(facts.get("size", 0) or 0)
+        modify = facts.get("modify")
+        mtime = _parse_mlsd_time(modify) if modify else 0
+        return FileStat(
+            st_size=size, st_mtime=mtime, is_dir=kind in ("dir", "cdir", "pdir")
+        )
+
+    def _scandir(self):
+        # MLSD's facts already carry type/size/modify for every child in
+        # one round trip -- reuse them instead of `iterdir()` + a separate
+        # stat per child. Falls back to NLST (names only, no metadata) on
+        # servers that don't support MLSD.
         try:
-            for name, _facts in self._ftpclient.mlsd(self.path):
+            for name, facts in self._ftpclient.mlsd(self.path):
                 if name not in (".", ".."):
-                    yield name
+                    yield name, self._facts_to_filestat(facts)
         except _ftplib.error_perm:
             for name in self._ftpclient.nlst(self.path):
                 base = name.rsplit("/", 1)[-1]
                 if base not in (".", ".."):
-                    yield base
+                    yield base, None
+
+    def _listdir(self):
+        for name, _stat in self._scandir():
+            yield name
 
     def stat(self, *, follow_symlinks=True):
+        hint = self._pop_stat_hint()
+        if hint is not None:
+            return hint
         facts = self._mlsd_entry()
         if facts is not None:
-            kind = facts.get("type", "file")
-            size = int(facts.get("size", 0) or 0)
-            modify = facts.get("modify")
-            mtime = _parse_mlsd_time(modify) if modify else 0
-            return FileStat(
-                st_size=size, st_mtime=mtime, is_dir=kind in ("dir", "cdir", "pdir")
-            )
+            return self._facts_to_filestat(facts)
         # MLSD unsupported (or entry not found via it) -- SIZE only works
         # for files, so this can't tell "missing" apart from "is a
         # directory"; either way there's no file to report a size for.

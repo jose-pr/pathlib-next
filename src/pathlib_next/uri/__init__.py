@@ -14,6 +14,7 @@ else:
 
 from .. import utils as _utils
 from ..path import Path, Pathname
+from ..utils.stat import FileStat
 from .query import Query
 from .source import Source
 
@@ -294,9 +295,21 @@ class Uri(Pathname):
     def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
         cls = type(self)
         inst = cls.__new__(cls)
-        inst._init(
-            self.source, f"{self.path}/{name}" if self.path else name, "", "", **kwargs
-        )
+        # Ensure exactly one "/" joins path and name -- a directory's own
+        # path conventionally carries a trailing "/" for some schemes
+        # (http/dav listings, or any Uri explicitly constructed that way);
+        # joining against it unconditionally (the old `f"{self.path}/{name}"`)
+        # doubled the slash (e.g. path="/" + name "sub" => "//sub").
+        path = self.path
+        if not path:
+            # An empty path with an authority present is the same root as
+            # "/" (RFC 3986: "http://host" and "http://host/" are
+            # equivalent) -- treat it the same way so a child gets
+            # "/name", not a bare, schemeless-looking "name".
+            new_path = f"/{name}" if self.source else name
+        else:
+            new_path = (path if path.endswith("/") else f"{path}/") + name
+        inst._init(self.source, new_path, "", "", **kwargs)
         return inst
 
     def with_source(self, source: Source):
@@ -443,9 +456,13 @@ class UriPath(Uri, Path):
     -- e.g. `UriPath("http://...")` returns an `HttpPath`. Subclass this
     and set `__SCHEMES` to add a new scheme (Track B of extending this
     library; see `docs/guides/extending.md`); implement the I/O surface
-    (`_listdir`, `stat`, `_open`, ...) documented in `AGENTS.md`."""
+    (`_listdir` or `_scandir`, `stat`, `_open`, ...) documented in
+    `AGENTS.md`. Prefer overriding `_scandir()` over `_listdir()` when the
+    listing call already returns type/size/mtime metadata (PROPFIND, MLSD,
+    `listdir_attr`, an S3 list page, ...) -- `walk()`/`glob()` then answer
+    `is_dir()` on the results for free, without a stat request per entry."""
 
-    __slots__ = ("_backend",)
+    __slots__ = ("_backend", "_stat_hint")
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
 
@@ -556,13 +573,36 @@ class UriPath(Uri, Path):
     @_utils.notimplemented
     def _listdir(self) -> "_ty.Iterator[str]": ...
 
-    def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
+    def _scandir(self) -> "_ty.Iterator[_ty.Tuple[str, _ty.Optional[FileStat]]]":
+        """Default: derives from `_listdir()` + one `stat()` per child (no
+        round-trip savings over the old `iterdir()`). Schemes whose listing
+        call already returns metadata should override this directly instead
+        (see docs/guides/extending.md) -- HttpPath/DavPath/SftpPath/FtpPath/
+        S3Path all do."""
+        for name in self._listdir():
+            child = self._make_child_relpath(name)
+            try:
+                stat = FileStat.from_path(child)
+            except OSError:
+                stat = None
+            yield name, stat
+
+    def _make_child_relpath(self, name: str, stat_hint: "FileStat" = None, **kwargs) -> _ty.Self:
         inst = super()._make_child_relpath(name, backend=self.backend, **kwargs)
+        inst._stat_hint = stat_hint
         return inst
 
+    def _pop_stat_hint(self) -> "FileStat | None":
+        """Consume this instance's pre-seeded stat (from `_scandir()`), if
+        any -- single-use: the next `stat()` call on this same object always
+        re-fetches, so a live mutation is never masked by a stale hint."""
+        hint = self._stat_hint
+        self._stat_hint = None
+        return hint
+
     def iterdir(self) -> "_ty.Iterator[Self]":
-        for path in self._listdir():
-            yield self._make_child_relpath(path)
+        for name, stat in self._scandir():
+            yield self._make_child_relpath(name, stat_hint=stat)
 
 
 _ROOT = Uri("/")
