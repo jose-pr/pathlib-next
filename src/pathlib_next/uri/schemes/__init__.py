@@ -16,3 +16,7 @@ try:
     from .sftp import SftpPath as SftpPath
 except ImportError:
     pass
+try:
+    from .s3 import S3Path as S3Path
+except ImportError:
+    pass
