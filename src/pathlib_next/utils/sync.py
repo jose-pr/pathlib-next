@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import enum as _enum
 import typing as _ty
 

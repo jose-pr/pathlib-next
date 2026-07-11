@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io as _io
 import time as _time
 import typing as _ty

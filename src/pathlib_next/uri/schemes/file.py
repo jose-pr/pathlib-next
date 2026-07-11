@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os as _os
 
 from ...fspath import LocalPath as _Local

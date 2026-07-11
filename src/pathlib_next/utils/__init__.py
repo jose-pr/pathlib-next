@@ -5,7 +5,15 @@ import typing as _ty
 from email.utils import parsedate as _parsedate
 from threading import RLock
 
-K = _ty.ParamSpec("K")
+try:
+    ParamSpec = _ty.ParamSpec
+except AttributeError:
+    try:
+        from typing_extensions import ParamSpec
+    except ImportError:
+        ParamSpec = _ty.TypeVar
+
+K = ParamSpec("K")
 V = _ty.TypeVar("V")
 
 

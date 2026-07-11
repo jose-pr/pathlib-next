@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading as _thread
 import typing as _ty
 

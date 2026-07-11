@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import functools as _func
 import os as _os
 import pathlib as _path

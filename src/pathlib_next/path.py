@@ -5,6 +5,8 @@ paths with operations that have semantics appropriate for different
 operating systems.
 """
 
+from __future__ import annotations
+
 import abc as _abc
 import os as _os
 import re as _re
@@ -31,7 +33,7 @@ class FsPathLike(_ty.Protocol):
 _os.PathLike.register(FsPathLike)
 
 
-_FsPathLike = str | FsPathLike
+_FsPathLike = _ty.Union[str, FsPathLike]
 
 
 class _PathnameParents(_ty.Sequence[PN]):
@@ -213,7 +215,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return False
 
 
-PurePathLike = str | Pathname
+PurePathLike = _ty.Union[str, Pathname]
 
 
 class Path(Pathname, Chmod, Stat, BinaryOpen):
@@ -431,4 +433,4 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         src.unlink()
 
 
-PathLike = str | Path
+PathLike = _ty.Union[str, Path]

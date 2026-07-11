@@ -2,8 +2,8 @@ import pathlib
 
 import pytest
 
-import src.pathlib_next as pathlib_next
-from src.pathlib_next.uri import Uri
+import pathlib_next
+from pathlib_next.uri import Uri
 
 test_uris = ["http://user:pass@google.com:80"]
 

@@ -1,5 +1,6 @@
-import typing as _ty
+from __future__ import annotations
 
+import typing as _ty
 import uritools as _uritools
 
 

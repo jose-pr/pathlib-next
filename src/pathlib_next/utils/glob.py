@@ -1,4 +1,5 @@
 # Based on glob built-in on python modified to work with Uri/anything that implemetns fspath/iterdir that is similar to pathlib.Path
+from __future__ import annotations
 
 
 """Filename globbing utility."""

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import pathlib as _pathlib
 import posixpath as _posix
@@ -6,14 +8,16 @@ import typing as _ty
 import uritools
 
 if _ty.TYPE_CHECKING:
-    from typing import Self
+    from typing import Self, TypeAlias
+else:
+    TypeAlias = _ty.Any
 
 from .. import utils as _utils
 from ..path import Path, Pathname
 from .query import Query
 from .source import Source
 
-UriLike: _ty.TypeAlias = "str | Uri | os.PathLike"
+UriLike: TypeAlias = "str | Uri | os.PathLike"
 
 _NOSOURCE = Source(None, None, None, None)
 

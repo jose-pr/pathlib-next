@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import posixpath as _posix
 from io import IOBase

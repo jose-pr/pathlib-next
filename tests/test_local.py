@@ -1,4 +1,4 @@
-import src.pathlib_next as pathlib_next
+import pathlib_next
 import os
 import posixpath
 import pytest

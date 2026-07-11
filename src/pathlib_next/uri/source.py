@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import ipaddress as _ip
 import socket as _socket
 import typing as _ty
@@ -6,7 +8,7 @@ import uritools as _uritools
 
 from .. import utils as _utils
 
-_IPAddress = _ip.IPv4Address | _ip.IPv6Address
+_IPAddress = _ty.Union[_ip.IPv4Address, _ip.IPv6Address]
 
 if _ty.TYPE_CHECKING:
     from . import UriPath
