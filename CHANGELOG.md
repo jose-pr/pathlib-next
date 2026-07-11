@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-11
+
 ### Fixed (critical -- found while writing Phase 6 examples)
 - `Path("...")` -- the top-level dispatcher documented in this project's
   own README quick start and used throughout -- silently dropped its
@@ -206,7 +208,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jose-pr/pathlib_next/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.4.0
 [0.3.5]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.3.5
