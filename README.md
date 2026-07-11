@@ -61,15 +61,13 @@ Python >= 3.9
 
 ## Development
 
-See `AGENTS.md` (and the language-specific directive it points to, e.g. `PYTHON.md`)
-for environment setup, dependency install, and test commands.
+For environment setup, dependency installation, and running tests, refer to virtual environment configurations and running `pytest`.
 
 ### Releasing
 
 This project follows [Semantic Versioning](https://semver.org/) and keeps a
 [`CHANGELOG.md`](CHANGELOG.md). Pushing a tag matching `v*` triggers the release
-workflow: test gate → build → publish → docs deploy (see `AGENTS.md`'s "Repository
-Structure" section and the language-specific CI/CD notes for the concrete jobs).
+workflow: test gate → build → publish → docs deploy.
 
 ### Documentation site
 
