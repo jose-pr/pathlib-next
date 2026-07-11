@@ -112,10 +112,26 @@ class SftpPath(UriPath):
             return self._sftpclient.lstat(self.path)
 
     def _open(self, mode="r", buffering=-1):
-        return self._sftpclient.open(self.path, mode, buffering)
+        try:
+            return self._sftpclient.open(self.path, mode, buffering)
+        except OSError as error:
+            # SFTPv3 has no dedicated "already exists" status code -- an
+            # O_EXCL ("x" mode) failure comes back as a generic SFTP_FAILURE
+            # ("Failure"), not the ENOENT-mapped FileNotFoundError paramiko
+            # already raises correctly for a genuinely missing file/parent.
+            if "x" in mode and self.exists():
+                raise FileExistsError(self) from error
+            raise
 
     def _mkdir(self, mode):
-        return self._sftpclient.mkdir(self.path, mode)
+        try:
+            return self._sftpclient.mkdir(self.path, mode)
+        except OSError as error:
+            # Same SFTPv3 status-code gap as _open() above: mkdir on an
+            # existing path also comes back as a generic "Failure".
+            if self.exists():
+                raise FileExistsError(self) from error
+            raise
 
     def chmod(self, mode, *, follow_symlinks=True):
         # paramiko's SFTPClient has no lchmod-equivalent.

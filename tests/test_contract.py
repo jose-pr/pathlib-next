@@ -150,3 +150,19 @@ class TestS3Contract(PathContract):
         from pathlib_next.uri.schemes.s3 import S3Path
         return S3Path(url)
 
+
+# SFTP contract — in-process paramiko server (no extra deps beyond sftp extra)
+class TestSftpContract(PathContract):
+    @pytest.fixture
+    def root(self, sftp_server):
+        pytest.importorskip("paramiko")
+        import paramiko
+        from pathlib_next.uri.schemes.sftp import SftpPath, SftpBackend
+        # Disable agent + key-file lookup so paramiko falls through to 'none'
+        # auth, which is what our in-process test server accepts.
+        backend = SftpBackend(
+            {"allow_agent": False, "look_for_keys": False},
+            paramiko.AutoAddPolicy(),
+        )
+        return SftpPath(sftp_server, backend=backend)
+
