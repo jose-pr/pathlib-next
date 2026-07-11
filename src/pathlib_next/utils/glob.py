@@ -101,7 +101,17 @@ def glob(
         )
         return
 
-    if parent and name_is_pattern:
+    # Recurse to enumerate matching directories only when the *parent*
+    # portion itself contains a wildcard (e.g. "sub*/*.py" needs every
+    # "sub*"-matching dir found first). Using `name_is_pattern` (whether the
+    # *leaf* is a pattern) here instead -- which is almost always true, since
+    # that's the common case of a literal directory + wildcarded filename --
+    # was wrong: it re-globbed `parent`'s own parent to "rediscover" parent
+    # by name, which only degenerates back to plain `[parent]` when `parent`
+    # has a non-empty literal name to match against. It silently returned
+    # the wrong directory set when `parent.name` is "" (MemPath's virtual
+    # root, and -- untested here, LocalPath at an OS filesystem root).
+    if parent and parent.has_glob_pattern():
         dirs = glob(
             parent,
             root_dir=root_dir,
