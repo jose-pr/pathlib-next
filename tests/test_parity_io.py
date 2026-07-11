@@ -12,6 +12,21 @@ import pytest
 import pathlib_next
 
 
+def test_path_dispatcher_construction_from_str(tmp_path):
+    # Regression: Path("...") (the abstract dispatcher, not LocalPath
+    # directly) used to drop its constructor args entirely on Python
+    # <3.12, where pathlib.Path.__new__ (not __init__) does the actual
+    # _drv/_root/_parts parsing -- leaving a blank instance that crashed
+    # the moment anything (e.g. `/`) touched that missing state. Masked on
+    # 3.12+, where PurePath.__init__ does the parsing instead.
+    p = pathlib_next.Path(str(tmp_path))
+    assert isinstance(p, pathlib_next.LocalPath)
+    child = p / "sub" / "f.txt"
+    child.parent.mkdir(parents=True, exist_ok=True)
+    child.write_text("data")
+    assert child.read_text() == "data"
+
+
 def test_touch_exist_ok_false_raises(tmp_path):
     p = pathlib_next.LocalPath(tmp_path) / "f.txt"
     p.touch()
