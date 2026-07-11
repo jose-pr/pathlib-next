@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (file-only stat). Writes buffer in memory and upload via STOR/APPE on
   `close()`. `chmod()` uses the common but non-standard `SITE CHMOD`
   extension (may not be supported by every server).
+- `zip:`/`tar:` archive paths (`pathlib_next.uri.schemes.archive`):
+  `<scheme>:<archive-uri>!/<inner-path>` (Java-style `!/` separator,
+  URI form proposed to and confirmed by the user before implementation).
+  The archive half is itself any absolute URI with an explicit scheme, so
+  archives are readable straight off any other backend (`file:`, `http:`,
+  `sftp:`, `ftp:`, `data:`, ...). Read is supported for both schemes.
+  Write is `zip:`-only, and only for brand-new entries in a local (`file:`)
+  outer archive (overwriting/deleting/renaming an existing entry would
+  need a full-archive rewrite -- not implemented, raises
+  `NotImplementedError`). `tar:` auto-detects `.tar.gz`/`.tar.bz2`/`.tar.xz`
+  compression and is always read-only.
 
 ## [0.5.0] - 2026-07-11
 
