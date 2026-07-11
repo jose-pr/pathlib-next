@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `Path.mkdir(parents=True)` created intermediate parents with `exist_ok=False`
+  (racy, and wrong when a parent already existed) and dropped the caller's
+  `exist_ok` on the final retry.
+- `Path.touch(exist_ok=False)` silently truncated an existing file instead of
+  raising `FileExistsError` (pathlib parity).
+- `LocalPath.glob()`'s `dironly` parameter defaulted to `False`, which made the
+  `is None` check for trailing-slash directory-only detection dead code.
+- `Stat._st_mode()` only caught `FileNotFoundError`, letting `PermissionError`
+  and other `OSError`s propagate out of `exists()`/`is_dir()`/etc. where pathlib
+  returns `False`. Also fixed: `follow_symlinks` was accepted but never
+  forwarded to the underlying `stat()` call, so `is_symlink()` never actually
+  inspected the symlink itself.
+- `MemPath._open()` treated any mode other than `"w"` as a read, so `"a"`/`"x"`
+  silently misbehaved; now dispatches `r`/`w`/`x`/`a` correctly and raises
+  `NotImplementedError` for anything else. `MemBytesIO.close()` used
+  `seek(0);read()` instead of `getvalue()`, losing content if the caller's
+  cursor wasn't already at position 0 when closing.
+- `MemPath.normalized` mangled `".."`-escaping paths (e.g. `".."`) into `"."`;
+  now normalizes against a virtual root so they clamp at the root instead.
+- `PathAndStat.__getattr__()` returned `None` for any unrecognized attribute
+  instead of raising `AttributeError`, breaking `hasattr()`-based logic.
+- `parsedate(None)` / an unparseable date string returned "now" instead of
+  epoch 0, which could poison `PathSyncer`'s checksum/freshness comparisons for
+  HTTP sources with no `Last-Modified` header.
+- `HttpPath.stat()` used a bare `except:`; cached `_isdir` from a response that
+  hadn't been confirmed successful yet (including 404s); and didn't fall back
+  to GET when a server rejected `HEAD` with 405.
+- `uri.Query` no longer depends on `uritools`' private `_querydict`/`_querylist`
+  helpers (reimplemented locally against the public `uriencode()`).
+- `Uri` join (`_load_parts`): `query`/`fragment` are now resolved with the same
+  "last segment that actually sets one wins" rule already used for `source`
+  (previously any segment, even one with no query/fragment, would blank out an
+  earlier segment's). Join semantics are now documented explicitly:
+  pathlib-`joinpath`-like, not RFC 3986 reference resolution, `..` is never
+  resolved during join.
+- `Source.is_local()` (DNS lookup) and `get_machine_ips()` are now
+  `functools.lru_cache`d -- previously ran on every call.
+
+### Fixed (crash-level bugs)
 - `MemPath.stat()`/`MemPath._open()` returned a `FileNotFoundError` instance instead
   of raising it for a missing path, causing an unrelated `AttributeError` downstream.
 - `LRU.invalidate()` called `self.lock()` instead of using `self.lock` as a context
