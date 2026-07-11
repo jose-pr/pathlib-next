@@ -79,20 +79,34 @@ class HttpPath(UriPath):
         for uri in check:
             resp = self.backend.request("HEAD", uri, allow_redirects=False)
             resp.close()
+            if resp.status_code == 405:
+                # Some servers reject HEAD outright; fall back to GET.
+                resp = self.backend.request(
+                    "GET", uri, allow_redirects=False, stream=True
+                )
+                resp.close()
             if resp.status_code < 400:
                 break
 
-        if self._isdir is None:
-            self._isdir = self._is_dir(resp)
+        is_dir = self._is_dir(resp)
 
         if resp.is_redirect:
             resp = self.backend.request("HEAD", uri)
+            resp.close()
         if resp.status_code == 404:
             raise FileNotFoundError(self)
         elif resp.status_code == 403:
             raise PermissionError(self)
         else:
             resp.raise_for_status()
+
+        # Only cache _isdir once the request is confirmed successful --
+        # previously this was cached unconditionally right after the HEAD
+        # loop, even when every candidate in `check` had failed (e.g. 404),
+        # poisoning is_dir() for any later call on this instance before the
+        # FileNotFoundError above was raised.
+        if self._isdir is None:
+            self._isdir = is_dir
 
         st_size = 0 if self._isdir else int(resp.headers.get("Content-Length", 0))
         lm = resp.headers.get("Last-Modified")
@@ -108,7 +122,7 @@ class HttpPath(UriPath):
                     )
                     if entry and entry.modified:
                         lm = entry.modified
-                except:
+                except (StopIteration, OSError):
                     pass
 
         return FileStat(

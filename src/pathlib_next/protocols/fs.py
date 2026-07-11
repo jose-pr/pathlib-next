@@ -8,7 +8,7 @@ from .. import utils as _utils
 
 
 class FileStatLike(_ty.Protocol):
-    """Minimum properties stat like object shouuld provide"""
+    """Minimum properties stat like object should provide"""
 
     __slots__ = ()
 
@@ -44,10 +44,13 @@ class Stat(_ty.Protocol):
         not required nor to be expected in any implementations of the protocol
         """
         try:
-            return self.stat().st_mode
-        except FileNotFoundError:
-            return None
-        except ValueError:
+            # follow_symlinks must be forwarded -- it wasn't, so is_symlink()
+            # (which calls this with follow_symlinks=False) always resolved
+            # through the symlink instead of stat'ing it directly.
+            return self.stat(follow_symlinks=follow_symlinks).st_mode
+        except (OSError, ValueError):
+            # pathlib.Path.exists()/is_dir()/etc. swallow OSError (including
+            # PermissionError) and report False rather than propagating it.
             return None
 
     # Convenience functions for querying the stat results

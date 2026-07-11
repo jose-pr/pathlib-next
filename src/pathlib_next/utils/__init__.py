@@ -59,20 +59,25 @@ class LRU(_ty.Generic[K, V]):
 
 
 def parsedate(date: _ty.Union[str, _time.struct_time, tuple, float]):
+    # Missing/unparseable dates yield epoch 0, not "now" -- a caller with no
+    # Last-Modified header shouldn't have that read as "just modified" and
+    # poison checksum/sync freshness comparisons.
     if date is None:
-        return _time.time()
+        return 0
     if isinstance(date, str):
         date = _parsedate(date)
+        if date is None:
+            return 0
     return _time.mktime(date)
 
 
-def sizeof_fmt(num: _ty.Union[int, float]):
+def sizeof_fmt(num: _ty.Union[int, float]) -> str:
     for unit in ("", "K", "M", "G", "T", "P", "E", "Z"):
         if abs(num) < 1024:
             if unit:
                 return "%3.1f%s" % (num, unit)
             else:
-                return int(num)
+                return str(int(num))
         num /= 1024.0
     return "%.1f%s" % (num, "Y")
 
@@ -80,7 +85,7 @@ def sizeof_fmt(num: _ty.Union[int, float]):
 def notimplemented(method):
     @_functools.wraps(method)
     def _notimplemented(*args, **kwargs):
-        raise NotImplementedError(f"Not implement method  {method.__name__}")
+        raise NotImplementedError(f"Method not implemented: {method.__name__}")
 
     return _notimplemented
 
@@ -89,6 +94,7 @@ import ipaddress as _ip
 import socket as _socket
 
 
+@_functools.lru_cache(maxsize=1)
 def get_machine_ips():
     ips: list[_ip.IPv4Address | _ip.IPv6Address] = list()
     for item in _socket.getaddrinfo(_socket.gethostname(), None):

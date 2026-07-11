@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools as _functools
 import ipaddress as _ip
 import socket as _socket
 import typing as _ty
@@ -64,7 +65,14 @@ class Source(_ty.NamedTuple):
             return _cls if _cls else UriPath
         return UriPath
 
+    @_functools.lru_cache(maxsize=256)
     def is_local(self):
+        """Whether `host` resolves to this machine.
+
+        Caches per unique Source (Source is an immutable value type), since
+        this does a DNS lookup (socket.gethostbyname) -- never call it on a
+        hot path uncached.
+        """
         host = self.host
         if not host or host == "localhost":
             return True

@@ -53,6 +53,7 @@ class PathAndStat(object):
                 return getattr(self.stat, name)
             else:
                 return lambda *args, **kwargs: False
+        raise AttributeError(name)
 
 
 if _ty.TYPE_CHECKING:

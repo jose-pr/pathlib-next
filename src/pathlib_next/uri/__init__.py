@@ -123,6 +123,15 @@ class Uri(Pathname):
         return (self.source, self.path, self.query, self.fragment)
 
     def _load_parts(self):
+        """Join semantics (B26, documented -- this is deliberate, not RFC
+        3986 reference resolution): multiple constructor arguments are
+        joined pathlib-`joinpath`-style, right to left, stopping at the
+        first absolute segment. `..` is never resolved during join (unlike
+        RFC 3986 relative-reference resolution). `source` is taken from the
+        last (rightmost) segment that has one; `query`/`fragment` likewise
+        come from the last segment that actually sets one (a later
+        segment with no query/fragment does not blank out an earlier one).
+        """
         uris = self._raw_uris
         source = _NOSOURCE
         query = fragment = None
@@ -135,11 +144,15 @@ class Uri(Pathname):
         else:
             paths: list[str] = []
             for _uri in uris:
-                src, path, query, fragment = (
+                src, path, q, frag = (
                     _uri.parts if isinstance(_uri, Uri) else self._parse_uri(_uri)
                 )
                 if bool(src):
                     source = src
+                if q:
+                    query = q
+                if frag:
+                    fragment = frag
                 paths.append(path)
 
             for path in reversed(paths):
@@ -164,9 +177,11 @@ class Uri(Pathname):
         self._init(source, _path, query, fragment)
 
     def _init(self, source: Source, path: str, query: str, fragment: str, **kwargs):
-        if self._initiated:
-            pass
-            # raise Exception(f"Uri._init should only be called once")
+        # Re-init on an already-initiated instance is intentional and
+        # relied upon (e.g. UriPath.with_source() constructs via __new__,
+        # which already calls _init() once, then calls it again to
+        # overwrite with the new source) -- do not turn this into a raise
+        # without auditing every _init() call site first.
         self._initiated = True
         self._source = source
         self._path = path

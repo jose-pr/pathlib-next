@@ -317,14 +317,27 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
     def touch(self, mode=0o666, exist_ok=True):
         """
         Create this file with the given access mode, if it doesn't exist.
-        """
 
+        Raises FileExistsError if exist_ok is False and the file already
+        exists (pathlib parity) instead of silently truncating it.
+        """
         if exist_ok:
             if self.exists():
                 return
-
-        with self.open("w"):
-            ...
+            with self.open("w"):
+                ...
+        else:
+            try:
+                with self.open("x"):
+                    ...
+            except NotImplementedError:
+                # _open() doesn't support "x" (optional per the mode
+                # contract) -- emulate exclusivity best-effort. Small
+                # TOCTOU window between the check and the open() below.
+                if self.exists():
+                    raise FileExistsError(self)
+                with self.open("w"):
+                    ...
         try:
             self.chmod(mode)
         except NotImplementedError:
@@ -342,8 +355,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         except FileNotFoundError:
             if not parents or self.parent == self:
                 raise
-            self.parent.mkdir(parents=True, exist_ok=False)
-            self.mkdir(mode, parents=False, exist_ok=False)
+            # Parents may already exist (e.g. a sibling branch created them)
+            # -- mirror CPython: exist_ok=True for parents, original
+            # exist_ok only for the final retry of self.
+            self.parent.mkdir(parents=True, exist_ok=True)
+            self.mkdir(mode, parents=False, exist_ok=exist_ok)
         except FileExistsError:
             if not exist_ok or not self.is_dir():
                 raise

@@ -74,7 +74,7 @@ class LocalPath(
         case_sensitive: bool = None,
         include_hidden: bool = False,
         recursive: bool = False,
-        dironly: bool = False,
+        dironly: bool = None,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.

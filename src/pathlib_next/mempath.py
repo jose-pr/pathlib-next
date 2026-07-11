@@ -18,9 +18,12 @@ class MemBytesIO(io.BytesIO):
         super().__init__()
 
     def close(self) -> None:
-        self.seek(0)
+        # getvalue(), not seek(0);read(): a caller that seeks before
+        # closing (or opened in append mode, positioned at EOF) would
+        # otherwise lose everything before the current position.
+        content = self.getvalue()
         self._bytes.clear()
-        self._bytes.extend(self.read())
+        self._bytes.extend(content)
         return super().close()
 
 
@@ -62,11 +65,12 @@ class MemPath(Path):
     @property
     def normalized(self):
         if self._normalized is None:
+            # Normalize against a virtual root ("/" + posix) so ".."-escaping
+            # paths (e.g. "..", "../x") get clamped at the root instead of
+            # mangling into "." (posixpath.normpath("..") == "..", and the
+            # old .removeprefix(".") turned that into a bare ".").
             self._normalized = (
-                _posix.normpath(self.as_posix())
-                .removeprefix(".")
-                .removeprefix("/")
-                .split("/")
+                _posix.normpath("/" + self.as_posix()).removeprefix("/").split("/")
             )
         return self._normalized
 
@@ -160,13 +164,32 @@ class MemPath(Path):
             yield cls(*self.segments, c, backend=self.backend)
 
     def _open(self, mode="r", buffering=-1) -> IOBase:
+        # mode contract: "r"/"w" are required; "x"/"a" are supported here
+        # as an extension. Anything else raises NotImplementedError.
         parent, name = self._parent_container()
-        if "w" in mode:
-            content = parent.setdefault(name, bytearray())
-            return MemBytesIO(content)
-        elif name not in parent:
-            raise FileNotFoundError(self)
-        else:
+        if mode == "r":
+            if name not in parent:
+                raise FileNotFoundError(self)
             content = parent[name]
-
-        return io.BytesIO(content)
+            if isinstance(content, dict):
+                raise IsADirectoryError(self)
+            return io.BytesIO(content)
+        elif mode == "w":
+            content = bytearray()
+            parent[name] = content
+            return MemBytesIO(content)
+        elif mode == "x":
+            if name in parent:
+                raise FileExistsError(self)
+            content = bytearray()
+            parent[name] = content
+            return MemBytesIO(content)
+        elif mode == "a":
+            content = parent.setdefault(name, bytearray())
+            if isinstance(content, dict):
+                raise IsADirectoryError(self)
+            buf = MemBytesIO(content)
+            buf.write(content)
+            return buf
+        else:
+            raise NotImplementedError(f"mode={mode!r}")
