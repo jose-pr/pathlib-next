@@ -177,6 +177,9 @@ Run the benchmark suite using:
 python benchmarks/bench.py
 ```
 
+A benchmark report and methodology notes live in
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
 ### Releasing
 
 This project follows [Semantic Versioning](https://semver.org/) and keeps a

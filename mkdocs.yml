@@ -27,6 +27,7 @@ nav:
   - Guides:
       - Schemes: guides/schemes.md
       - Extending: guides/extending.md
+  - Benchmarks: benchmarks.md
   - Divergences from pathlib: divergences.md
   - API Reference:
       - Core Path: api/path.md
