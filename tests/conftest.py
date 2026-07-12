@@ -221,7 +221,7 @@ def http_status_server():
 
 
 class _WritableHandler(http.server.SimpleHTTPRequestHandler):
-    """SimpleHTTPRequestHandler + real PUT/DELETE against files on disk --
+    """SimpleHTTPRequestHandler + real PUT/DELETE/PATCH against files on disk --
     for a genuine write-then-read-back round trip. Existing
     `test_http_write_*`/`test_http_unlink` tests only monkeypatch
     `requests.Session.request` and assert the request was sent; they never
@@ -237,6 +237,47 @@ class _WritableHandler(http.server.SimpleHTTPRequestHandler):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
         self.send_response(204 if existed else 201)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_PATCH(self):
+        """Handle PATCH with Content-Range header for append mode."""
+        import pathlib
+        import re
+
+        content_range = self.headers.get("Content-Range", "")
+        length = int(self.headers.get("Content-Length", 0))
+        data = self.rfile.read(length)
+        p = pathlib.Path(self.translate_path(self.path))
+
+        # Parse Content-Range: bytes start-end/*
+        match = re.match(r'bytes (\d+)-(\d+)/\*', content_range)
+        if not match:
+            self.send_error(400, "Invalid Content-Range header")
+            return
+
+        start = int(match.group(1))
+        end = int(match.group(2))
+
+        # Ensure parent exists
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        # Read existing content or start with empty
+        if p.exists():
+            existing = p.read_bytes()
+        else:
+            existing = b""
+
+        # Append at the specified offset
+        if start > len(existing):
+            # Pad with zeros if start is beyond current size
+            new_content = existing + (b"\x00" * (start - len(existing))) + data
+        else:
+            # Replace/append at the given offset
+            new_content = existing[:start] + data
+
+        p.write_bytes(new_content)
+        self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()
 

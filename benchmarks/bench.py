@@ -233,6 +233,66 @@ def benchmark_http_directory_parser():
     return t_pre / 20 * 1000, t_table / 20 * 1000  # ms/parse, n=1000 entries
 
 
+def benchmark_sftp_concurrent_copy():
+    """Benchmark concurrent vs sequential copy on asyncssh backend.
+
+    Note: This requires SFTP_TEST_HOST, SFTP_TEST_USER, SFTP_TEST_PASSWORD env vars.
+    Skipped if not configured.
+
+    Creates 50 small files and copies them concurrently vs sequentially,
+    measuring the speedup from pipelining over a single asyncssh connection.
+    """
+    import os
+
+    host = os.getenv("SFTP_TEST_HOST")
+    user = os.getenv("SFTP_TEST_USER")
+    password = os.getenv("SFTP_TEST_PASSWORD")
+
+    if not (host and user and password):
+        return None, None, "SFTP_TEST_HOST/USER/PASSWORD not configured"
+
+    try:
+        from pathlib_next.uri import UriPath
+        from pathlib_next.uri.schemes.sftp import SftpPath, AsyncsshSftpBackend
+    except ImportError:
+        return None, None, "asyncssh backend not available"
+
+    # Create test directory with 50 small files
+    source = UriPath(f"sftp://{user}:{password}@{host}/tmp/pathlib_test_src")
+    target_seq = UriPath(f"sftp://{user}:{password}@{host}/tmp/pathlib_test_seq")
+    target_conc = UriPath(f"sftp://{user}:{password}@{host}/tmp/pathlib_test_conc")
+
+    try:
+        source.rm(recursive=True, missing_ok=True)
+        target_seq.rm(recursive=True, missing_ok=True)
+        target_conc.rm(recursive=True, missing_ok=True)
+        source.mkdir(parents=True, exist_ok=True)
+
+        # Create 50 test files
+        for i in range(50):
+            (source / f"file_{i:03d}.txt").write_text(f"content {i}" * 100)
+
+        # Sequential copy (paramiko backend)
+        p_seq = SftpPath(str(source), backend=__import__("pathlib_next.uri.schemes.sftp", fromlist=["SftpBackend"]).SftpBackend())
+        t_seq = timeit.timeit(lambda: p_seq.copy(target_seq, overwrite=True), number=1)
+
+        # Concurrent copy (asyncssh backend, max_concurrency=8)
+        p_conc = SftpPath(str(source), backend=AsyncsshSftpBackend(max_concurrency=8))
+        t_conc = timeit.timeit(lambda: p_conc.copy(target_conc, overwrite=True), number=1)
+
+        speedup = t_seq / t_conc if t_conc > 0 else 0.0
+        return t_seq, t_conc, f"{speedup:.2f}x speedup"
+    except Exception as e:
+        return None, None, f"Error: {e}"
+    finally:
+        try:
+            source.rm(recursive=True, missing_ok=True)
+            target_seq.rm(recursive=True, missing_ok=True)
+            target_conc.rm(recursive=True, missing_ok=True)
+        except:
+            pass
+
+
 def main():
     print("Running benchmarks...")
     
@@ -268,6 +328,12 @@ def main():
     print(f"8. HTTP dir listing parse, Apache <pre>, n=1000 (ms/parse): {t_parser_pre:.4f}ms")
     print(f"9. HTTP dir listing parse, nginx <table>, n=1000 (ms/parse): {t_parser_table:.4f}ms")
 
+    t_sftp_seq, t_sftp_conc, sftp_info = benchmark_sftp_concurrent_copy()
+    if t_sftp_seq is not None:
+        print(f"10. SFTP concurrent copy (50 files): Sequential: {t_sftp_seq:.4f}s, Concurrent: {t_sftp_conc:.4f}s ({sftp_info})")
+    else:
+        print(f"10. SFTP concurrent copy (50 files): {sftp_info}")
+
     # Print Markdown table format for copy-pasting
     print("\n| Benchmark Case | Time / Metric |")
     print("|---|---|")
@@ -283,6 +349,10 @@ def main():
     print(f"| HTTP Walk (10) | {t_http_walk:.4f}s |")
     print(f"| HTTP dir listing parse, Apache <pre> (n=1000) | {t_parser_pre:.4f}ms/parse |")
     print(f"| HTTP dir listing parse, nginx <table> (n=1000) | {t_parser_table:.4f}ms/parse |")
+    if t_sftp_seq is not None:
+        print(f"| SFTP Concurrent Copy (50 files) | Sequential: {t_sftp_seq:.4f}s, Concurrent: {t_sftp_conc:.4f}s ({sftp_info}) |")
+    else:
+        print(f"| SFTP Concurrent Copy (50 files) | {sftp_info} |")
 
 if __name__ == "__main__":
     main()

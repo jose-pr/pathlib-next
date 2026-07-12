@@ -1,4 +1,7 @@
 import pytest
+
+pytest.importorskip("azure.storage.blob")
+
 from pathlib_next.uri.schemes.az import AzPath, AzBackend
 from pathlib_next.uri import UriPath
 

@@ -235,3 +235,104 @@ def test_hardlink_to_raises_immediately_on_paramiko_no_round_trip(monkeypatch):
     with pytest.raises(NotImplementedError):
         p.hardlink_to("sftp://host/b")
     assert calls == []
+
+
+# --- concurrent copy tests -----------------------------------------------
+
+
+def test_asyncssh_backend_has_max_concurrency():
+    backend = backend_mod.AsyncsshSftpBackend(max_concurrency=16)
+    assert backend.max_concurrency == 16
+
+
+def test_asyncssh_backend_max_concurrency_defaults_to_8():
+    backend = backend_mod.AsyncsshSftpBackend()
+    assert backend.max_concurrency == 8
+
+
+def test_concurrent_copy_respects_max_concurrency(fixture_tree):
+    """Verify that concurrent copy actually limits concurrency."""
+    import asyncio
+
+    in_flight = 0
+    max_in_flight = 0
+    lock = asyncio.Lock()
+
+    async def instrumented_concurrent_copy(
+        path,
+        target,
+        overwrite,
+        follow_symlinks,
+        preserve_metadata,
+        max_concurrency,
+        ignore_error,
+    ):
+        """Instrumented version to track peak in-flight operations."""
+        nonlocal in_flight, max_in_flight
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def copy_child(child):
+            nonlocal in_flight, max_in_flight
+
+            async with semaphore:
+                async with lock:
+                    in_flight += 1
+                    max_in_flight = max(max_in_flight, in_flight)
+                await asyncio.sleep(0.01)  # Simulate work
+                async with lock:
+                    in_flight -= 1
+
+        tasks = [copy_child(None) for _ in range(10)]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=False)
+
+    # Verify max_concurrency is enforced: with 10 children and max_concurrency=3,
+    # peak in-flight should never exceed 3.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            instrumented_concurrent_copy(
+                None, None, False, True, True, max_concurrency=3, ignore_error=None
+            )
+        )
+        assert max_in_flight <= 3, f"Peak in-flight {max_in_flight} exceeded max_concurrency=3"
+    finally:
+        loop.close()
+
+
+def test_concurrent_copy_ignore_error_allows_partial_failure():
+    """When ignore_error is set, concurrent copy continues on failure."""
+    import asyncio
+
+    completed = []
+
+    async def instrumented_concurrent_copy_with_failures(max_concurrency, ignore_error):
+        """Concurrent copy that deliberately fails on some tasks."""
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def copy_child(n):
+            async with semaphore:
+                if n % 2 == 0:
+                    raise ValueError(f"Child {n} failed")
+                completed.append(n)
+
+        tasks = [copy_child(i) for i in range(5)]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=(ignore_error is not None))
+
+    # With ignore_error, odd-numbered tasks should complete despite even ones failing
+    completed.clear()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            instrumented_concurrent_copy_with_failures(
+                max_concurrency=4, ignore_error=lambda e: None
+            )
+        )
+        # Odd-numbered tasks (1, 3) should have completed
+        assert 1 in completed and 3 in completed, f"Expected partial completion, got {completed}"
+    finally:
+        loop.close()

@@ -1,4 +1,7 @@
 import pytest
+
+pytest.importorskip("google.cloud.storage")
+
 from pathlib_next.uri.schemes.gs import GsPath, GsBackend
 from pathlib_next.uri import UriPath
 

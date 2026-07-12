@@ -26,7 +26,7 @@ Notes:
   subclass (Track A of [Extending](extending.md)), backed by nested dicts
   (`MemPathBackend`). No `as_uri()` scheme is registered for it; construct
   it directly via `MemPath(...)`.
-- **`http(s):`** supports writing via `PUT` (default, configurable to `POST` or other verbs via `with_session(..., write_method=...)`) and deleting via `DELETE` (where `rmdir()` checks empty status first). Directory listing parses Apache/nginx-style HTML indexes using a fast, zero-dependency parser.
+- **`http(s):`** supports writing via `PUT` (default, configurable to `POST` or other verbs via `with_session(..., write_method=...)`) and deleting via `DELETE` (where `rmdir()` checks empty status first). Directory listing parses Apache/nginx-style HTML indexes using a fast, zero-dependency parser. Append mode (`open("a")`) is supported via two strategies: the default "rewrite" mode (GET existing + PUT full body, safe on any server but non-atomic) and an opt-in "patch" mode using HTTP's `Content-Range` PATCH verb for real appends (see `with_session(..., append_mode="patch")`). Patch mode raises `PermissionError` if the server rejects it, never silently falls back to rewrite.
 - **`sftp:`** has the fullest capability set of the URI schemes (it's a
   real remote filesystem protocol), and is the one scheme with **two
   selectable backends**: paramiko (sync, the `sftp` extra) and asyncssh

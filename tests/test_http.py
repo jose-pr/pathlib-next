@@ -308,3 +308,136 @@ def test_listdir_no_retry_when_already_trailing_slash(monkeypatch):
     with pytest.raises(FileNotFoundError):
         p._listdir()
     assert calls == ["http://example.com/sub/"]
+
+
+# --- Append mode tests (Phase 1) ---
+
+def test_http_append_rewrite_mode_nonexistent_file(http_writable_server):
+    """Append to non-existent file in rewrite mode (default).
+    Should behave like write mode."""
+    p = UriPath(f"{http_writable_server}/append_new.txt")
+    with p.open("a") as f:
+        f.write(b"hello")
+    assert p.read_bytes() == b"hello"
+
+
+def test_http_append_rewrite_mode_existing_file(http_writable_server):
+    """Append to existing file in rewrite mode (default).
+    Should GET existing, then PUT old+new."""
+    p = UriPath(f"{http_writable_server}/append_existing.txt")
+    # Write initial content
+    p.write_bytes(b"hello")
+    # Append to it
+    with p.open("a") as f:
+        f.write(b" world")
+    assert p.read_bytes() == b"hello world"
+
+
+def test_http_append_rewrite_mode_multiple_writes(http_writable_server):
+    """Multiple writes in append mode should concatenate."""
+    p = UriPath(f"{http_writable_server}/append_multi.txt")
+    p.write_bytes(b"a")
+    with p.open("a") as f:
+        f.write(b"b")
+        f.write(b"c")
+    assert p.read_bytes() == b"abc"
+
+
+def test_http_append_patch_mode_configured(monkeypatch):
+    """Test PATCH mode with Content-Range header."""
+    import requests
+
+    recorded = []
+
+    class MockResponse:
+        status_code = 204
+        content = b""
+        reason = "No Content"
+
+        def raise_for_status(self):
+            pass
+
+    def mock_request(self, method, url, **kwargs):
+        recorded.append((method, url, kwargs.get("headers", {}), kwargs.get("data")))
+        return MockResponse()
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/file.txt")
+    session = requests.Session()
+    p = p.with_session(session, append_mode="patch")
+
+    with p.open("a") as f:
+        f.write(b"new content")
+
+    # Should have made a STAT call (to get size) and a PATCH call
+    patch_calls = [r for r in recorded if r[0] == "PATCH"]
+    assert len(patch_calls) > 0
+    # Content-Range header should be present
+    assert any("Content-Range" in r[2] for r in patch_calls)
+
+
+def test_http_append_patch_mode_rejection(monkeypatch):
+    """PATCH mode should raise if server rejects with 405."""
+    import requests
+    from pathlib_next.uri.schemes.http import HttpPath
+
+    def mock_request(self, method, url, **kwargs):
+        if method == "PATCH":
+            resp = _MockHttpResponse(405)
+        else:
+            resp = _MockHttpResponse(200, "0")
+        return resp
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/file.txt")
+    session = requests.Session()
+    p = p.with_session(session, append_mode="patch")
+
+    # Should raise PermissionError on PATCH rejection (405 → PermissionError)
+    with pytest.raises(PermissionError):
+        with p.open("a") as f:
+            f.write(b"new content")
+
+
+def test_http_append_write_stream_marks_closed_on_failure(monkeypatch):
+    """Append stream must mark itself closed even on failed close()."""
+    import requests
+    from pathlib_next.uri.schemes.http import HttpAppendStream
+
+    class MockResponse:
+        status_code = 500
+        reason = "Server Error"
+
+        def raise_for_status(self):
+            raise requests.exceptions.HTTPError(response=self)
+
+    def mock_request(self, method, url, **kwargs):
+        return MockResponse()
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/f.txt")
+    stream = HttpAppendStream(p)
+    stream.write(b"x")
+
+    with pytest.raises(OSError):
+        stream.close()
+    assert stream.closed
+
+    # Second close() must be a no-op
+    stream.close()
+
+
+def test_http_append_default_is_rewrite(monkeypatch):
+    """Default append_mode should be 'rewrite'."""
+    from pathlib_next.uri.schemes.http import HttpBackend
+    import requests
+
+    backend = HttpBackend(
+        session=requests.Session(),
+        requests_args={},
+        write_method="PUT"
+    )
+    assert backend.append_mode == "rewrite"

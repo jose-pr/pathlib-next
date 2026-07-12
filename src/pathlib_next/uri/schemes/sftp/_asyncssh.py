@@ -487,3 +487,36 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     @classmethod
     def default(cls) -> "AsyncsshSftpBackend":
         return cls()
+
+
+async def _concurrent_copy(
+    path,
+    target,
+    overwrite: bool,
+    follow_symlinks: bool,
+    preserve_metadata: bool,
+    max_concurrency: int,
+    ignore_error,
+):
+    """Concurrent copy for many small files, bounded by max_concurrency semaphore."""
+    semaphore = _asyncio.Semaphore(max_concurrency)
+
+    async def copy_child(child):
+        async with semaphore:
+            try:
+                child_target = target / child.name
+                child.copy(
+                    child_target,
+                    overwrite=overwrite,
+                    follow_symlinks=follow_symlinks,
+                    preserve_metadata=preserve_metadata,
+                )
+            except Exception as e:
+                if ignore_error is None:
+                    raise
+                ignore_error(e)
+
+    # Gather all child copy tasks
+    tasks = [copy_child(child) for child in path.iterdir()]
+    if tasks:
+        await _asyncio.gather(*tasks, return_exceptions=(ignore_error is not None))

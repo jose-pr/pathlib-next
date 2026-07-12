@@ -234,3 +234,46 @@ class SftpPath(UriPath):
             )
         target_path = target.path if isinstance(target, Uri) else str(target)
         self._sftpclient.link(target_path, self.path)
+
+    def copy(
+        self,
+        target,
+        *,
+        overwrite=False,
+        follow_symlinks=True,
+        preserve_metadata=True,
+        ignore_error=None,
+    ):
+        """Copy with concurrent fan-out on the asyncssh backend.
+
+        When using the asyncssh backend with recursive=True (implicit when
+        target is a directory), child copies are fanned out over a bounded
+        asyncio.Semaphore, limited by backend.max_concurrency.
+        """
+        from ._asyncssh import AsyncsshSftpBackend, _concurrent_copy, _run
+
+        # Non-asyncssh backends or non-directory targets: use sequential base implementation
+        if not isinstance(self.backend, AsyncsshSftpBackend) or not self.is_dir():
+            return super().copy(
+                target,
+                overwrite=overwrite,
+                follow_symlinks=follow_symlinks,
+                preserve_metadata=preserve_metadata,
+                ignore_error=ignore_error,
+            )
+
+        # Asyncssh backend + directory: concurrent fan-out
+        target = self._resolve_copy_target(target, overwrite)
+        target.mkdir(parents=True, exist_ok=True)
+
+        # Run concurrent copy through the event loop
+        coro = _concurrent_copy(
+            self,
+            target,
+            overwrite=overwrite,
+            follow_symlinks=follow_symlinks,
+            preserve_metadata=preserve_metadata,
+            max_concurrency=self.backend.max_concurrency,
+            ignore_error=ignore_error,
+        )
+        _run(coro)
