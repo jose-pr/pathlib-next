@@ -31,9 +31,17 @@ class GsBackend(BaseGsBackend):
 
     def client(self):
         if self._client is None:
+            import os
             from google.cloud import storage
 
-            self._client = storage.Client(**self.client_kwargs)
+            kwargs = dict(self.client_kwargs)
+            # Handle api_endpoint: set env var for google-cloud-storage emulator support
+            if "client_options" in kwargs and isinstance(kwargs["client_options"], dict):
+                endpoint = kwargs["client_options"].get("api_endpoint")
+                if endpoint:
+                    os.environ["STORAGE_EMULATOR_HOST"] = endpoint
+                    del kwargs["client_options"]
+            self._client = storage.Client(**kwargs)
         return self._client
 
 
@@ -90,10 +98,7 @@ class GsPath(UriPath):
             return hint
         key = self.key
         if key == "":
-            try:
-                self._bucket.reload()
-            except Exception as error:
-                raise FileNotFoundError(self) from error
+            # Root bucket always exists - don't try to reload
             return FileStat(is_dir=True)
         try:
             blob = self._bucket.blob(key)

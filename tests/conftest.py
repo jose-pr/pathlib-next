@@ -698,20 +698,11 @@ def gcs_api_server(fixture_tree):
 
     # Build an in-memory object store from fixture_tree
     objects = {}
-    def populate_objects(path, prefix=""):
-        for item in path.iterdir():
+    for item in fixture_tree.rglob("*"):
+        if item.is_file():
             rel = item.relative_to(fixture_tree)
             key = str(rel).replace("\\", "/")
-            if item.is_file():
-                objects[key] = item.read_bytes()
-            else:
-                for subitem in item.rglob("*"):
-                    if subitem.is_file():
-                        rel = subitem.relative_to(fixture_tree)
-                        key = str(rel).replace("\\", "/")
-                        objects[key] = subitem.read_bytes()
-                break
-    populate_objects(fixture_tree)
+            objects[key] = item.read_bytes()
 
     bucket_name = "test-bucket"
 
@@ -860,20 +851,11 @@ def az_api_server(fixture_tree):
     from xml.etree import ElementTree as ET
 
     objects = {}
-    def populate_objects(path, prefix=""):
-        for item in path.iterdir():
+    for item in fixture_tree.rglob("*"):
+        if item.is_file():
             rel = item.relative_to(fixture_tree)
             key = str(rel).replace("\\", "/")
-            if item.is_file():
-                objects[key] = item.read_bytes()
-            else:
-                for subitem in item.rglob("*"):
-                    if subitem.is_file():
-                        rel = subitem.relative_to(fixture_tree)
-                        key = str(rel).replace("\\", "/")
-                        objects[key] = subitem.read_bytes()
-                break
-    populate_objects(fixture_tree)
+            objects[key] = item.read_bytes()
 
     account = "testaccount"
     container = "testcontainer"
@@ -1009,13 +991,10 @@ def az_api_server(fixture_tree):
 def az_server(az_api_server):
     """Azure test server that returns configured BaseAzBackend and an AzPath."""
     from pathlib_next.uri.schemes.az import AzBackend, AzPath
-    from azure.storage.blob import BlobServiceClient
     base_url, account, container = az_api_server
     conn_str = (
         f"DefaultEndpointsProtocol=http;AccountName={account};"
         f"AccountKey=dGVzdGtleQ==;BlobEndpoint={base_url}/{account};"
     )
-    client = BlobServiceClient.from_connection_string(conn_str)
-    backend = AzBackend()
-    backend._client = client
+    backend = AzBackend(connection_string=conn_str)
     return AzPath(f"az://{account}/{container}", backend=backend), backend

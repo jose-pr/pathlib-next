@@ -35,7 +35,14 @@ class AzBackend(BaseAzBackend):
         if self._client is None:
             from azure.storage.blob import BlobServiceClient
 
-            self._client = BlobServiceClient(**self.client_kwargs)
+            kwargs = dict(self.client_kwargs)
+            # Handle connection_string directly if provided
+            if "connection_string" in kwargs:
+                self._client = BlobServiceClient.from_connection_string(
+                    kwargs["connection_string"]
+                )
+            else:
+                self._client = BlobServiceClient(**kwargs)
         return self._client
 
 
@@ -77,15 +84,16 @@ class AzPath(UriPath):
     @property
     def container(self) -> str:
         segments = self.segments
-        return segments[0] if segments else ""
+        # Skip leading empty string, get the first real segment
+        real_segments = [s for s in segments if s]
+        return real_segments[0] if real_segments else ""
 
     @property
     def key(self) -> str:
         segments = self.segments
-        if not segments:
-            return ""
-        # Skip the first segment (container) and rejoin the rest
-        return "/".join(segments[1:])
+        # Skip leading empty string and first real segment (container)
+        real_segments = [s for s in segments if s]
+        return "/".join(real_segments[1:]) if len(real_segments) > 1 else ""
 
     @property
     def _client(self):
