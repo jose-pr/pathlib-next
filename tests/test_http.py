@@ -68,3 +68,134 @@ def test_recursive_glob(http_server):
     root = UriPath(f"{http_server}/")
     names = {p.name for p in root.glob("**/*.py")}
     assert names == {"b.py", "c.py", "d.py"}
+
+def test_http_exception_translation(http_server):
+    # Test standard exception translation on real HTTP errors.
+    # 404 client error -> FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        UriPath(f"{http_server}/does-not-exist.txt").read_text()
+
+    # 405 Method Not Allowed / 501 Not Implemented -> PermissionError or NotImplementedError.
+    # The stdlib ThreadingHTTPServer returns 501 or 405 for DELETE/PUT.
+    p = UriPath(f"{http_server}/a.txt")
+    with pytest.raises(PermissionError):
+        p.unlink()
+
+
+def test_http_write_put_default(monkeypatch):
+    recorded = []
+
+    class MockResponse:
+        status_code = 200
+        content = b""
+        reason = "OK"
+
+        def raise_for_status(self):
+            pass
+
+    def mock_request(self, method, url, **kwargs):
+        recorded.append((method, url, kwargs.get("data")))
+        return MockResponse()
+
+    import requests
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/file.txt")
+    p.write_text("hello")
+
+    assert len(recorded) == 1
+    assert recorded[0] == ("PUT", "http://example.com/file.txt", b"hello")
+
+
+def test_http_write_post_configured(monkeypatch):
+    recorded = []
+
+    class MockResponse:
+        status_code = 200
+        content = b""
+        reason = "OK"
+
+        def raise_for_status(self):
+            pass
+
+    def mock_request(self, method, url, **kwargs):
+        recorded.append((method, url, kwargs.get("data")))
+        return MockResponse()
+
+    import requests
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    # Configure session with POST as the write method
+    p = UriPath("http://example.com/file.txt")
+    p = p.with_session(requests.Session(), write_method="POST")
+    p.write_text("world")
+
+    assert len(recorded) == 1
+    assert recorded[0] == ("POST", "http://example.com/file.txt", b"world")
+
+
+def test_http_unlink(monkeypatch):
+    recorded = []
+
+    class MockResponse:
+        status_code = 200
+        content = b""
+        reason = "OK"
+
+        def raise_for_status(self):
+            pass
+
+    def mock_request(self, method, url, **kwargs):
+        recorded.append((method, url))
+        return MockResponse()
+
+    import requests
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/file.txt")
+    p.unlink()
+
+    assert len(recorded) == 1
+    assert recorded[0] == ("DELETE", "http://example.com/file.txt")
+
+
+def test_http_rmdir_empty(monkeypatch):
+    recorded = []
+    from pathlib_next.uri.schemes.http import HttpPath
+
+    class MockResponse:
+        status_code = 200
+        content = b""
+        text = ""
+        reason = "OK"
+
+        def raise_for_status(self):
+            pass
+
+    def mock_request(self, method, url, **kwargs):
+        recorded.append((method, url))
+        return MockResponse()
+
+    import requests
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+    monkeypatch.setattr(HttpPath, "_listdir", lambda self: [])
+
+    p = UriPath("http://example.com/dir/")
+    p.rmdir()
+
+    assert len(recorded) == 1
+    assert recorded[0] == ("DELETE", "http://example.com/dir/")
+
+
+def test_http_rmdir_not_empty(monkeypatch):
+    import errno
+    from pathlib_next.uri.schemes.http import HttpPath, _FileEntry
+
+    monkeypatch.setattr(
+        HttpPath, "_listdir", lambda self: [_FileEntry("a.txt", None, None, None)]
+    )
+
+    p = UriPath("http://example.com/dir/")
+    with pytest.raises(OSError) as excinfo:
+        p.rmdir()
+    assert excinfo.value.errno == errno.ENOTEMPTY
