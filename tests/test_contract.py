@@ -152,18 +152,61 @@ class TestS3Contract(PathContract):
         return S3Path(url)
 
 
-# SFTP contract — in-process paramiko server (no extra deps beyond sftp extra)
+# SFTP contract — in-process asyncssh-backed server (see conftest.py's
+# sftp_server), parametrized across both CLIENT backends: paramiko and
+# asyncssh. The test server is the same regardless of which client backend
+# is under test -- a client library choice is independent of which library
+# the server uses.
 class TestSftpContract(PathContract):
-    @pytest.fixture
-    def root(self, sftp_server):
-        pytest.importorskip("paramiko")
-        import paramiko
-        from pathlib_next.uri.schemes.sftp import SftpPath, SftpBackend
-        # Disable agent + key-file lookup so paramiko falls through to 'none'
-        # auth, which is what our in-process test server accepts.
-        backend = SftpBackend(
-            {"allow_agent": False, "look_for_keys": False},
-            paramiko.AutoAddPolicy(),
-        )
-        return SftpPath(sftp_server, backend=backend)
+    @pytest.fixture(params=["paramiko", "asyncssh"])
+    def root(self, request, sftp_server):
+        from pathlib_next.uri.schemes.sftp import SftpPath
+
+        if request.param == "paramiko":
+            pytest.importorskip("paramiko")
+            import paramiko
+
+            from pathlib_next.uri.schemes.sftp import SftpBackend
+
+            # Disable agent + key-file lookup so paramiko falls through to
+            # 'none' auth, which is what our in-process test server accepts.
+            backend = SftpBackend(
+                {"allow_agent": False, "look_for_keys": False},
+                paramiko.AutoAddPolicy(),
+            )
+            path = SftpPath(sftp_server, backend=backend)
+            yield path
+            # paramiko's client cache keeps the connection alive across
+            # the whole test session (production behavior, working as
+            # intended) -- but sftp_server tears down its (per-test,
+            # ephemeral-port) server right after this fixture, and that
+            # teardown now waits for the server to see every connection
+            # actually close. An orphaned-but-still-"open" paramiko
+            # connection would hang that wait indefinitely, so explicitly
+            # close it here (mirrors the asyncssh branch's explicit
+            # _CACHE.invalidate() below).
+            import threading
+
+            from pathlib_next.uri.schemes.sftp._paramiko import _CACHED_CLIENTS
+
+            try:
+                client = backend.client(path.source)
+                client.sock.get_transport().close()
+            except Exception:
+                pass
+            _CACHED_CLIENTS.invalidate(backend, path.source, threading.get_ident())
+        else:
+            pytest.importorskip("asyncssh")
+            from pathlib_next.uri.schemes.sftp import _asyncssh as _backend_mod
+            from pathlib_next.uri.schemes.sftp._asyncssh import AsyncsshSftpBackend
+
+            backend = AsyncsshSftpBackend()
+            path = SftpPath(sftp_server, backend=backend)
+            yield path
+            # The connection cache is a module-level singleton that
+            # outlives this test -- explicitly invalidate (closes on the
+            # bridge loop) rather than leaving a now-orphaned connection
+            # (its server just closed, in sftp_server's own teardown)
+            # sitting in the cache until an unrelated future eviction.
+            _backend_mod._CACHE.invalidate((backend, path.source))
 

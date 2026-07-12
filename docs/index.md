@@ -19,7 +19,8 @@ pip install pathlib_next
 | --- | --- | --- |
 | `uri` | `uritools` | `Uri`/`UriPath` parsing (any URI scheme) |
 | `http` | `requests`, `bs4`, `htmllistparse` | `http(s)://` and `dav(s)://` (WebDAV) paths |
-| `sftp` | `paramiko` | `sftp://` paths |
+| `sftp` | `paramiko` | `sftp://` paths (sync backend) |
+| `sftp-async` | `asyncssh` | `sftp://` paths via the asyncssh backend instead |
 | `s3` | `boto3` | `s3://bucket/key` paths |
 
 `import pathlib_next` and `pathlib_next.LocalPath`/`MemPath` work with **no

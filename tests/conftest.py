@@ -145,160 +145,69 @@ def s3_server(fixture_tree):
 
 @pytest.fixture
 def sftp_server(fixture_tree):
-    """In-process SFTP server backed by fixture_tree, using paramiko's
-    ServerInterface + SFTPServerInterface.  No extra dependencies -- paramiko
-    is already required by the `sftp` extra."""
-    paramiko = pytest.importorskip("paramiko")
-    import errno
-    import os
-    import socket
-    import stat as _stat
-    import threading
+    """In-process SFTP server backed by fixture_tree, using asyncssh's own
+    `SFTPServer` (chrooted) -- a full local-filesystem-backed SFTP server
+    for free, replacing what used to be a ~150-line hand-rolled paramiko
+    `ServerInterface`/`SFTPServerInterface`. A CLIENT backend choice
+    (paramiko or asyncssh, see `TestSftpContract`) is independent of which
+    library the test SERVER uses -- an asyncssh server talks standard SFTP
+    to a paramiko client fine (verified). Runs on its own dedicated event
+    loop/thread, independent of `AsyncsshSftpBackend`'s shared bridge loop
+    (server and client are logically separate machines in reality; keeping
+    them on separate loops here mirrors that instead of coupling test
+    infrastructure to backend-internal state)."""
+    asyncssh = pytest.importorskip("asyncssh")
+    import asyncio
+    import sys
 
     root = str(fixture_tree)
 
-    # -- OS-backed SFTP implementation -----------------------------------------
-    class _SFTPInterface(paramiko.SFTPServerInterface):
-        def _realpath(self, path):
-            # Strip leading '/' and join under root; clamp to root (no escapes)
-            return os.path.join(root, path.lstrip("/"))
+    class _NoAuth(asyncssh.SSHServer):
+        def begin_auth(self, username):
+            return False
 
-        def list_folder(self, path):
-            real = self._realpath(path)
-            try:
-                names = os.listdir(real)
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            out = []
-            for name in names:
-                attr = paramiko.SFTPAttributes.from_stat(
-                    os.stat(os.path.join(real, name))
-                )
-                attr.filename = name
-                out.append(attr)
-            return out
+    def _sftp_factory(chan):
+        return asyncssh.SFTPServer(chan, chroot=root)
 
-        def stat(self, path):
-            real = self._realpath(path)
-            try:
-                return paramiko.SFTPAttributes.from_stat(os.stat(real))
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
+    async def _start():
+        return await asyncssh.listen(
+            "127.0.0.1",
+            0,
+            server_factory=_NoAuth,
+            server_host_keys=[asyncssh.generate_private_key("ssh-rsa")],
+            sftp_factory=_sftp_factory,
+            process_factory=None,
+        )
 
-        def lstat(self, path):
-            real = self._realpath(path)
-            try:
-                return paramiko.SFTPAttributes.from_stat(os.lstat(real))
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-
-        def open(self, path, flags, attr):
-            real = self._realpath(path)
-            try:
-                binary_flag = getattr(os, "O_BINARY", 0)
-                fd = os.open(real, flags | binary_flag, 0o666)
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            fobj = os.fdopen(fd, "r+b" if (flags & os.O_RDWR) else
-                             ("wb" if (flags & os.O_WRONLY) else "rb"))
-            handle = paramiko.SFTPHandle(flags)
-            handle.filename = real
-            handle.readfile = fobj
-            handle.writefile = fobj
-            return handle
-
-        def remove(self, path):
-            try:
-                os.remove(self._realpath(path))
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            return paramiko.SFTP_OK
-
-        def rename(self, oldpath, newpath):
-            try:
-                os.rename(self._realpath(oldpath), self._realpath(newpath))
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            return paramiko.SFTP_OK
-
-        def mkdir(self, path, attr):
-            try:
-                os.mkdir(self._realpath(path), 0o755)
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            return paramiko.SFTP_OK
-
-        def rmdir(self, path):
-            try:
-                os.rmdir(self._realpath(path))
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            return paramiko.SFTP_OK
-
-        def chattr(self, path, attr):
-            real = self._realpath(path)
-            try:
-                if attr.st_mode is not None:
-                    os.chmod(real, _stat.S_IMODE(attr.st_mode))
-            except OSError as e:
-                return paramiko.SFTPServer.convert_errno(e.errno)
-            return paramiko.SFTP_OK
-
-        def canonicalize(self, path):
-            real = self._realpath(path)
-            return "/" + os.path.relpath(real, root).replace("\\", "/")
-
-    # -- Minimal SSH server (no auth) ------------------------------------------
-    class _SSHServer(paramiko.ServerInterface):
-        def check_channel_request(self, kind, chanid):
-            return paramiko.OPEN_SUCCEEDED
-
-        def check_auth_none(self, username):
-            return paramiko.AUTH_SUCCESSFUL
-
-        def check_auth_password(self, username, password):
-            return paramiko.AUTH_SUCCESSFUL
-
-        def get_allowed_auths(self, username):
-            return "none,password"
-
-        # No override of check_channel_subsystem_request(): the base
-        # paramiko.ServerInterface implementation is what actually looks up
-        # the handler registered via set_subsystem_handler() and starts it
-        # (handler.start()) -- an override that just returns `name == "sftp"`
-        # (as this used to) skips that entirely, so the channel is reported
-        # "hooked up" but nothing server-side ever reads/responds, and the
-        # client's SFTPClient.from_transport() hangs forever waiting for the
-        # version-negotiation reply that nothing sends.
-
-    # -- TCP accept loop -------------------------------------------------------
-    host_key = paramiko.RSAKey.generate(2048)
-    listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-    listen_sock.bind(("127.0.0.1", 0))
-    listen_sock.listen(20)
-    listen_sock.settimeout(0.5)
-    port = listen_sock.getsockname()[1]
-    stop_event = threading.Event()
-
-    def _serve():
-        while not stop_event.is_set():
-            try:
-                conn, _ = listen_sock.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            t = paramiko.Transport(conn)
-            t.add_server_key(host_key)
-            t.set_subsystem_handler("sftp", paramiko.SFTPServer, _SFTPInterface)
-            t.start_server(server=_SSHServer())
-
-    thread = threading.Thread(target=_serve, daemon=True)
+    # SelectorEventLoop on Windows, not the WindowsProactorEventLoopPolicy
+    # default -- avoids a benign-but-noisy Proactor pipe-transport __del__
+    # warning (see _asyncssh.py's _new_loop() for the same fix applied to
+    # the real backend's bridge loop); we don't need subprocess pipes here.
+    loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
+    server = asyncio.run_coroutine_threadsafe(_start(), loop).result()
+    port = server.sockets[0].getsockname()[1]
     try:
-        yield f"sftp://user:test@127.0.0.1:{port}/"
+        # A password is included even though the server's begin_auth()
+        # accepts everything unconditionally: paramiko's SSHClient.connect()
+        # only sends an auth attempt at all if at least one of
+        # key/keyfiles/password is available -- with allow_agent=False,
+        # look_for_keys=False and no password, it raises "No authentication
+        # methods available" client-side before ever reaching the server.
+        yield f"sftp://x:x@127.0.0.1:{port}/"
     finally:
-        stop_event.set()
-        listen_sock.close()
+        # server.close() must run ON THE LOOP'S OWN THREAD -- asyncio/
+        # asyncssh objects aren't thread-safe, and calling close() directly
+        # from this (test) thread races the loop thread still processing
+        # I/O, corrupting internal state (observed: TypeError from
+        # asyncio.Server._wakeup() on `self._waiters` -- not a double
+        # -close, a torn read of state being mutated concurrently).
+        # Not blocking on wait_closed(): it waits for every accepted
+        # connection to close too, and a long-lived cached client
+        # (paramiko's connection cache, or an asyncssh backend instance a
+        # test didn't explicitly tear down) can leave one open, hanging
+        # this indefinitely.
+        loop.call_soon_threadsafe(server.close)
+        loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=5)

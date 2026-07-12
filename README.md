@@ -56,7 +56,8 @@ Optional features/extras:
 | --- | --- | --- |
 | `uri` | `uritools` | URI parsing (any `UriPath` scheme) |
 | `http` | `requests`, `bs4`, `htmllistparse` | `http(s):` and `dav(s):` (WebDAV) paths |
-| `sftp` | `paramiko` | `sftp:` path operations and transfers |
+| `sftp` | `paramiko` | `sftp:` path operations and transfers (sync backend) |
+| `sftp-async` | `asyncssh` | `sftp:` path operations via the asyncssh backend instead (see `guides/schemes.md`'s `sftp:` row for selection precedence) |
 | `s3` | `boto3` | `s3://bucket/key` paths |
 
 `import pathlib_next` and `LocalPath`/`MemPath` work with no extras
@@ -161,7 +162,7 @@ Python >= 3.9, tested on 3.9 and 3.13 in CI (see
 ## Development
 
 ```bash
-pip install -e ".[dev,uri,http,sftp]"
+pip install -e ".[dev,uri,http,sftp,sftp-async]"
 pytest -q
 ```
 

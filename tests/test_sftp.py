@@ -101,35 +101,53 @@ def test_opts_merges_connect_opts():
 
 
 # --- client cache keying/invalidation ---
+# SftpPath._sftpclient is a trivial `self.backend.client(self.source)`
+# delegation (post-schemes_layout/asyncssh_sftp split) -- caching is each
+# backend's own responsibility, not SftpPath's. _FakeBackend deliberately
+# does no caching of its own (see its `client()` above), so these test
+# SftpBackend's (paramiko) real cache/invalidation logic directly instead.
 
 
-def test_sftpclient_cached_across_accesses():
-    backend = _FakeBackend()
-    p = _sftp("sftp://host/a", backend=backend)
-    client1 = p._sftpclient
-    client2 = p._sftpclient
+class _FakeTransport:
+    def __init__(self):
+        self.clients = []
+
+    def open_sftp_client(self):
+        client = _FakeSftpClient()
+        self.clients.append(client)
+        return client
+
+
+def test_sftp_backend_client_cached_across_calls(monkeypatch):
+    backend = SftpBackend({}, None)
+    transport = _FakeTransport()
+    monkeypatch.setattr(SftpBackend, "transport", lambda self, source: transport)
+    source = Source("sftp", None, "host", None)
+    client1 = backend.client(source)
+    client2 = backend.client(source)
     assert client1 is client2
-    assert backend.client_calls == 1
+    assert len(transport.clients) == 1
 
 
-def test_sftpclient_recreated_when_socket_inactive():
-    backend = _FakeBackend()
-    p = _sftp("sftp://host/a", backend=backend)
-    client1 = p._sftpclient
+def test_sftp_backend_client_recreated_when_socket_inactive(monkeypatch):
+    backend = SftpBackend({}, None)
+    transport = _FakeTransport()
+    monkeypatch.setattr(SftpBackend, "transport", lambda self, source: transport)
+    source = Source("sftp", None, "host", None)
+    client1 = backend.client(source)
     client1.sock.active = False
-    backend._client = _FakeSftpClient()  # what a fresh connect would return
-    client2 = p._sftpclient
+    client2 = backend.client(source)
     assert client2 is not client1
-    assert backend.client_calls == 2
+    assert len(transport.clients) == 2
 
 
-def test_sftpclient_different_sources_not_shared():
-    backend = _FakeBackend()
-    p1 = _sftp("sftp://host1/a", backend=backend)
-    p2 = _sftp("sftp://host2/a", backend=backend)
-    p1._sftpclient
-    p2._sftpclient
-    assert backend.client_calls == 2
+def test_sftp_backend_client_different_sources_not_shared(monkeypatch):
+    backend = SftpBackend({}, None)
+    transport = _FakeTransport()
+    monkeypatch.setattr(SftpBackend, "transport", lambda self, source: transport)
+    backend.client(Source("sftp", None, "host1", None))
+    backend.client(Source("sftp", None, "host2", None))
+    assert len(transport.clients) == 2
 
 
 # --- B12: chmod follow_symlinks ---

@@ -34,7 +34,12 @@ these for free from `pathlib.Path` via MRO -- this list only describes what
 - `resolve()`, `absolute()` -- no portable notion of "the current working
   directory" or canonicalizing `..`/symlinks for an arbitrary backend.
 - `readlink()`, `symlink_to()`, `hardlink_to()` -- no portable symlink/hardlink
-  concept (sftp *could* support these via paramiko, but it's not implemented).
+  concept for most backends. **`sftp:` is the exception**: `SftpPath`
+  implements `readlink()`/`symlink_to()` on both backends (core SFTPv3
+  operations) and `hardlink_to()` on the asyncssh backend only (paramiko's
+  `SFTPClient` has no hard-link operation at all -- `NotImplementedError`
+  immediately, no server round trip). See the `sftp:` row's footnote in
+  `guides/schemes.md`.
 - `owner()`, `group()` -- no portable uid/gid-to-name mapping.
 - `expanduser()`, `Path.cwd()`, `Path.home()` -- inherently tied to the local
   OS/filesystem, meaningless for a URI or in-memory path.
