@@ -138,7 +138,7 @@ class TestDavContract(PathContract):
     @pytest.fixture
     def root(self, dav_server):
         pytest.importorskip("requests")
-        from pathlib_next.uri.schemes.webdav import DavPath
+        from pathlib_next.uri.schemes.dav import DavPath
         return DavPath(dav_server)
 
 

@@ -9,6 +9,22 @@ if _ty.TYPE_CHECKING:
     from ..path import Path
 
 
+def _detect_format(name: str, peek: "_ty.Callable[[], bytes] | None" = None) -> str:
+    """Detect "zip" vs "tar" from `name`'s extension, falling back to
+    magic-byte sniffing (`PK` header -> zip) via `peek()` -- called lazily,
+    only when the extension is inconclusive, so callers backed by a remote
+    Path don't pay for a round trip in the common case. Shared by
+    `unpack_archive` and the `archive:` catch-all URI scheme so both use one
+    detection policy."""
+    name_lower = name.lower()
+    if name_lower.endswith((".zip", ".jar")):
+        return "zip"
+    if name_lower.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")):
+        return "tar"
+    magic = peek() if peek is not None else b""
+    return "zip" if magic.startswith(b"PK") else "tar"
+
+
 def make_archive(src: Path, format: str, target: Path) -> None:
     """Create an archive file from `src` at `target`.
 
@@ -74,22 +90,14 @@ def unpack_archive(archive: Path, dest: Path) -> None:
     if not dest.exists():
         dest.mkdir(parents=True, exist_ok=True)
 
-    name_lower = archive.name.lower()
-    is_zip = True
-    if name_lower.endswith(".zip"):
-        is_zip = True
-    elif name_lower.endswith(".tar") or name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
-        is_zip = False
-    else:
+    def _peek() -> bytes:
         try:
             with archive.open("rb") as f:
-                magic = f.read(4)
-                if magic.startswith(b"PK"):
-                    is_zip = True
-                else:
-                    is_zip = False
+                return f.read(4)
         except Exception:
-            is_zip = True
+            return b"PK"  # can't sniff -- preserve the historical "assume zip" default
+
+    is_zip = _detect_format(archive.name, _peek) == "zip"
 
     with archive.open("rb") as in_f:
         if is_zip:

@@ -9,7 +9,7 @@ try:
 except ImportError:
     pass
 try:
-    from .webdav import DavPath as DavPath
+    from .dav import DavPath as DavPath
 except ImportError:
     pass
 try:

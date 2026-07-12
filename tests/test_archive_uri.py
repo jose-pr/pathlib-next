@@ -10,7 +10,7 @@ import zipfile
 import pytest
 
 from pathlib_next.uri import UriPath
-from pathlib_next.uri.schemes.archive import TarUri, ZipUri, _split_archive_path
+from pathlib_next.uri.schemes.archive import ArchiveUri, TarUri, ZipUri, _split_archive_path
 
 
 # --- URI splitting ---
@@ -310,3 +310,85 @@ def test_tar_has_no_mutation_support(tar_archive):
         p.rmdir()
     with pytest.raises(NotImplementedError):
         p.rename("x.txt")
+
+
+# --- archive: catch-all scheme: detection + explicit archive+<fmt>: forms ---
+
+
+def _archive_uri(path, inner=""):
+    return f"archive:{path.as_uri()}!/{inner}"
+
+
+def _archive_zip_uri(path, inner=""):
+    return f"archive+zip:{path.as_uri()}!/{inner}"
+
+
+def _archive_tar_uri(path, inner=""):
+    return f"archive+tar:{path.as_uri()}!/{inner}"
+
+
+@pytest.fixture
+def noext_zip_archive(tmp_path):
+    """A zip archive with no recognizable extension -- forces the
+    magic-byte sniff path of `archive:` detection."""
+    path = tmp_path / "noext"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("m.txt", "magic sniffed")
+    return path
+
+
+def test_archive_scheme_dispatches_to_archive_uri(zip_archive, tar_archive):
+    assert type(UriPath(_archive_uri(zip_archive))) is ArchiveUri
+    assert type(UriPath(_archive_uri(tar_archive))) is ArchiveUri
+
+
+def test_archive_detects_zip_by_extension(zip_archive):
+    p = UriPath(_archive_uri(zip_archive)) / "top.txt"
+    assert p.read_text() == "top level"
+
+
+def test_archive_detects_tar_by_extension(tar_archive):
+    p = UriPath(_archive_uri(tar_archive)) / "top.txt"
+    assert p.read_bytes() == b"top level"
+
+
+def test_archive_detects_zip_by_magic_bytes_when_extension_is_inconclusive(noext_zip_archive):
+    p = UriPath(_archive_uri(noext_zip_archive)) / "m.txt"
+    assert p.read_text() == "magic sniffed"
+
+
+def test_archive_plus_zip_wins_over_detection(zip_archive):
+    p = UriPath(_archive_zip_uri(zip_archive)) / "top.txt"
+    assert isinstance(p, ZipUri)
+    assert p.read_text() == "top level"
+
+
+def test_archive_plus_tar_wins_over_detection(tar_archive):
+    p = UriPath(_archive_tar_uri(tar_archive)) / "top.txt"
+    assert isinstance(p, TarUri)
+    assert p.read_bytes() == b"top level"
+
+
+def test_archive_and_zip_scheme_share_one_backend_for_same_outer(zip_archive):
+    a = UriPath(_archive_uri(zip_archive))
+    b = UriPath(_zip_uri(zip_archive))
+    assert a.backend is b.backend
+
+
+def test_archive_and_tar_scheme_share_one_backend_for_same_outer(tar_archive):
+    a = UriPath(_archive_uri(tar_archive))
+    b = UriPath(_tar_uri(tar_archive))
+    assert a.backend is b.backend
+
+
+def test_archive_scheme_zip_detected_supports_write_to_local_outer(zip_archive):
+    root = UriPath(_archive_uri(zip_archive))
+    (root / "via_archive.txt").write_text("written through archive:")
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert zf.read("via_archive.txt") == b"written through archive:"
+
+
+def test_archive_scheme_tar_detected_write_raises_not_implemented(tar_archive):
+    p = UriPath(_archive_uri(tar_archive)) / "new.txt"
+    with pytest.raises(NotImplementedError):
+        p.write_text("nope")

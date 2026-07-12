@@ -9,7 +9,7 @@ import pytest
 requests = pytest.importorskip("requests")
 
 from pathlib_next.uri.schemes.http import HttpBackend
-from pathlib_next.uri.schemes.webdav import DavPath
+from pathlib_next.uri.schemes.dav import DavPath
 
 
 class _FakeResponse:

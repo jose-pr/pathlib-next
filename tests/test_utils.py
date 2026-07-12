@@ -1,3 +1,5 @@
+import pytest
+
 from pathlib_next import utils
 
 
@@ -271,5 +273,36 @@ def test_archive_helpers(tmp_path):
     unpack_archive(zip_archive, mem_dest)
     assert (mem_dest / "file1.txt").read_text() == "hello"
     assert (mem_dest / "sub" / "file2.txt").read_text() == "world"
+
+
+@pytest.mark.parametrize(
+    "name, peek, expected",
+    [
+        ("a.zip", b"", "zip"),
+        ("a.jar", b"", "zip"),
+        ("A.ZIP", b"", "zip"),
+        ("a.tar", b"", "tar"),
+        ("a.tar.gz", b"", "tar"),
+        ("a.tgz", b"", "tar"),
+        ("a.tar.bz2", b"", "tar"),
+        ("a.tar.xz", b"", "tar"),
+        ("noext", b"PK\x03\x04", "zip"),
+        ("noext", b"\x1f\x8b", "tar"),
+    ],
+)
+def test_detect_format(name, peek, expected):
+    from pathlib_next.utils.archive import _detect_format
+
+    assert _detect_format(name, lambda: peek) == expected
+
+
+def test_detect_format_does_not_peek_when_extension_is_conclusive():
+    from pathlib_next.utils.archive import _detect_format
+
+    def _boom():
+        raise AssertionError("peek() should not be called for a conclusive extension")
+
+    assert _detect_format("a.zip", _boom) == "zip"
+    assert _detect_format("a.tar", _boom) == "tar"
 
 
