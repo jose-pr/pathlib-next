@@ -21,6 +21,59 @@ def benchmark_uri_parse():
     code = "Uri('http://user:pass@host:80/path/to/resource?query=1#fragment')"
     return timeit.timeit(code, setup=setup, number=10000)
 
+def benchmark_uri_parse_unique():
+    # Uri() construction is lazy (no parsing until .source/.path/... is
+    # first accessed) and benchmark_uri_parse() above reuses the SAME
+    # literal string every call, so it measures neither real parse cost.
+    # This one forces the actual parse (uri_parse_perf.md's one-pass
+    # _parse_uri) with a UNIQUE URI per iteration -- repeated-URI
+    # microbenchmarks are not representative of real workloads and can
+    # flatter/mislead by an order of magnitude if the underlying string
+    # library caches by input (verified true of urllib.urlsplit, ~28x;
+    # not true of uritools/our own parser, but always bench unique inputs
+    # regardless so this stays an apples-to-apples comparison).
+    from pathlib_next import Uri
+    n = 5000
+    urls = [
+        f"http://user:pass@host{i}.example.com:8080"
+        f"/path/to/resource{i}?query={i}#fragment{i}"
+        for i in range(n)
+    ]
+
+    def _run():
+        for url in urls:
+            u = Uri(url)
+            _ = u.source
+            _ = u.path
+            _ = u.query
+            _ = u.fragment
+
+    total = timeit.timeit(_run, number=1)
+    return total / n * 1e6  # microseconds per unique Uri() parse
+
+def benchmark_uri_parse_and_compose_unique():
+    # Full round trip: parse (forced, unique URIs) + compose (as_uri(),
+    # uncached -- sanitize=True forces a fresh compose every call instead
+    # of hitting the cached-after-first-call fast path) -- exercises both
+    # uri_parse_perf.md Phase 1 (_parse_uri) and Phase 2
+    # (_format_parsed_parts) together, which is what "Uri() construction"
+    # means for that plan's own done-when bar.
+    from pathlib_next import Uri
+    n = 5000
+    urls = [
+        f"http://user:pass@host{i}.example.com:8080"
+        f"/path/to/resource{i}?query={i}#fragment{i}"
+        for i in range(n)
+    ]
+
+    def _run():
+        for url in urls:
+            u = Uri(url)
+            _ = u.as_uri(sanitize=True)
+
+    total = timeit.timeit(_run, number=1)
+    return total / n * 1e6  # microseconds per unique Uri() parse+compose
+
 def benchmark_path_join():
     # Join paths using / operator 10,000 times
     setup = "from pathlib_next import Uri; p = Uri('http://host/path')"
@@ -117,7 +170,13 @@ def main():
     
     t_uri_parse = benchmark_uri_parse()
     print(f"1. URI Parse (10k runs): {t_uri_parse:.4f}s")
-    
+
+    t_uri_parse_unique = benchmark_uri_parse_unique()
+    print(f"1b. URI Parse, unique URIs, forced (us/parse): {t_uri_parse_unique:.2f}us")
+
+    t_uri_parse_compose_unique = benchmark_uri_parse_and_compose_unique()
+    print(f"1c. URI Parse+Compose, unique URIs (us/round-trip): {t_uri_parse_compose_unique:.2f}us")
+
     t_join = benchmark_path_join()
     print(f"2. Path Join (10k runs): {t_join:.4f}s")
     
@@ -141,6 +200,8 @@ def main():
     print("\n| Benchmark Case | Time / Metric |")
     print("|---|---|")
     print(f"| URI Parse (10k) | {t_uri_parse:.4f}s |")
+    print(f"| URI Parse, unique URIs, forced (us/parse) | {t_uri_parse_unique:.2f}us |")
+    print(f"| URI Parse+Compose, unique URIs (us/round-trip) | {t_uri_parse_compose_unique:.2f}us |")
     print(f"| Path Join (10k) | {t_join:.4f}s |")
     print(f"| Segments/Name Access (10k) | {t_seg_name:.4f}s |")
     print(f"| Suffix/Stem Access (10k) | {t_suffix_stem:.4f}s |")

@@ -6,11 +6,10 @@ import typing as _ty
 import urllib.parse as _urlparse
 import xml.etree.ElementTree as _ET
 
-import uritools as _uritools
-
 from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import Uri
+from ..source import _compose_uri
 from .http import HttpPath
 
 _NS = {"D": "DAV:"}
@@ -73,15 +72,19 @@ class DavPath(HttpPath):
     __slots__ = ()
 
     def _wire_uri(self) -> str:
+        # Direct string assembly (uri_parse_perf.md Phase 2) instead of
+        # uricompose() -- called on every DAV HTTP request, and every
+        # component here already came from this instance's own parsed
+        # source/path/query/fragment state. See source.py's _compose_uri.
         scheme = "https" if self.source.scheme == "davs" else "http"
-        return _uritools.uricompose(
-            scheme=scheme,
-            userinfo=self.source.userinfo,
-            host=self.source.host,
-            port=self.source.port,
-            path=self.path,
-            query=self.query or None,
-            fragment=self.fragment or None,
+        return _compose_uri(
+            scheme,
+            self.source.userinfo,
+            self.source.host,
+            self.source.port,
+            self.path,
+            self.query or None,
+            self.fragment or None,
         )
 
     def _propfind(self, depth="0"):

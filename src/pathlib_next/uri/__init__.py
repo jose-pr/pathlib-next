@@ -16,7 +16,13 @@ from .. import utils as _utils
 from ..path import Path, Pathname
 from ..utils.stat import FileStat
 from .query import Query
-from .source import Source
+from .source import (
+    Source,
+    _compose_uri,
+    _decode_host,
+    _remove_dot_segments,
+    _split_authority,
+)
 
 UriLike: TypeAlias = "str | Uri | os.PathLike"
 
@@ -114,17 +120,28 @@ class Uri(Pathname):
 
     @classmethod
     def _parse_uri(cls, uri: str) -> tuple[Source, str, Query, str]:
-        parsed = uritools.urisplit(uri)
+        # One-pass component extraction (uri_parse_perf.md): urisplit()'s
+        # raw SplitResult fields used directly, authority split once via
+        # _split_authority() instead of three independent get*() calls
+        # each re-parsing it from scratch. Semantics are provably
+        # identical to the getters this replaces (ported logic, fuzzed
+        # against uritools as oracle) -- see source.py's helpers for the
+        # equivalence notes, including one uritools quirk reproduced
+        # on purpose.
+        scheme, authority, path, query, fragment = uritools.urisplit(uri)
+        scheme = scheme.lower() if scheme is not None else None
+        userinfo, host, port = _split_authority(authority)
+        if userinfo is not None:
+            userinfo = uritools.uridecode(userinfo)
+        host = _decode_host(host) if host is not None else ""
+        path = uritools.uridecode(_remove_dot_segments(path))
+        query = uritools.uridecode(query) if query is not None else None
+        fragment = uritools.uridecode(fragment) if fragment is not None else None
         return (
-            Source(
-                parsed.getscheme(),
-                parsed.getuserinfo(),
-                parsed.gethost() or "",
-                parsed.getport(),
-            ),
-            parsed.getpath(),
-            Query(parsed.getquery() or ""),
-            parsed.getfragment() or "",
+            Source(scheme, userinfo, host, port),
+            path,
+            Query(query or ""),
+            fragment or "",
         )
 
     @property
@@ -219,22 +236,20 @@ class Uri(Pathname):
         /,
         sanitize=True,
     ) -> str:
-        parts = {
-            "path": path,
-        }
-        if query:
-            parts["query"] = query
-        if fragment:
-            parts["fragment"] = fragment
-        if source:
-            source_ = source._asdict()
-            if sanitize:
-                source_["userinfo"] = (source_["userinfo"] or "").split(
-                    ":", maxsplit=1
-                )[0]
-            parts.update(source_)
-
-        return uritools.uricompose(**{k: v for k, v in parts.items() if v})
+        # Direct string assembly (uri_parse_perf.md Phase 2) instead of
+        # uricompose()'s full re-validation -- source/path/query/fragment
+        # here always came from a parse or our own normalized join state,
+        # never arbitrary untrusted input. See source.py's _compose_uri
+        # for the equivalence notes (fuzzed against uricompose as oracle).
+        scheme = source.scheme.lower() if source.scheme else None
+        userinfo = source.userinfo or None
+        if sanitize and userinfo:
+            userinfo = userinfo.split(":", maxsplit=1)[0] or None
+        host = source.host if source.host else None
+        port = source.port or None
+        return _compose_uri(
+            scheme, userinfo, host, port, path, query or None, fragment or None
+        )
 
     def __str__(self):
         """Return the string representation of the path, suitable for
