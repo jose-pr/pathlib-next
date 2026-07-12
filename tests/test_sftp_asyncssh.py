@@ -250,89 +250,152 @@ def test_asyncssh_backend_max_concurrency_defaults_to_8():
     assert backend.max_concurrency == 8
 
 
-def test_concurrent_copy_respects_max_concurrency(fixture_tree):
-    """Verify that concurrent copy actually limits concurrency."""
+def test_concurrent_copy_respects_max_concurrency():
+    """The real helper should use bounded worker-thread fan-out."""
     import asyncio
+    import threading
+    import time
 
     in_flight = 0
     max_in_flight = 0
-    lock = asyncio.Lock()
+    lock = threading.Lock()
 
-    async def instrumented_concurrent_copy(
-        path,
-        target,
-        overwrite,
-        follow_symlinks,
-        preserve_metadata,
-        max_concurrency,
-        ignore_error,
-    ):
-        """Instrumented version to track peak in-flight operations."""
-        nonlocal in_flight, max_in_flight
+    class _FakeTarget:
+        def __truediv__(self, name):
+            return self
 
-        semaphore = asyncio.Semaphore(max_concurrency)
+    class _FakeChild:
+        def __init__(self, name):
+            self.name = name
 
-        async def copy_child(child):
+        def copy(self, target, **kwargs):
             nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.02)
+            with lock:
+                in_flight -= 1
 
-            async with semaphore:
-                async with lock:
-                    in_flight += 1
-                    max_in_flight = max(max_in_flight, in_flight)
-                await asyncio.sleep(0.01)  # Simulate work
-                async with lock:
-                    in_flight -= 1
+    class _FakePath:
+        def iterdir(self):
+            return [_FakeChild(str(i)) for i in range(10)]
 
-        tasks = [copy_child(None) for _ in range(10)]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=False)
-
-    # Verify max_concurrency is enforced: with 10 children and max_concurrency=3,
-    # peak in-flight should never exceed 3.
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(
-            instrumented_concurrent_copy(
-                None, None, False, True, True, max_concurrency=3, ignore_error=None
-            )
+    asyncio.run(
+        backend_mod._concurrent_copy(
+            _FakePath(),
+            _FakeTarget(),
+            overwrite=False,
+            follow_symlinks=True,
+            preserve_metadata=True,
+            max_concurrency=3,
+            ignore_error=None,
         )
-        assert max_in_flight <= 3, f"Peak in-flight {max_in_flight} exceeded max_concurrency=3"
-    finally:
-        loop.close()
+    )
+    assert 1 < max_in_flight <= 3
 
 
 def test_concurrent_copy_ignore_error_allows_partial_failure():
-    """When ignore_error is set, concurrent copy continues on failure."""
+    """The real helper should continue and route errors to ignore_error."""
     import asyncio
 
     completed = []
+    errors = []
 
-    async def instrumented_concurrent_copy_with_failures(max_concurrency, ignore_error):
-        """Concurrent copy that deliberately fails on some tasks."""
-        semaphore = asyncio.Semaphore(max_concurrency)
+    class _FakeTarget:
+        def __truediv__(self, name):
+            return self
 
-        async def copy_child(n):
-            async with semaphore:
-                if n % 2 == 0:
-                    raise ValueError(f"Child {n} failed")
-                completed.append(n)
+    class _FakeChild:
+        def __init__(self, name):
+            self.name = name
 
-        tasks = [copy_child(i) for i in range(5)]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=(ignore_error is not None))
+        def copy(self, target, **kwargs):
+            if int(self.name) % 2 == 0:
+                raise ValueError(f"child {self.name} failed")
+            completed.append(self.name)
 
-    # With ignore_error, odd-numbered tasks should complete despite even ones failing
-    completed.clear()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(
-            instrumented_concurrent_copy_with_failures(
-                max_concurrency=4, ignore_error=lambda e: None
+    class _FakePath:
+        def iterdir(self):
+            return [_FakeChild(str(i)) for i in range(5)]
+
+    asyncio.run(
+        backend_mod._concurrent_copy(
+            _FakePath(),
+            _FakeTarget(),
+            overwrite=False,
+            follow_symlinks=True,
+            preserve_metadata=True,
+            max_concurrency=4,
+            ignore_error=errors.append,
+        )
+    )
+    assert completed == ["1", "3"]
+    assert len(errors) == 3
+    assert all(isinstance(error, ValueError) for error in errors)
+
+
+def test_concurrent_copy_fail_fast_cancels_queued_children():
+    """Fail-fast should stop queued work before later children start."""
+    import asyncio
+
+    started = []
+
+    class _FakeTarget:
+        def __truediv__(self, name):
+            return self
+
+    class _FakeChild:
+        def __init__(self, name):
+            self.name = name
+
+        def copy(self, target, **kwargs):
+            started.append(self.name)
+            if self.name == "0":
+                raise ValueError("boom")
+
+    class _FakePath:
+        def iterdir(self):
+            return [_FakeChild(str(i)) for i in range(4)]
+
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(
+            backend_mod._concurrent_copy(
+                _FakePath(),
+                _FakeTarget(),
+                overwrite=False,
+                follow_symlinks=True,
+                preserve_metadata=True,
+                max_concurrency=1,
+                ignore_error=None,
             )
         )
-        # Odd-numbered tasks (1, 3) should have completed
-        assert 1 in completed and 3 in completed, f"Expected partial completion, got {completed}"
-    finally:
-        loop.close()
+    assert started == ["0"]
+
+
+def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
+    import asyncio
+
+    recorded = {}
+
+    async def _fake_concurrent_copy(path, target, **kwargs):
+        recorded["path"] = path
+        recorded["target"] = target
+        recorded["kwargs"] = kwargs
+
+    monkeypatch.setattr(backend_mod, "_concurrent_copy", _fake_concurrent_copy)
+    monkeypatch.setattr(backend_mod, "_run", lambda coro: asyncio.run(coro))
+    monkeypatch.setattr(sftp_pkg.SftpPath, "is_dir", lambda self: True)
+
+    src = sftp_pkg.SftpPath(
+        "sftp://host/src", backend=backend_mod.AsyncsshSftpBackend(max_concurrency=5)
+    )
+    target = sftp_pkg.SftpPath("sftp://host/dst", backend=src.backend)
+    monkeypatch.setattr(type(target), "exists", lambda self: False)
+    monkeypatch.setattr(type(target), "mkdir", lambda self, mode=0o777, parents=False, exist_ok=False: None)
+
+    src.copy(target, recursive=True, overwrite=True)
+
+    assert recorded["path"] is src
+    assert recorded["target"] is target
+    assert recorded["kwargs"]["max_concurrency"] == 5

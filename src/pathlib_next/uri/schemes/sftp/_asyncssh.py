@@ -498,25 +498,42 @@ async def _concurrent_copy(
     max_concurrency: int,
     ignore_error,
 ):
-    """Concurrent copy for many small files, bounded by max_concurrency semaphore."""
+    """Concurrent recursive child copies, bounded by max_concurrency."""
     semaphore = _asyncio.Semaphore(max_concurrency)
 
     async def copy_child(child):
         async with semaphore:
-            try:
-                child_target = target / child.name
-                child.copy(
-                    child_target,
-                    overwrite=overwrite,
-                    follow_symlinks=follow_symlinks,
-                    preserve_metadata=preserve_metadata,
-                )
-            except Exception as e:
-                if ignore_error is None:
-                    raise
-                ignore_error(e)
+            child_target = target / child.name
+            await _asyncio.to_thread(
+                child.copy,
+                child_target,
+                overwrite=overwrite,
+                follow_symlinks=follow_symlinks,
+                preserve_metadata=preserve_metadata,
+                recursive=True,
+                ignore_error=ignore_error,
+            )
 
-    # Gather all child copy tasks
-    tasks = [copy_child(child) for child in path.iterdir()]
-    if tasks:
-        await _asyncio.gather(*tasks, return_exceptions=(ignore_error is not None))
+    tasks = [_asyncio.create_task(copy_child(child)) for child in path.iterdir()]
+    if not tasks:
+        return
+
+    if ignore_error is not None:
+        results = await _asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                ignore_error(result)
+        return
+
+    pending = set(tasks)
+    while pending:
+        done, pending = await _asyncio.wait(
+            pending, return_when=_asyncio.FIRST_EXCEPTION
+        )
+        for task in done:
+            error = task.exception()
+            if error is not None:
+                for sibling in pending:
+                    sibling.cancel()
+                await _asyncio.gather(*pending, return_exceptions=True)
+                raise error

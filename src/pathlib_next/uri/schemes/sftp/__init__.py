@@ -242,31 +242,42 @@ class SftpPath(UriPath):
         overwrite=False,
         follow_symlinks=True,
         preserve_metadata=True,
+        recursive=False,
         ignore_error=None,
     ):
         """Copy with concurrent fan-out on the asyncssh backend.
 
-        When using the asyncssh backend with recursive=True (implicit when
-        target is a directory), child copies are fanned out over a bounded
-        asyncio.Semaphore, limited by backend.max_concurrency.
+        When using the asyncssh backend with `recursive=True` on a
+        directory, child copies are fanned out over worker threads,
+        bounded by `backend.max_concurrency`.
         """
         from ._asyncssh import AsyncsshSftpBackend, _concurrent_copy, _run
 
-        # Non-asyncssh backends or non-directory targets: use sequential base implementation
-        if not isinstance(self.backend, AsyncsshSftpBackend) or not self.is_dir():
+        if (
+            not isinstance(self.backend, AsyncsshSftpBackend)
+            or not recursive
+            or not self.is_dir()
+        ):
             return super().copy(
                 target,
                 overwrite=overwrite,
                 follow_symlinks=follow_symlinks,
                 preserve_metadata=preserve_metadata,
+                recursive=recursive,
                 ignore_error=ignore_error,
             )
 
-        # Asyncssh backend + directory: concurrent fan-out
-        target = self._resolve_copy_target(target, overwrite)
-        target.mkdir(parents=True, exist_ok=True)
+        if isinstance(target, str):
+            target = type(self)(target)
 
-        # Run concurrent copy through the event loop
+        if target.exists():
+            if not target.is_dir():
+                raise FileExistsError(target)
+            if not overwrite:
+                raise FileExistsError(target)
+        else:
+            target.mkdir()
+
         coro = _concurrent_copy(
             self,
             target,
@@ -276,4 +287,4 @@ class SftpPath(UriPath):
             max_concurrency=self.backend.max_concurrency,
             ignore_error=ignore_error,
         )
-        _run(coro)
+        return _run(coro)
