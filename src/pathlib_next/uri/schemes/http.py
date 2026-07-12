@@ -387,6 +387,57 @@ class HttpWriteStream(_io.BytesIO):
             super().close()
 
 
+class HttpAppendStream(_io.BytesIO):
+    def __init__(self, path: "HttpPath"):
+        super().__init__()
+        self._path = path
+        if path.backend.append_mode == "rewrite":
+            try:
+                existing = path.read_bytes()
+            except FileNotFoundError:
+                existing = b""
+            self.write(existing)
+        else:
+            # "patch" mode: stat the resource to get its size as start offset
+            try:
+                stat = path.stat()
+                self._start_offset = stat.st_size
+            except FileNotFoundError:
+                self._start_offset = 0
+
+    def close(self):
+        if self.closed:
+            return
+        try:
+            if self._path.backend.append_mode == "rewrite":
+                with _translate_http_errors(self._path):
+                    data = self.getvalue()
+                    resp = self._path.backend.request(
+                        self._path.backend.write_method,
+                        self._path.as_uri(),
+                        data=data,
+                    )
+                    resp.raise_for_status()
+            else:
+                # "patch" mode: send only new content via Content-Range
+                with _translate_http_errors(self._path):
+                    new_data = self.getvalue()
+                    start = self._start_offset
+                    end = start + len(new_data) - 1
+                    headers = {
+                        "Content-Range": f"bytes {start}-{end}/*"
+                    }
+                    resp = self._path.backend.request(
+                        "PATCH",
+                        self._path.as_uri(),
+                        data=new_data,
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+        finally:
+            super().close()
+
+
 class HttpBackend(_ty.NamedTuple):
     """Per-instance `requests.Session` + extra request kwargs shared by an
     `HttpPath` tree (see `with_session()`)."""
@@ -394,6 +445,7 @@ class HttpBackend(_ty.NamedTuple):
     session: _req.Session
     requests_args: dict
     write_method: str = "PUT"
+    append_mode: str = "rewrite"
 
     def request(self, method, uri: "HttpPath|str", **kwargs):
         return self.session.request(
@@ -547,6 +599,8 @@ class HttpPath(UriPath):
                 if buffer_size == 0
                 else _io.BufferedReader(resp, buffer_size=buffer_size)
             )
+        if mode == "a":
+            return HttpAppendStream(self)
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
@@ -574,5 +628,5 @@ class HttpPath(UriPath):
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         self.unlink()
 
-    def with_session(self, session: _req.Session, write_method: str = "PUT", **requests_args):
-        return type(self)(self, backend=HttpBackend(session, requests_args, write_method))
+    def with_session(self, session: _req.Session, write_method: str = "PUT", append_mode: str = "rewrite", **requests_args):
+        return type(self)(self, backend=HttpBackend(session, requests_args, write_method, append_mode))
