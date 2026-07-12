@@ -856,8 +856,11 @@ def main():
     t_glob_mem = benchmark_glob_mempath()
     print(f"4. Glob over 1k MemPath (20 runs): {t_glob_mem:.4f}s")
     
-    t_local, t_std, ratio = benchmark_localpath_vs_stdlib()
-    print(f"5. LocalPath stat (2k runs): {t_local:.4f}s vs pathlib.Path: {t_std:.4f}s (Ratio: {ratio:.2f}x)")
+    t_local, t_std, local_ratio = benchmark_localpath_vs_stdlib()
+    print(
+        f"5. LocalPath stat (2k runs): {t_local:.4f}s vs pathlib.Path: "
+        f"{t_std:.4f}s (Ratio: {local_ratio:.2f}x)"
+    )
     local_matrix = benchmark_localpath_matrix()
     print("5b. LocalPath vs pathlib.Path matrix:")
     for name, t_local_case, t_std_case, case_ratio in local_matrix:
@@ -879,15 +882,15 @@ def main():
     sftp_rows, sftp_scaling_rows, sftp_info = benchmark_sftp_backends()
     if sftp_rows is not None:
         print(f"10. SFTP backend comparison ({sftp_info}):")
-        for name, t_paramiko, t_asyncssh, ratio in sftp_rows:
+        for name, t_paramiko, t_asyncssh, sftp_ratio in sftp_rows:
             if isinstance(t_paramiko, (int, float)) and isinstance(t_asyncssh, (int, float)):
-                winner = "asyncssh" if ratio > 1 else "paramiko"
+                winner = "asyncssh" if sftp_ratio > 1 else "paramiko"
             else:
                 winner = "n/a"
             print(
                 f"   - {name}: paramiko={_fmt_metric(t_paramiko)}, "
                 f"asyncssh={_fmt_metric(t_asyncssh)} "
-                f"(paramiko/asyncssh={_fmt_ratio(ratio)}, faster={winner})"
+                f"(paramiko/asyncssh={_fmt_ratio(sftp_ratio)}, faster={winner})"
             )
         if sftp_scaling_rows:
             print("11. Asyncssh recursive copy scaling:")
@@ -906,7 +909,10 @@ def main():
     print(f"| Segments/Name Access (10k) | {t_seg_name:.4f}s |")
     print(f"| Suffix/Stem Access (10k) | {t_suffix_stem:.4f}s |")
     print(f"| Glob 1k MemPath (20) | {t_glob_mem:.4f}s |")
-    print(f"| LocalPath vs Stdlib (2k stat) | Local: {t_local:.4f}s, Stdlib: {t_std:.4f}s (Ratio: {ratio:.2f}x) |")
+    print(
+        f"| LocalPath vs Stdlib (2k stat) | Local: {t_local:.4f}s, "
+        f"Stdlib: {t_std:.4f}s (Ratio: {local_ratio:.2f}x) |"
+    )
     for name, t_local_case, t_std_case, case_ratio in local_matrix:
         print(
             f"| LocalPath {name} | Local: {t_local_case:.4f}s, "
@@ -917,11 +923,11 @@ def main():
     print(f"| HTTP dir listing parse, Apache <pre> (n=1000) | {t_parser_pre:.4f}ms/parse |")
     print(f"| HTTP dir listing parse, nginx <table> (n=1000) | {t_parser_table:.4f}ms/parse |")
     if sftp_rows is not None:
-        for name, t_paramiko, t_asyncssh, ratio in sftp_rows:
+        for name, t_paramiko, t_asyncssh, sftp_ratio in sftp_rows:
             print(
                 f"| SFTP {name} | paramiko: {_fmt_metric(t_paramiko)}, "
                 f"asyncssh: {_fmt_metric(t_asyncssh)} "
-                f"(paramiko/asyncssh: {_fmt_ratio(ratio)}) |"
+                f"(paramiko/asyncssh: {_fmt_ratio(sftp_ratio)}) |"
             )
         for name, metric in sftp_scaling_rows:
             print(f"| SFTP {name} | {_fmt_metric(metric)} |")
