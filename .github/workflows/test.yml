@@ -15,6 +15,10 @@ on:
         description: "Git ref to test (branch, tag, or SHA)"
         required: false
         default: ""
+      benchmark_recursive:
+        description: "Run the recursive SFTP benchmark cases"
+        required: false
+        default: "false"
   push:
     tags:
       - "ci-*"
@@ -83,3 +87,34 @@ jobs:
       - name: Run smoke and local tests without extras
         run: |
           python -m pytest -q tests/test_smoke.py tests/test_local.py tests/test_mempath.py tests/test_data_uri.py
+
+  benchmark:
+    name: Benchmarks (py3.12, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install benchmark dependencies
+        run: python -m pip install -e ".[dev,uri,http,sftp,sftp-async]"
+      - name: Run benchmark suite
+        env:
+          PATHLIB_NEXT_BENCH_SFTP_RECURSIVE: ${{ inputs.benchmark_recursive == 'true' && '1' || '0' }}
+        shell: pwsh
+        run: |
+          python benchmarks/bench.py | Tee-Object -FilePath benchmark.txt
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.os }}
+          path: benchmark.txt

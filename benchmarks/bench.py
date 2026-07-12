@@ -395,6 +395,32 @@ def _measure(operation, *, repeat=5, warmup=True):
     return statistics.median(samples)
 
 
+def _measure_status(operation, *, repeat=1, warmup=False):
+    samples = []
+    try:
+        if warmup:
+            operation()
+        for _ in range(repeat):
+            start = time.perf_counter()
+            operation()
+            samples.append(time.perf_counter() - start)
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
+    return statistics.median(samples)
+
+
+def _fmt_metric(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.4f}s"
+    return str(value)
+
+
+def _fmt_ratio(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.2f}x"
+    return str(value)
+
+
 def benchmark_sftp_backends():
     """Benchmark paramiko vs asyncssh across a broad SFTP operation matrix.
 
@@ -461,235 +487,349 @@ def benchmark_sftp_backends():
         asyncssh_backend_mod._CACHE.invalidate((backend, source))
 
     rows = []
-    with _loopback_sftp_server() as (server_uri, local_root):
-        backends = {
-            "paramiko": make_paramiko_backend(),
-            "asyncssh": make_asyncssh_backend(),
-        }
-        roots = {
-            name: SftpPath(server_uri, backend=backend)
-            for name, backend in backends.items()
-        }
+    scaling_rows = []
+    old_asyncssh_timeout = asyncssh_backend_mod._DEFAULT_TIMEOUT
+    asyncssh_backend_mod._DEFAULT_TIMEOUT = 3.0
+    try:
+        with _loopback_sftp_server() as (server_uri, local_root):
+            backends = {
+                "paramiko": make_paramiko_backend(),
+                "asyncssh": make_asyncssh_backend(),
+            }
+            roots = {
+                name: SftpPath(server_uri, backend=backend)
+                for name, backend in backends.items()
+            }
 
-        static_files = {
-            "bench/stat/small.txt": "hello world\n",
-            "bench/read/small.txt": "read me\n" * 64,
-            "bench/copy_file/source.bin": os.urandom(256 * 1024),
-        }
-        _write_tree(local_root, static_files)
+            static_files = {
+                "bench/stat/small.txt": "hello world\n",
+                "bench/read/small.txt": "read me\n" * 64,
+                "bench/copy_file/source.bin": os.urandom(256 * 1024),
+            }
+            _write_tree(local_root, static_files)
 
-        list_files = {
-            f"bench/listing/file_{i:03d}.txt": f"listing {i}\n"
-            for i in range(64)
-        }
-        list_dirs = {
-            f"bench/listing/dir_{i:02d}/nested.txt": "nested\n"
-            for i in range(8)
-        }
-        _write_tree(local_root, {**list_files, **list_dirs})
+            list_files = {
+                f"bench/listing/file_{i:03d}.txt": f"listing {i}\n"
+                for i in range(64)
+            }
+            list_dirs = {
+                f"bench/listing/dir_{i:02d}/nested.txt": "nested\n"
+                for i in range(8)
+            }
+            _write_tree(local_root, {**list_files, **list_dirs})
 
-        walk_tree = {}
-        for i in range(4):
-            for j in range(5):
-                for k in range(4):
-                    walk_tree[
-                        f"bench/walk/dir_{i}/sub_{j}/file_{k}.txt"
-                    ] = f"{i}-{j}-{k}\n"
-        _write_tree(local_root, walk_tree)
+            walk_tree = {}
+            for i in range(4):
+                for j in range(5):
+                    for k in range(4):
+                        walk_tree[
+                            f"bench/walk/dir_{i}/sub_{j}/file_{k}.txt"
+                        ] = f"{i}-{j}-{k}\n"
+            _write_tree(local_root, walk_tree)
 
-        copy_tree = {
-            f"bench/copy_tree/source/dir_{i:02d}/file_{j:02d}.txt": ("payload\n" * 32)
-            for i in range(4)
-            for j in range(4)
-        }
-        _write_tree(local_root, copy_tree)
-        for relpath in (
-            "bench/write",
-            "bench/mkdir",
-            "bench/rename",
-            "bench/unlink",
-            "bench/copy_file",
-            "bench/copy_tree",
-        ):
-            (local_root / relpath).mkdir(parents=True, exist_ok=True)
-        for backend_name in backends:
-            (local_root / "bench/write" / backend_name).mkdir(parents=True, exist_ok=True)
-            (local_root / "bench/mkdir" / backend_name).mkdir(parents=True, exist_ok=True)
-
-        try:
-            for root in roots.values():
-                _ = root.exists()
-
-            def compare(name, operation_factory, *, repeat=5, warmup=True):
-                timings = {}
-                for backend_name, root in roots.items():
-                    timings[backend_name] = _measure(
-                        operation_factory(root, backend_name),
-                        repeat=repeat,
-                        warmup=warmup,
-                    )
-                ratio = (
-                    timings["paramiko"] / timings["asyncssh"]
-                    if timings["asyncssh"] > 0
-                    else float("inf")
-                )
-                rows.append((name, timings["paramiko"], timings["asyncssh"], ratio))
-
-            compare(
-                "warm stat()",
-                lambda root, _backend_name: lambda: (root / "bench/stat/small.txt").stat(),
-                repeat=5,
-            )
-            compare(
-                "iterdir() 72 entries",
-                lambda root, _backend_name: lambda: list((root / "bench/listing").iterdir()),
-                repeat=3,
-            )
-            compare(
-                "walk() 80 files",
-                lambda root, _backend_name: lambda: list((root / "bench/walk").walk()),
-                repeat=2,
-            )
-            compare(
-                "glob('**/*.txt') 80 files",
-                lambda root, _backend_name: lambda: list((root / "bench/walk").glob("**/*.txt")),
-                repeat=2,
-            )
-            compare(
-                "read_bytes() small file",
-                lambda root, _backend_name: lambda: (root / "bench/read/small.txt").read_bytes(),
-                repeat=5,
-            )
-
-            compare(
-                "write_bytes() 256 KiB",
-                lambda root, backend_name: (
-                    lambda counter=iter(range(1000)): (
-                        (
-                            root / f"bench/write/{backend_name}/out_{next(counter):03d}.bin"
-                        ).write_bytes(b"x" * (256 * 1024))
-                    )
-                ),
-                repeat=3,
-                warmup=False,
-            )
-
-            compare(
-                "mkdir() leaf dir",
-                lambda root, backend_name: (
-                    lambda counter=iter(range(1000)): (
-                        (
-                            root / f"bench/mkdir/{backend_name}/dir_{next(counter):03d}"
-                        ).mkdir(exist_ok=False)
-                    )
-                ),
-                repeat=3,
-                warmup=False,
-            )
-
+            copy_tree = {
+                f"bench/copy_tree/source/dir_{i:02d}/file_{j:02d}.txt": ("payload\n" * 32)
+                for i in range(4)
+                for j in range(4)
+            }
+            _write_tree(local_root, copy_tree)
+            recursive_copy_tree = {
+                f"bench/copy_tree_small/source/dir_{i:02d}/file_{j:02d}.txt": ("small\n" * 8)
+                for i in range(2)
+                for j in range(2)
+            }
+            _write_tree(local_root, recursive_copy_tree)
+            recursive_rm_tree = {
+                f"bench/rm_tree/template/dir_{i:02d}/file_{j:02d}.txt": ("rm\n" * 8)
+                for i in range(3)
+                for j in range(3)
+            }
+            _write_tree(local_root, recursive_rm_tree)
+            for relpath in (
+                "bench/write",
+                "bench/mkdir",
+                "bench/rename",
+                "bench/unlink",
+                "bench/copy_file",
+                "bench/copy_tree",
+                "bench/copy_tree_small",
+                "bench/rm_tree",
+            ):
+                (local_root / relpath).mkdir(parents=True, exist_ok=True)
             for backend_name in backends:
-                (local_root / "bench/rename" / backend_name).mkdir(parents=True, exist_ok=True)
-                for i in range(8):
-                    (local_root / "bench/rename" / backend_name / f"src_{i:03d}.txt").write_text(
-                        "rename\n", encoding="utf-8"
-                    )
-            compare(
-                "rename() file",
-                lambda root, backend_name: (
-                    lambda counter=iter(range(8)): (
-                        (lambda i: (
-                            root / f"bench/rename/{backend_name}/src_{i:03d}.txt"
-                        ).rename(
-                            root / f"bench/rename/{backend_name}/dst_{i:03d}.txt"
-                        ))(next(counter))
-                    )
-                ),
-                repeat=3,
-                warmup=False,
-            )
+                (local_root / "bench/write" / backend_name).mkdir(parents=True, exist_ok=True)
+                (local_root / "bench/mkdir" / backend_name).mkdir(parents=True, exist_ok=True)
 
-            for backend_name in backends:
-                (local_root / "bench/unlink" / backend_name).mkdir(parents=True, exist_ok=True)
-                for i in range(8):
-                    (local_root / "bench/unlink" / backend_name / f"victim_{i:03d}.txt").write_text(
-                        "unlink\n", encoding="utf-8"
-                    )
-            compare(
-                "unlink() file",
-                lambda root, backend_name: (
-                    lambda counter=iter(range(8)): (
-                        (
-                            root / f"bench/unlink/{backend_name}/victim_{next(counter):03d}.txt"
-                        ).unlink()
-                    )
-                ),
-                repeat=3,
-                warmup=False,
-            )
+            try:
+                for root in roots.values():
+                    _ = root.exists()
 
-            compare(
-                "copy() single 256 KiB file",
-                lambda root, backend_name: (
-                    lambda counter=iter(range(1000)): (
-                        (root / "bench/copy_file/source.bin").copy(
-                            root / f"bench/copy_file/{backend_name}_out_{next(counter):03d}.bin",
-                            overwrite=True,
+                def compare(name, operation_factory, *, repeat=5, warmup=True):
+                    timings = {}
+                    for backend_name, root in roots.items():
+                        timings[backend_name] = _measure(
+                            operation_factory(root, backend_name),
+                            repeat=repeat,
+                            warmup=warmup,
                         )
+                    ratio = (
+                        timings["paramiko"] / timings["asyncssh"]
+                        if timings["asyncssh"] > 0
+                        else float("inf")
                     )
-                ),
-                repeat=3,
-                warmup=False,
-            )
+                    rows.append((name, timings["paramiko"], timings["asyncssh"], ratio))
 
-            if os.getenv("PATHLIB_NEXT_BENCH_SFTP_RECURSIVE") == "1":
+                def compare_status(name, operation_factory, *, repeat=1, warmup=False):
+                    timings = {}
+                    for backend_name, root in roots.items():
+                        timings[backend_name] = _measure_status(
+                            operation_factory(root, backend_name),
+                            repeat=repeat,
+                            warmup=warmup,
+                        )
+                    if all(isinstance(value, (int, float)) for value in timings.values()):
+                        ratio = (
+                            timings["paramiko"] / timings["asyncssh"]
+                            if timings["asyncssh"] > 0
+                            else float("inf")
+                        )
+                    else:
+                        ratio = "n/a"
+                    rows.append((name, timings["paramiko"], timings["asyncssh"], ratio))
+
+                def make_recursive_rm_operation(root, backend_name):
+                    counter = iter(range(1000))
+
+                    def operation():
+                        idx = next(counter)
+                        target = root / f"bench/rm_tree/{backend_name}_rm_{idx:03d}"
+                        (root / "bench/rm_tree/template").copy(
+                            target,
+                            overwrite=True,
+                            recursive=True,
+                        )
+                        target.rm(recursive=True)
+
+                    return operation
+
                 compare(
-                    "copy(recursive=True) 16-file tree",
+                    "warm stat()",
+                    lambda root, _backend_name: lambda: (root / "bench/stat/small.txt").stat(),
+                    repeat=5,
+                )
+                compare(
+                    "iterdir() 72 entries",
+                    lambda root, _backend_name: lambda: list((root / "bench/listing").iterdir()),
+                    repeat=3,
+                )
+                compare(
+                    "walk() 80 files",
+                    lambda root, _backend_name: lambda: list((root / "bench/walk").walk()),
+                    repeat=2,
+                )
+                compare(
+                    "glob('**/*.txt') 80 files",
+                    lambda root, _backend_name: lambda: list((root / "bench/walk").glob("**/*.txt")),
+                    repeat=2,
+                )
+                compare(
+                    "read_bytes() small file",
+                    lambda root, _backend_name: lambda: (root / "bench/read/small.txt").read_bytes(),
+                    repeat=5,
+                )
+                compare(
+                    "read_bytes() 64-file batch",
+                    lambda root, _backend_name: lambda: [
+                        (root / f"bench/listing/file_{i:03d}.txt").read_bytes()
+                        for i in range(64)
+                    ],
+                    repeat=2,
+                )
+                compare(
+                    "stat() 64-file batch",
+                    lambda root, _backend_name: lambda: [
+                        (root / f"bench/listing/file_{i:03d}.txt").stat()
+                        for i in range(64)
+                    ],
+                    repeat=2,
+                )
+
+                compare(
+                    "write_bytes() 256 KiB",
                     lambda root, backend_name: (
                         lambda counter=iter(range(1000)): (
-                            (root / "bench/copy_tree/source").copy(
-                                root
-                                / f"bench/copy_tree/{backend_name}_out_{next(counter):03d}",
-                                overwrite=True,
-                                recursive=True,
-                            )
+                            (
+                                root / f"bench/write/{backend_name}/out_{next(counter):03d}.bin"
+                            ).write_bytes(b"x" * (256 * 1024))
                         )
                     ),
-                    repeat=2,
+                    repeat=3,
                     warmup=False,
                 )
 
-            cold_timings = {}
-            for backend_name, backend_factory in (
-                ("paramiko", make_paramiko_backend),
-                ("asyncssh", make_asyncssh_backend),
-            ):
-                def cold_operation():
-                    backend = backend_factory()
-                    path = SftpPath(server_uri, backend=backend) / "bench/stat/small.txt"
+                compare(
+                    "mkdir() leaf dir",
+                    lambda root, backend_name: (
+                        lambda counter=iter(range(1000)): (
+                            (
+                                root / f"bench/mkdir/{backend_name}/dir_{next(counter):03d}"
+                            ).mkdir(exist_ok=False)
+                        )
+                    ),
+                    repeat=3,
+                    warmup=False,
+                )
+
+                for backend_name in backends:
+                    (local_root / "bench/rename" / backend_name).mkdir(parents=True, exist_ok=True)
+                    for i in range(8):
+                        (local_root / "bench/rename" / backend_name / f"src_{i:03d}.txt").write_text(
+                            "rename\n", encoding="utf-8"
+                        )
+                compare(
+                    "rename() file",
+                    lambda root, backend_name: (
+                        lambda counter=iter(range(8)): (
+                            (lambda i: (
+                                root / f"bench/rename/{backend_name}/src_{i:03d}.txt"
+                            ).rename(
+                                root / f"bench/rename/{backend_name}/dst_{i:03d}.txt"
+                            ))(next(counter))
+                        )
+                    ),
+                    repeat=3,
+                    warmup=False,
+                )
+
+                for backend_name in backends:
+                    (local_root / "bench/unlink" / backend_name).mkdir(parents=True, exist_ok=True)
+                    for i in range(8):
+                        (local_root / "bench/unlink" / backend_name / f"victim_{i:03d}.txt").write_text(
+                            "unlink\n", encoding="utf-8"
+                        )
+                compare(
+                    "unlink() file",
+                    lambda root, backend_name: (
+                        lambda counter=iter(range(8)): (
+                            (
+                                root / f"bench/unlink/{backend_name}/victim_{next(counter):03d}.txt"
+                            ).unlink()
+                        )
+                    ),
+                    repeat=3,
+                    warmup=False,
+                )
+
+                compare(
+                    "copy() single 256 KiB file",
+                    lambda root, backend_name: (
+                        lambda counter=iter(range(1000)): (
+                            (root / "bench/copy_file/source.bin").copy(
+                                root / f"bench/copy_file/{backend_name}_out_{next(counter):03d}.bin",
+                                overwrite=True,
+                            )
+                        )
+                    ),
+                    repeat=3,
+                    warmup=False,
+                )
+                compare_status(
+                    "rm(recursive=True) 9-file tree",
+                    make_recursive_rm_operation,
+                    repeat=1,
+                    warmup=False,
+                )
+
+                if os.getenv("PATHLIB_NEXT_BENCH_SFTP_RECURSIVE") == "1":
+                    compare_status(
+                        "copy(recursive=True) 4-file tree",
+                        lambda root, backend_name: (
+                            lambda counter=iter(range(1000)): (
+                                (root / "bench/copy_tree_small/source").copy(
+                                    root
+                                    / f"bench/copy_tree_small/{backend_name}_out_{next(counter):03d}",
+                                    overwrite=True,
+                                    recursive=True,
+                                )
+                            )
+                        ),
+                        repeat=1,
+                        warmup=False,
+                    )
+                    for max_concurrency in (1, 4):
+                        backend = AsyncsshSftpBackend(
+                            {
+                                "config": None,
+                                "client_keys": None,
+                                "agent_path": None,
+                                "public_key_auth": False,
+                                "kbdint_auth": False,
+                                "gss_kex": False,
+                                "gss_auth": False,
+                                "preferred_auth": "none,password",
+                            },
+                            max_concurrency=max_concurrency,
+                            sftp_version=4,
+                        )
+                        root = SftpPath(server_uri, backend=backend)
+
+                        def scaling_operation(
+                            counter=iter(range(1000)),
+                            max_concurrency=max_concurrency,
+                        ):
+                            (root / "bench/copy_tree_small/source").copy(
+                                root / f"bench/copy_tree_small/asyncssh_mc{max_concurrency}_{next(counter):03d}",
+                                overwrite=True,
+                                recursive=True,
+                            )
+
+                        metric = _measure_status(
+                            scaling_operation,
+                            repeat=1,
+                            warmup=False,
+                        )
+                        scaling_rows.append(
+                            (f"asyncssh recursive copy mc={max_concurrency}", metric)
+                        )
+                        try:
+                            close_backend(backend, root.source)
+                        except Exception:
+                            pass
+
+                cold_timings = {}
+                for backend_name, backend_factory in (
+                    ("paramiko", make_paramiko_backend),
+                    ("asyncssh", make_asyncssh_backend),
+                ):
+                    def cold_operation():
+                        backend = backend_factory()
+                        path = SftpPath(server_uri, backend=backend) / "bench/stat/small.txt"
+                        try:
+                            path.stat()
+                        finally:
+                            close_backend(backend, path.source)
+
+                    cold_timings[backend_name] = _measure(
+                        cold_operation, repeat=3, warmup=False
+                    )
+                rows.append(
+                    (
+                        "cold connect + stat()",
+                        cold_timings["paramiko"],
+                        cold_timings["asyncssh"],
+                        cold_timings["paramiko"] / cold_timings["asyncssh"],
+                    )
+                )
+            finally:
+                for backend_name, backend in backends.items():
                     try:
-                        path.stat()
-                    finally:
-                        close_backend(backend, path.source)
+                        close_backend(backend, roots[backend_name].source)
+                    except Exception:
+                        pass
+    finally:
+        asyncssh_backend_mod._DEFAULT_TIMEOUT = old_asyncssh_timeout
 
-                cold_timings[backend_name] = _measure(
-                    cold_operation, repeat=3, warmup=False
-                )
-            rows.append(
-                (
-                    "cold connect + stat()",
-                    cold_timings["paramiko"],
-                    cold_timings["asyncssh"],
-                    cold_timings["paramiko"] / cold_timings["asyncssh"],
-                )
-            )
-        finally:
-            for backend_name, backend in backends.items():
-                try:
-                    close_backend(backend, roots[backend_name].source)
-                except Exception:
-                    pass
-
-    return rows, "loopback asyncssh server, median seconds"
+    return rows, scaling_rows, "loopback asyncssh server, median seconds"
 
 
 def main():
@@ -736,16 +876,23 @@ def main():
     print(f"8. HTTP dir listing parse, Apache <pre>, n=1000 (ms/parse): {t_parser_pre:.4f}ms")
     print(f"9. HTTP dir listing parse, nginx <table>, n=1000 (ms/parse): {t_parser_table:.4f}ms")
 
-    sftp_rows, sftp_info = benchmark_sftp_backends()
+    sftp_rows, sftp_scaling_rows, sftp_info = benchmark_sftp_backends()
     if sftp_rows is not None:
         print(f"10. SFTP backend comparison ({sftp_info}):")
         for name, t_paramiko, t_asyncssh, ratio in sftp_rows:
-            winner = "asyncssh" if ratio > 1 else "paramiko"
+            if isinstance(t_paramiko, (int, float)) and isinstance(t_asyncssh, (int, float)):
+                winner = "asyncssh" if ratio > 1 else "paramiko"
+            else:
+                winner = "n/a"
             print(
-                f"   - {name}: paramiko={t_paramiko:.4f}s, "
-                f"asyncssh={t_asyncssh:.4f}s "
-                f"(paramiko/asyncssh={ratio:.2f}x, faster={winner})"
+                f"   - {name}: paramiko={_fmt_metric(t_paramiko)}, "
+                f"asyncssh={_fmt_metric(t_asyncssh)} "
+                f"(paramiko/asyncssh={_fmt_ratio(ratio)}, faster={winner})"
             )
+        if sftp_scaling_rows:
+            print("11. Asyncssh recursive copy scaling:")
+            for name, metric in sftp_scaling_rows:
+                print(f"   - {name}: {_fmt_metric(metric)}")
     else:
         print(f"10. SFTP backend comparison: {sftp_info}")
 
@@ -772,10 +919,12 @@ def main():
     if sftp_rows is not None:
         for name, t_paramiko, t_asyncssh, ratio in sftp_rows:
             print(
-                f"| SFTP {name} | paramiko: {t_paramiko:.4f}s, "
-                f"asyncssh: {t_asyncssh:.4f}s "
-                f"(paramiko/asyncssh: {ratio:.2f}x) |"
+                f"| SFTP {name} | paramiko: {_fmt_metric(t_paramiko)}, "
+                f"asyncssh: {_fmt_metric(t_asyncssh)} "
+                f"(paramiko/asyncssh: {_fmt_ratio(ratio)}) |"
             )
+        for name, metric in sftp_scaling_rows:
+            print(f"| SFTP {name} | {_fmt_metric(metric)} |")
     else:
         print(f"| SFTP backend comparison | {sftp_info} |")
 

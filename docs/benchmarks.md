@@ -16,8 +16,9 @@ Optional stress case:
 PATHLIB_NEXT_BENCH_SFTP_RECURSIVE=1 python benchmarks/bench.py
 ```
 
-That opt-in flag enables the recursive SFTP copy comparison, which is more
-expensive than the default suite.
+That opt-in flag enables the recursive SFTP probe rows, which are more
+expensive and are best treated as CI/manual benchmark runs rather than
+something to trust on a loaded development machine.
 
 ## What It Covers
 
