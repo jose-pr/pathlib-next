@@ -166,6 +166,13 @@ class DavPath(HttpPath):
         resp.raise_for_status()
 
     def rmdir(self):
+        # Same fix as HttpPath.rmdir() (http_verify_and_fix.md Phase 5):
+        # a PROPFIND Depth:1 on a non-collection resource returns only the
+        # "." entry describing itself, which _scandir() already filters
+        # out -- so a *file* looks exactly like an empty directory to
+        # _listdir() alone, and rmdir() on a file silently DELETEd it.
+        if not self.is_dir():
+            raise NotADirectoryError(self)
         for _ in self._listdir():
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         self.unlink()

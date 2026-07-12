@@ -53,13 +53,13 @@ _DATETIME_FMTs = (
     (_re.compile(r'\d{4}-[A-S][a-y]{2}-\d+ \d+:\d{2}:\d{2}'), "%Y-%b-%d %H:%M:%S"),
     (_re.compile(r'\d{4}-[A-S][a-y]{2}-\d+ \d+:\d{2}'), "%Y-%b-%d %H:%M"),
     (_re.compile(r'[F-W][a-u]{2} [A-S][a-y]{2} +\d+ \d{2}:\d{2}:\d{2} \d{4}'), "%a %b %d %H:%M:%S %Y"),
-    (_re.compile(r'[F-W][a-u]{2}, \d+ [A-S][a-y]{2} \d{4} \d{2}:\d{2}:\d{2} .+'), "%a, %d %b %Y %H:%M:%S %Z"),
+    (_re.compile(r'[F-W][a-u]{2}, \d+ [A-S][a-y]{2} \d{4} \d{2}:\d{2}:\d{2} \S+'), "%a, %d %b %Y %H:%M:%S %Z"),
     (_re.compile(r'\d{4}-\d+-\d+'), "%Y-%m-%d"),
     (_re.compile(r'\d+/\d+/\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}'), "%d/%m/%Y %H:%M:%S %z"),
     (_re.compile(r'\d{2} [A-S][a-y]{2} \d{4}'), "%d %b %Y")
 )
 
-_RE_FILESIZE = _re.compile(r'\d+(\.\d+)? ?[BKMGTPEZY]|\d+|-', _re.I)
+_RE_FILESIZE = _re.compile(r'\d[\d,]*(\.\d+)? ?[BKMGTPEZY]|\d[\d,]*|-', _re.I)
 _RE_COMMONHEAD = _re.compile('Name|(Last )?modifi(ed|cation)|date|Size|Description|Metadata|Type|Parent Directory', _re.I)
 _RE_HEAD_NAME = _re.compile('name$|^file|^download')
 _RE_HEAD_MOD = _re.compile('modifi|^uploaded|date|time')
@@ -186,12 +186,39 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
         if self.in_a:
             self.current_a_text.append(data)
 
+    def _is_ancestor_href(self, href):
+        # An absolute href is normally the "up a level" link -- Apache/
+        # nginx don't always render it as "../" (e.g. "/files/" from
+        # "/files/sub/"), and `_aherf2filename()` only looks at the href's
+        # last path segment, not the anchor's text, so that case isn't
+        # caught by the Parent Directory/../ name check above. But some
+        # reverse-proxied or absolute-URL-configured servers render EVERY
+        # entry as an absolute href, not just the parent link -- a blanket
+        # `startswith('/')` filter would then silently drop the whole
+        # listing. Scope the filter to hrefs outside the current listing's
+        # own path instead (falls back to the old blanket behavior if the
+        # listing had no parseable "Index of ..." <title>).
+        if not href.startswith('/'):
+            return False
+        if not self.cwd:
+            return True
+        path = _urlparse.unquote(_urlparse.urlsplit(href).path)
+        cwd = self.cwd if self.cwd.endswith('/') else self.cwd + '/'
+        # a strict descendant of cwd is a real child; cwd itself (a
+        # self-referencing "up" link, e.g. at the site root) or anything
+        # outside cwd is the ancestor/parent link.
+        return path == cwd or not path.startswith(cwd)
+
     def _flush_pre_entry(self):
         if not self.last_href:
             return
-        
+
         name = _aherf2filename(self.last_href)
-        if name in ('Parent Directory', '..', '../') or self.last_href.startswith(('?', '/')):
+        if (
+            name in ('Parent Directory', '..', '../')
+            or self.last_href.startswith('?')
+            or self._is_ancestor_href(self.last_href)
+        ):
             self.last_href = None
             return
             
@@ -318,7 +345,11 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
         if not self.listing:
             for text, href in self.all_links:
                 name = _aherf2filename(href)
-                if name in ('Parent Directory', '..', '../') or href.startswith(('?', '/')):
+                if (
+                    name in ('Parent Directory', '..', '../')
+                    or href.startswith('?')
+                    or self._is_ancestor_href(href)
+                ):
                     continue
                 self.listing.append(_FileEntry(name, None, None, None))
 
@@ -338,8 +369,10 @@ class HttpWriteStream(_io.BytesIO):
         self._path = path
 
     def close(self):
-        if not self.closed:
-            data = self.getvalue()
+        if self.closed:
+            return
+        data = self.getvalue()
+        try:
             with _translate_http_errors(self._path):
                 resp = self._path.backend.request(
                     self._path.backend.write_method,
@@ -347,7 +380,11 @@ class HttpWriteStream(_io.BytesIO):
                     data=data,
                 )
                 resp.raise_for_status()
-        super().close()
+        finally:
+            # Mark closed even on a failed upload -- otherwise a later
+            # close() (context-manager __exit__ cleanup, or GC via
+            # IOBase.__del__) silently retries the PUT.
+            super().close()
 
 
 class HttpBackend(_ty.NamedTuple):
@@ -368,9 +405,11 @@ class HttpBackend(_ty.NamedTuple):
 
 
 class HttpPath(UriPath):
-    """`http`/`https` scheme: read-only access over HTTP, listing
-    directories by scraping an Apache/nginx-style HTML index (via
-    `htmllistparse`). Requires the `http` extra."""
+    """`http`/`https` scheme: read/write access over HTTP (`PUT`/`DELETE`
+    for writes/deletes, configurable via `with_session()`), listing
+    directories by scraping an Apache/nginx-style HTML index with a
+    zero-dependency in-house parser (`_DirectoryListingParser`). Requires
+    the `http` extra."""
 
     __SCHEMES = ("http", "https")
     __slots__ = ()
@@ -382,9 +421,20 @@ class HttpPath(UriPath):
         return HttpBackend(_req.Session(), {})
 
     def _listdir(self) -> list[_FileEntry]:
-        with _translate_http_errors(self):
-            req = self.backend.request("GET", self)
-            req.raise_for_status()
+        # requests follows GET redirects by default, so a redirecting
+        # server (e.g. Apache/nginx 301-ing "/sub" -> "/sub/") already
+        # works with a single request. This retry only helps a
+        # non-redirecting server/proxy that 404s the slash-less path.
+        try:
+            with _translate_http_errors(self):
+                req = self.backend.request("GET", self)
+                req.raise_for_status()
+        except FileNotFoundError:
+            if self.path.endswith("/"):
+                raise
+            with _translate_http_errors(self):
+                req = self.backend.request("GET", self.with_path(self.path + "/"))
+                req.raise_for_status()
         parser = _DirectoryListingParser()
         parser.feed(req.text)
         parser.close()
@@ -441,11 +491,24 @@ class HttpPath(UriPath):
                 if resp.status_code < 400:
                     break
 
+            # is_dir is intentionally derived from this pre-redirect resp,
+            # not re-derived after following the redirect below: a 3xx
+            # response's own `resp.is_redirect` is already sufficient (and
+            # is the only signal available pre-redirect), and the target
+            # should independently satisfy `_is_dir()`'s url.endswith("/")
+            # check too once fetched.
             is_dir = self._is_dir(resp)
 
             if resp.is_redirect:
                 resp = self.backend.request("HEAD", uri)
                 resp.close()
+                if resp.status_code == 405:
+                    # Mirror the pre-redirect loop's HEAD-405 fallback --
+                    # without this, a server/proxy that rejects HEAD
+                    # everywhere (not just pre-redirect) surfaced
+                    # PermissionError for an existing, redirect-only path.
+                    resp = self.backend.request("GET", uri, stream=True)
+                    resp.close()
             resp.raise_for_status()
 
         st_size = 0 if is_dir else int(resp.headers.get("Content-Length", 0))
@@ -500,6 +563,13 @@ class HttpPath(UriPath):
             resp.raise_for_status()
 
     def rmdir(self):
+        # An empty directory's listing and a file whose body happens to
+        # parse to zero entries are indistinguishable from `_listdir()`
+        # alone -- without this check, rmdir() on a *file* silently
+        # DELETEd it instead of raising NotADirectoryError like
+        # os.rmdir()/pathlib.Path.rmdir() do.
+        if not self.is_dir():
+            raise NotADirectoryError(self)
         for _ in self._listdir():
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         self.unlink()
