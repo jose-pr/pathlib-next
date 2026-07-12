@@ -425,11 +425,38 @@ def benchmark_sftp_backends():
         )
 
     def make_asyncssh_backend():
-        return AsyncsshSftpBackend(max_concurrency=8)
+        return AsyncsshSftpBackend(
+            {
+                "config": None,
+                "client_keys": None,
+                "agent_path": None,
+                "public_key_auth": False,
+                "kbdint_auth": False,
+                "gss_kex": False,
+                "gss_auth": False,
+                "preferred_auth": "none,password",
+            },
+            max_concurrency=8,
+            sftp_version=4,
+        )
 
     def close_backend(backend, source):
         if type(backend).__name__ == "SftpBackend":
-            _CACHED_CLIENTS.invalidate(backend, source, threading.get_ident())
+            try:
+                client = backend.client(source)
+            except Exception:
+                client = None
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                try:
+                    client.sock.get_transport().close()
+                except Exception:
+                    pass
+            with _CACHED_CLIENTS.lock:
+                _CACHED_CLIENTS.cache.pop((backend, source, threading.get_ident()), None)
             return
         asyncssh_backend_mod._CACHE.invalidate((backend, source))
 

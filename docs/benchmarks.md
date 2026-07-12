@@ -33,6 +33,12 @@ backends hit the same filesystem with the same fixture tree. That keeps the
 comparison focused on backend overhead and request behavior rather than WAN
 latency.
 
+Normal `sftp://` usage defaults to the system OpenSSH client config on both
+backends. The benchmark harness explicitly disables SSH config/key discovery
+for its asyncssh comparison so both backends are measured with similarly
+minimal connection setup instead of inheriting machine-specific SSH client
+state.
+
 ## Sample Results
 
 These numbers are from a local Windows run on July 12, 2026 with
@@ -41,43 +47,45 @@ cross-machine contract.
 
 | Benchmark Case | Time / Metric |
 | --- | --- |
-| URI Parse (10k) | 0.6778s |
-| URI Parse, unique URIs, forced (us/parse) | 261.19us |
-| URI Parse+Compose, unique URIs (us/round-trip) | 276.16us |
-| Path Join (10k) | 0.4769s |
-| Segments/Name Access (10k) | 0.0064s |
-| Suffix/Stem Access (10k) | 0.0028s |
-| Glob 1k MemPath (20) | 2.5886s |
-| LocalPath vs Stdlib (2k stat) | Local: 0.2195s, Stdlib: 0.2524s |
-| LocalPath construct path (10k) | Local: 0.1600s, Stdlib: 0.0970s |
-| LocalPath join path (10k) | Local: 0.1940s, Stdlib: 0.1580s |
-| LocalPath stat() file (2k) | Local: 0.0899s, Stdlib: 0.0766s |
-| LocalPath read_bytes() 64 KiB | Local: 0.0003s, Stdlib: 0.0002s |
-| LocalPath iterdir() 8 entries | Local: 0.0002s, Stdlib: 0.0002s |
-| LocalPath glob('**/*.txt') 240 files | Local: 0.0316s, Stdlib: 0.0200s |
-| HTTP Glob (10) | 1.3912s |
-| HTTP Walk (10) | 0.5828s |
-| HTTP dir listing parse, Apache `<pre>` (n=1000) | 65.7116ms/parse |
-| HTTP dir listing parse, nginx `<table>` (n=1000) | 266.5333ms/parse |
-| SFTP warm `stat()` | paramiko: 0.0020s, asyncssh: 0.0031s |
-| SFTP `iterdir()` 72 entries | paramiko: 0.1162s, asyncssh: 0.1272s |
-| SFTP `walk()` 80 files | paramiko: 0.3769s, asyncssh: 0.4886s |
-| SFTP `glob('**/*.txt')` 80 files | paramiko: 2.1086s, asyncssh: 2.1841s |
-| SFTP `read_bytes()` small file | paramiko: 0.0050s, asyncssh: 0.0104s |
-| SFTP `write_bytes()` 256 KiB | paramiko: 0.0201s, asyncssh: 0.0169s |
-| SFTP `mkdir()` leaf dir | paramiko: 0.0029s, asyncssh: 0.0040s |
-| SFTP `rename()` file | paramiko: 0.0042s, asyncssh: 0.0054s |
-| SFTP `unlink()` file | paramiko: 0.0021s, asyncssh: 0.0038s |
-| SFTP `copy()` single 256 KiB file | paramiko: 0.0583s, asyncssh: 0.0757s |
-| SFTP cold connect + `stat()` | paramiko: 0.0402s, asyncssh: 0.0532s |
+| URI Parse (10k) | 0.0906s |
+| URI Parse, unique URIs, forced (us/parse) | 28.26us |
+| URI Parse+Compose, unique URIs (us/round-trip) | 43.87us |
+| Path Join (10k) | 0.1837s |
+| Segments/Name Access (10k) | 0.0015s |
+| Suffix/Stem Access (10k) | 0.0017s |
+| Glob 1k MemPath (20) | 0.5064s |
+| LocalPath vs Stdlib (2k stat) | Local: 0.0354s, Stdlib: 0.0375s |
+| LocalPath construct path (10k) | Local: 0.0128s, Stdlib: 0.0249s |
+| LocalPath join path (10k) | Local: 0.0667s, Stdlib: 0.0694s |
+| LocalPath stat() file (2k) | Local: 0.0458s, Stdlib: 0.0495s |
+| LocalPath read_bytes() 64 KiB | Local: 0.0005s, Stdlib: 0.0002s |
+| LocalPath iterdir() 8 entries | Local: 0.0001s, Stdlib: 0.0001s |
+| LocalPath glob('**/*.txt') 240 files | Local: 0.0254s, Stdlib: 0.0147s |
+| HTTP Glob (10) | 1.2651s |
+| HTTP Walk (10) | 0.5654s |
+| HTTP dir listing parse, Apache `<pre>` (n=1000) | 76.2783ms/parse |
+| HTTP dir listing parse, nginx `<table>` (n=1000) | 135.5039ms/parse |
+| SFTP warm `stat()` | paramiko: 0.0012s, asyncssh: 0.0026s |
+| SFTP `iterdir()` 72 entries | paramiko: 0.1362s, asyncssh: 0.1424s |
+| SFTP `walk()` 80 files | paramiko: 0.4285s, asyncssh: 0.5982s |
+| SFTP `glob('**/*.txt')` 80 files | paramiko: 0.9762s, asyncssh: 1.2515s |
+| SFTP `read_bytes()` small file | paramiko: 0.0041s, asyncssh: 0.0087s |
+| SFTP `write_bytes()` 256 KiB | paramiko: 0.0155s, asyncssh: 0.0159s |
+| SFTP `mkdir()` leaf dir | paramiko: 0.0023s, asyncssh: 0.0030s |
+| SFTP `rename()` file | paramiko: 0.0031s, asyncssh: 0.0045s |
+| SFTP `unlink()` file | paramiko: 0.0016s, asyncssh: 0.0029s |
+| SFTP `copy()` single 256 KiB file | paramiko: 0.0345s, asyncssh: 0.0385s |
+| SFTP cold connect + `stat()` | paramiko: 0.0171s, asyncssh: 0.0286s |
 
 ## Current Takeaways
 
-- `LocalPath` is close to `pathlib.Path` on basic file I/O, but still loses
-  on path construction, joins, and recursive globbing in this run.
-- The loopback SFTP comparison currently favors `paramiko` for most small
-  sync-style operations, with `asyncssh` only pulling ahead on the sampled
-  256 KiB write case in this run.
+- `LocalPath` is competitive with `pathlib.Path` on several hot local
+  operations in this run, but still trails on recursive globbing and the
+  sampled `read_bytes()` case.
+- Even after aligning auth/config behavior, the loopback SFTP comparison
+  still tends to favor `paramiko` for small sync-style calls. That matches
+  the design tradeoff: `asyncssh` is going through a sync-to-async bridge on
+  every small operation, while paramiko is already a sync client.
 - The broad SFTP benchmark is useful for backend comparison even when the
   operation itself is exposed synchronously, because backend internals still
   affect overall throughput.
@@ -86,7 +94,8 @@ cross-machine contract.
 
 - Benchmark output is environment-sensitive: Python version, OS, filesystem,
   CPU, and installed extras all matter.
-- The loopback SFTP harness currently finishes with some noisy asyncssh
-  teardown warnings even though the measurements complete successfully.
+- The benchmark disables OpenSSH config/key discovery only for the loopback
+  backend comparison, to avoid machine-specific SSH client state skewing the
+  numbers.
 - For regressions, compare before/after runs on the same machine and Python
   version rather than comparing absolute times across environments.
