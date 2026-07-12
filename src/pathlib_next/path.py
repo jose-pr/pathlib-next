@@ -560,6 +560,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         follow_symlinks=True,
         preserve_metadata=True,
         recursive=False,
+        ignore_error=None,
     ):
         """Copy this file's content to `target`.
 
@@ -570,6 +571,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         (unlike 3.14's False) to match this method's pre-existing behavior
         of always propagating st_mode; only st_mode is preserved, not
         timestamps/xattrs -- full metadata preservation is not implemented.
+        `ignore_error` is a callable matching `Path.rm()`'s contract: when
+        provided, exceptions are passed to it instead of raised; when None
+        (default), fail on the first error.
         """
         if isinstance(target, str):
             target = type(self)(target)
@@ -584,13 +588,19 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             else:
                 target.mkdir()
             for child in src.iterdir():
-                child.copy(
-                    target / child.name,
-                    overwrite=overwrite,
-                    follow_symlinks=follow_symlinks,
-                    preserve_metadata=preserve_metadata,
-                    recursive=True,
-                )
+                try:
+                    child.copy(
+                        target / child.name,
+                        overwrite=overwrite,
+                        follow_symlinks=follow_symlinks,
+                        preserve_metadata=preserve_metadata,
+                        recursive=True,
+                        ignore_error=ignore_error,
+                    )
+                except Exception as e:
+                    if ignore_error is None:
+                        raise
+                    ignore_error(e)
             return
 
         if target.exists():

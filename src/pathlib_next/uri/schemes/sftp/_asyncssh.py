@@ -466,7 +466,7 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     fork-safe (a `fork()`ed child inherits a dead loop thread; detected via
     stored PID, loop+cache lazily recreated when `os.getpid()` changes)."""
 
-    __slots__ = ()
+    __slots__ = ("max_concurrency",)
 
     #: asyncssh's chmod() takes follow_symlinks natively.
     supports_lchmod = True
@@ -474,6 +474,9 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     #: op, but this works via the hardlink@openssh.com extension against
     #: real-world OpenSSH v3 servers, or the standard opcode against v5/v6).
     supports_hardlink = True
+
+    def __init__(self, max_concurrency: int = 8):
+        self.max_concurrency = max_concurrency
 
     def client(self, source: "Source") -> _SyncSftpClient:
         entry = _CACHE.get_or_create(
