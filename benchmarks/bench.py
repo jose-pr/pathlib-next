@@ -165,6 +165,74 @@ def benchmark_walk_glob_http():
             server.server_close()
             thread.join(timeout=5)
 
+def benchmark_http_directory_parser():
+    # benchmark_walk_glob_http() above serves fixture files through stdlib
+    # SimpleHTTPRequestHandler, whose listing is a bare <ul><li> -- that
+    # only ever exercises _DirectoryListingParser's `all_links` fallback
+    # branch, never its two primary (and far more common in the real
+    # world) Apache-<pre>/nginx-<table> code paths. This benchmarks those
+    # directly against realistic synthetic HTML (see
+    # http_verify_and_fix.md's Phase 1/benchmark notes -- also where this
+    # in-house parser was verified equivalent to, and 2.9x-6.2x faster
+    # than, the bs4+html5lib+htmllistparse implementation it replaced).
+    from pathlib_next.uri.schemes.http import _DirectoryListingParser
+
+    def make_apache_pre(n):
+        rows = ['<a href="../">../</a>\n']
+        for i in range(n):
+            is_dir = i % 7 == 0
+            name = f"dir_{i}/" if is_dir else f"file_{i:04d}.txt"
+            size = "-" if is_dir else f"{(i % 900) + 1}.{i % 10}K"
+            rows.append(
+                f'<a href="{name}">{name}</a>'
+                + " " * max(1, 50 - len(name))
+                + f"11-Jul-2026 10:{i % 60:02d}:00    {size}\n"
+            )
+        body = "".join(rows)
+        return (
+            "<html><head><title>Index of /files/</title></head><body>"
+            "<h1>Index of /files/</h1><pre>" + body + "</pre></body></html>"
+        )
+
+    def make_nginx_table(n):
+        head = (
+            '<tr><th><a href="?C=N;O=D">Name</a></th>'
+            '<th><a href="?C=M;O=A">Last modified</a></th>'
+            '<th><a href="?C=S;O=A">Size</a></th><th>Description</th></tr>\n'
+            '<tr><th colspan="4"><hr></th></tr>\n'
+            '<tr><td><a href="/files/">Parent Directory</a></td>'
+            '<td>&nbsp;</td><td align="right">-</td><td>&nbsp;</td></tr>\n'
+        )
+        rows = [head]
+        for i in range(n):
+            is_dir = i % 7 == 0
+            name = f"dir_{i}/" if is_dir else f"file_{i:04d}.txt"
+            size = "-" if is_dir else f"{(i % 900) + 1}.{i % 10}K"
+            rows.append(
+                f'<tr><td><a href="{name}">{name}</a></td>'
+                f'<td>2026-07-11 10:{i % 60:02d}  </td>'
+                f'<td align="right">{size}</td><td>&nbsp;</td></tr>\n'
+            )
+        body = "".join(rows)
+        return (
+            "<html><head><title>Index of /files/</title></head><body>"
+            "<h1>Index of /files/</h1><table>\n" + body + "</table></body></html>"
+        )
+
+    def parse(html):
+        parser = _DirectoryListingParser()
+        parser.feed(html)
+        parser.close()
+        return parser.listing
+
+    n = 1000
+    pre_html = make_apache_pre(n)
+    table_html = make_nginx_table(n)
+    t_pre = timeit.timeit(lambda: parse(pre_html), number=20)
+    t_table = timeit.timeit(lambda: parse(table_html), number=20)
+    return t_pre / 20 * 1000, t_table / 20 * 1000  # ms/parse, n=1000 entries
+
+
 def main():
     print("Running benchmarks...")
     
@@ -195,7 +263,11 @@ def main():
     t_http_glob, t_http_walk = benchmark_walk_glob_http()
     print(f"6. HTTP Glob (10 runs): {t_http_glob:.4f}s")
     print(f"7. HTTP Walk (10 runs): {t_http_walk:.4f}s")
-    
+
+    t_parser_pre, t_parser_table = benchmark_http_directory_parser()
+    print(f"8. HTTP dir listing parse, Apache <pre>, n=1000 (ms/parse): {t_parser_pre:.4f}ms")
+    print(f"9. HTTP dir listing parse, nginx <table>, n=1000 (ms/parse): {t_parser_table:.4f}ms")
+
     # Print Markdown table format for copy-pasting
     print("\n| Benchmark Case | Time / Metric |")
     print("|---|---|")
@@ -209,6 +281,8 @@ def main():
     print(f"| LocalPath vs Stdlib (2k stat) | Local: {t_local:.4f}s, Stdlib: {t_std:.4f}s (Ratio: {ratio:.2f}x) |")
     print(f"| HTTP Glob (10) | {t_http_glob:.4f}s |")
     print(f"| HTTP Walk (10) | {t_http_walk:.4f}s |")
+    print(f"| HTTP dir listing parse, Apache <pre> (n=1000) | {t_parser_pre:.4f}ms/parse |")
+    print(f"| HTTP dir listing parse, nginx <table> (n=1000) | {t_parser_table:.4f}ms/parse |")
 
 if __name__ == "__main__":
     main()
