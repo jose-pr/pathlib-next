@@ -18,7 +18,7 @@ Run directly:
 import os
 import sys
 
-from pathlib_next.uri.schemes.gitrepo import GitLabPath, RepoBackend
+from pathlib_next.uri.schemes.gitlab import GitLabPath, RepoBackend
 
 
 def list_gitlab(host: str, owner_repo: str, path: str, ref: str, token: str):

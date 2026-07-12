@@ -1,7 +1,7 @@
 """Scheme-specific coverage for `github:`/`gitlab:` beyond the shared
 `ReadPathContract` wiring in test_contract.py: ref plumbing (including
 through `iterdir()`, which the base `Uri._make_child_relpath` would
-otherwise silently drop -- see `gitrepo.py`'s `_RepoApiPath._make_child_relpath`),
+otherwise silently drop -- see `_gitrepo.py`'s `_RepoApiPath._make_child_relpath`),
 error translation (404/401/403/rate-limit), owner/repo/ref parsing, the
 GitHub Enterprise API-base split, and GitLab's dir-vs-file stat
 disambiguation.
@@ -15,7 +15,10 @@ import pytest
 
 pytest.importorskip("requests")
 
-from pathlib_next.uri.schemes.gitrepo import GitHubPath, GitLabPath, RepoBackend
+from pathlib_next.uri.schemes.github import GitHubPath, RepoBackend
+from pathlib_next.uri.schemes.git import GitHubGitPath, GitLabGitPath
+from pathlib_next.uri.schemes.gitlab import GitLabPath
+from pathlib_next.uri import UriPath
 
 
 def _github(server, path="", **kwargs):
@@ -69,6 +72,28 @@ def test_github_public_api_base():
 def test_gitlab_api_base_always_v4():
     p = GitLabPath("gitlab://gitlab.example.com/acme/widgets")
     assert p._api_base == "https://gitlab.example.com/api/v4"
+
+
+def test_git_scheme_dispatches_by_public_host():
+    assert type(UriPath("git://github.com/acme/widgets")) is GitHubPath
+    assert type(UriPath("git://WWW.GitHub.COM/acme/widgets")) is GitHubPath
+    assert type(UriPath("git://gitlab.com/acme/widgets")) is GitLabPath
+    assert type(UriPath("git+github://github.com/acme/widgets")) is GitHubGitPath
+    assert type(UriPath("git+gitlab://gitlab.com/acme/widgets")) is GitLabGitPath
+
+
+def test_git_scheme_explicit_hosts_use_provider_api_bases():
+    assert UriPath("git+github://ghe.internal/acme/widgets")._api_base == "https://ghe.internal/api/v3"
+    assert UriPath("git+gitlab://gitlab.internal/acme/widgets")._api_base == "https://gitlab.internal/api/v4"
+
+
+@pytest.mark.parametrize("uri", ["git://ghe.internal/acme/widgets", "git:"])
+def test_git_scheme_raises_for_ambiguous_hosts(uri):
+    with pytest.raises(ValueError) as excinfo:
+        UriPath(uri)
+    message = str(excinfo.value)
+    assert "git+github:" in message
+    assert "git+gitlab:" in message
 
 
 def test_token_from_userinfo():
@@ -173,6 +198,20 @@ def test_gitlab_scandir_blob_entries_have_no_stat_hint(gitlab_api_server):
 def test_gitlab_nested_directory_stat(gitlab_api_server):
     p = _gitlab(gitlab_api_server, "sub/nested")
     assert p.stat().is_dir()
+
+
+def test_git_scheme_ref_survives_iterdir_child(github_api_server):
+    backend = RepoBackend(api_base=github_api_server[0])
+    root = UriPath("git://github.com/acme/widgets?ref=other-branch", backend=backend)
+    child = next(p for p in root.iterdir() if p.name == "a.txt")
+    assert type(child) is GitHubPath
+    assert child.ref == "other-branch"
+    assert child.read_bytes() == b"a-on-other-branch"
+
+
+def test_git_scheme_token_auth_works():
+    p = UriPath("git://TOKEN@github.com/acme/widgets")
+    assert p.backend.token == "TOKEN"
 
 
 # --- error translation ----------------------------------------------------

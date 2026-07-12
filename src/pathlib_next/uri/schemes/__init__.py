@@ -20,3 +20,15 @@ try:
     from .s3 import S3Path as S3Path
 except ImportError:
     pass
+try:
+    from .github import GitHubPath as GitHubPath
+except ImportError:
+    pass
+try:
+    from .gitlab import GitLabPath as GitLabPath
+except ImportError:
+    pass
+try:
+    from .git import GitPath as GitPath
+except ImportError:
+    pass

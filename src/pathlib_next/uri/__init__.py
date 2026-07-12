@@ -120,7 +120,7 @@ class Uri(Pathname):
 
     @classmethod
     def _parse_uri(cls, uri: str) -> tuple[Source, str, Query, str]:
-        # One-pass component extraction (uri_parse_perf.md): urisplit()'s
+        # One-pass component extraction: urisplit()'s
         # raw SplitResult fields used directly, authority split once via
         # _split_authority() instead of three independent get*() calls
         # each re-parsing it from scratch. Semantics are provably
@@ -236,7 +236,7 @@ class Uri(Pathname):
         /,
         sanitize=True,
     ) -> str:
-        # Direct string assembly (uri_parse_perf.md Phase 2) instead of
+        # Direct string assembly instead of
         # uricompose()'s full re-validation -- source/path/query/fragment
         # here always came from a parse or our own normalized join state,
         # never arbitrary untrusted input. See source.py's _compose_uri
@@ -486,7 +486,7 @@ class UriPath(Uri, Path):
     and set `__SCHEMES` to add a new scheme (Track B of extending this
     library; see `docs/guides/extending.md`); implement the I/O surface
     (`_listdir` or `_scandir`, `stat`, `_open`, ...) documented in
-    `AGENTS.md`. Prefer overriding `_scandir()` over `_listdir()` when the
+    `docs/guides/extending.md`. Prefer overriding `_scandir()` over `_listdir()` when the
     listing call already returns type/size/mtime metadata (PROPFIND, MLSD,
     `listdir_attr`, an S3 list page, ...) -- `walk()`/`glob()` then answer
     `is_dir()` on the results for free, without a stat request per entry."""
@@ -563,8 +563,11 @@ class UriPath(Uri, Path):
             "s3": "pathlib_next.uri.schemes.s3",
             "gs": "pathlib_next.uri.schemes.gs",
             "az": "pathlib_next.uri.schemes.az",
-            "github": "pathlib_next.uri.schemes.gitrepo",
-            "gitlab": "pathlib_next.uri.schemes.gitrepo",
+            "github": "pathlib_next.uri.schemes.github",
+            "gitlab": "pathlib_next.uri.schemes.gitlab",
+            "git": "pathlib_next.uri.schemes.git",
+            "git+github": "pathlib_next.uri.schemes.git",
+            "git+gitlab": "pathlib_next.uri.schemes.git",
         }
         module_name = _BUILTIN_SCHEMES.get(scheme)
         if module_name:

@@ -43,8 +43,11 @@ sftp = "pathlib_next.uri.schemes.sftp:SftpPath"
 s3 = "pathlib_next.uri.schemes.s3:S3Path"
 gs = "pathlib_next.uri.schemes.gs:GsPath"
 az = "pathlib_next.uri.schemes.az:AzPath"
-github = "pathlib_next.uri.schemes.gitrepo:GitHubPath"
-gitlab = "pathlib_next.uri.schemes.gitrepo:GitLabPath"
+github = "pathlib_next.uri.schemes.github:GitHubPath"
+gitlab = "pathlib_next.uri.schemes.gitlab:GitLabPath"
+git = "pathlib_next.uri.schemes.git:GitPath"
+"git+github" = "pathlib_next.uri.schemes.git:GitHubGitPath"
+"git+gitlab" = "pathlib_next.uri.schemes.git:GitLabGitPath"
 
 [project.urls]
 Homepage = "https://github.com/jose-pr/pathlib_next/"

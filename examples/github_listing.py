@@ -17,7 +17,7 @@ Run directly:
 import os
 import sys
 
-from pathlib_next.uri.schemes.gitrepo import GitHubPath, RepoBackend
+from pathlib_next.uri.schemes.github import GitHubPath, RepoBackend
 
 
 def list_github(owner_repo: str, path: str, ref: str, token: str):

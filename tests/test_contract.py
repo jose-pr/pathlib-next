@@ -3,7 +3,7 @@
 This is the reusable "one test class, many backends" pattern the project
 wants third-party implementers (custom Path subclasses like MemPath, or
 UriPath schemes) to be able to run against their own implementation -- see
-AGENTS.md's Track A/Track B.
+`docs/guides/extending.md`.
 """
 import os
 import pytest
@@ -158,7 +158,7 @@ class TestGitHubContract(ReadPathContract):
     @pytest.fixture
     def root(self, github_api_server):
         pytest.importorskip("requests")
-        from pathlib_next.uri.schemes.gitrepo import GitHubPath, RepoBackend
+        from pathlib_next.uri.schemes.github import GitHubPath, RepoBackend
 
         base_url, owner, repo = github_api_server
         backend = RepoBackend(api_base=base_url)
@@ -171,7 +171,7 @@ class TestGitLabContract(ReadPathContract):
     @pytest.fixture
     def root(self, gitlab_api_server):
         pytest.importorskip("requests")
-        from pathlib_next.uri.schemes.gitrepo import GitLabPath, RepoBackend
+        from pathlib_next.uri.schemes.gitlab import GitLabPath, RepoBackend
 
         base_url, owner, repo = gitlab_api_server
         backend = RepoBackend(api_base=f"{base_url}/api/v4")
@@ -253,4 +253,3 @@ class TestAzContract(PathContract):
     def root(self, az_server):
         pytest.importorskip("azure.storage.blob")
         return az_server[0]
-

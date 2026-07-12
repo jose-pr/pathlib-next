@@ -125,7 +125,9 @@ Notes:
   a real per-file lookup rather than guessing a size. Both are read-only
   (writing goes through an entirely different commits API, out of scope) and
   report no mtime (would need a separate, expensive commits-history call).
-  See `pathlib_next.uri.schemes.gitrepo`.
+  See `pathlib_next.uri.schemes.github` and
+  `pathlib_next.uri.schemes.gitlab`.
+- **`git:`** is a convenience catch-all over the same providers. It auto-detects only the public SaaS hosts (`github.com` / `gitlab.com`), so `git://github.com/...` and `git://gitlab.com/...` work, but self-hosted or enterprise hosts must use the explicit `github:`/`gitlab:` schemes or the pinned `git+github:`/`git+gitlab:` forms. `git:` keeps the same `?ref=` and auth behavior as the provider schemes; it only changes the entry point.
 - See [Divergences from pathlib](../divergences.md) for the "explicitly out
   of scope" list (`resolve`, `symlink_to`, `owner`, `expanduser`, ...) that
   applies uniformly across every non-`LocalPath` implementation.
