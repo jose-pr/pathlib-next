@@ -335,9 +335,25 @@ def unused_tcp_port():
 @pytest.fixture
 def ftp_server(fixture_tree):
     import threading
-    from pyftpdlib.authorizers import DummyAuthorizer
-    from pyftpdlib.handlers import FTPHandler
-    from pyftpdlib.servers import FTPServer
+    import warnings
+
+    with warnings.catch_warnings():
+        # pyftpdlib still imports asyncore/asynchat on Python 3.10/3.11,
+        # which we don't control and which should not fail our own test
+        # suite under global "warnings as errors".
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*asyncore module is deprecated.*",
+            category=DeprecationWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*asynchat module is deprecated.*",
+            category=DeprecationWarning,
+        )
+        from pyftpdlib.authorizers import DummyAuthorizer
+        from pyftpdlib.handlers import FTPHandler
+        from pyftpdlib.servers import FTPServer
 
     authorizer = DummyAuthorizer()
     authorizer.add_user("user", "12345", str(fixture_tree), perm="elradfmwMT")

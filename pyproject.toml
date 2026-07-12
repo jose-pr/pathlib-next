@@ -66,9 +66,9 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 filterwarnings = [
     "error",
-    # boto3 emits PythonDeprecationWarning on Python 3.9 (EOL notice); not our bug.
-    # It inherits from Warning directly, not DeprecationWarning.
-    "ignore::boto3.exceptions.PythonDeprecationWarning",
+    # boto3 emits a Python 3.9 EOL notice warning; filter by module/message
+    # so pytest doesn't need boto3 importable just to parse the warning rule.
+    "ignore:.*Python 3\\.9.*:Warning:boto3(\\..*)?$",
     # ResourceWarnings from daemon-thread server sockets cleaned up by GC at
     # session teardown are expected; suppress to keep output readable.
     "ignore::ResourceWarning",
