@@ -152,6 +152,32 @@ class TestS3Contract(PathContract):
         return S3Path(url)
 
 
+# GitHub contract — in-process fake contents-API server (see conftest.py's
+# github_api_server); read-only (commits-API writes are out of scope).
+class TestGitHubContract(ReadPathContract):
+    @pytest.fixture
+    def root(self, github_api_server):
+        pytest.importorskip("requests")
+        from pathlib_next.uri.schemes.gitrepo import GitHubPath, RepoBackend
+
+        base_url, owner, repo = github_api_server
+        backend = RepoBackend(api_base=base_url)
+        return GitHubPath(f"github://github.com/{owner}/{repo}", backend=backend)
+
+
+# GitLab contract — in-process fake REST v4 server (see conftest.py's
+# gitlab_api_server); read-only.
+class TestGitLabContract(ReadPathContract):
+    @pytest.fixture
+    def root(self, gitlab_api_server):
+        pytest.importorskip("requests")
+        from pathlib_next.uri.schemes.gitrepo import GitLabPath, RepoBackend
+
+        base_url, owner, repo = gitlab_api_server
+        backend = RepoBackend(api_base=f"{base_url}/api/v4")
+        return GitLabPath(f"gitlab://gitlab.com/{owner}/{repo}", backend=backend)
+
+
 # SFTP contract — in-process asyncssh-backed server (see conftest.py's
 # sftp_server), parametrized across both CLIENT backends: paramiko and
 # asyncssh. The test server is the same regardless of which client backend
@@ -209,4 +235,22 @@ class TestSftpContract(PathContract):
             # (its server just closed, in sftp_server's own teardown)
             # sitting in the cache until an unrelated future eviction.
             _backend_mod._CACHE.invalidate((backend, path.source))
+
+
+# GCS contract — in-process fake JSON REST server (see conftest.py's
+# gcs_api_server); full read/write.
+class TestGsContract(PathContract):
+    @pytest.fixture
+    def root(self, gs_server):
+        pytest.importorskip("google.cloud.storage")
+        return gs_server[0]
+
+
+# Azure Blob contract — in-process fake XML REST server (see conftest.py's
+# az_api_server); full read/write.
+class TestAzContract(PathContract):
+    @pytest.fixture
+    def root(self, az_server):
+        pytest.importorskip("azure.storage.blob")
+        return az_server[0]
 

@@ -21,6 +21,8 @@ http = ["requests", "pathlib_next[uri]"]
 sftp = ["paramiko", "pathlib_next[uri]"]
 sftp-async = ["asyncssh<2.22; python_version<'3.10'", "asyncssh; python_version>='3.10'", "pathlib_next[uri]"]
 s3 = ["boto3", "pathlib_next[uri]"]
+gs = ["google-cloud-storage", "pathlib_next[uri]"]
+az = ["azure-storage-blob", "pathlib_next[uri]"]
 dev = ['build', 'twine', 'hatchling', 'pytest', 'pytest-cov', 'pyftpdlib', 'wsgidav', 'cheroot', 'moto[s3]', 'hypothesis']
 docs = ['mkdocs', 'mkdocs-material', 'mkdocstrings[python]']
 
@@ -39,6 +41,10 @@ dav = "pathlib_next.uri.schemes.dav:DavPath"
 davs = "pathlib_next.uri.schemes.dav:DavPath"
 sftp = "pathlib_next.uri.schemes.sftp:SftpPath"
 s3 = "pathlib_next.uri.schemes.s3:S3Path"
+gs = "pathlib_next.uri.schemes.gs:GsPath"
+az = "pathlib_next.uri.schemes.az:AzPath"
+github = "pathlib_next.uri.schemes.gitrepo:GitHubPath"
+gitlab = "pathlib_next.uri.schemes.gitrepo:GitLabPath"
 
 [project.urls]
 Homepage = "https://github.com/jose-pr/pathlib_next/"

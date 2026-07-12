@@ -6,17 +6,17 @@ meaningful for a read-only scheme) -- everything else (name/suffix parsing,
 `glob()`, `walk()`, `copy()`, ...) is derived from these primitives and
 works identically across all of them.
 
-| Capability | `LocalPath` | `file:` (`FileUri`) | `mem:` (`MemPath`) | `http(s):` (`HttpPath`) | `sftp:` (`SftpPath`) | `data:` (`DataUri`) | `ftp(s):` (`FtpPath`) | `zip:` (`ZipUri`) | `tar:` (`TarUri`) | `archive:`/`archive+<fmt>:` (`ArchiveUri`) | `dav(s):` (`DavPath`) | `s3:` (`S3Path`) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Read (`read_text`/`read_bytes`/`open`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Write (`write_text`/`write_bytes`/`open("w")`) | Yes | Yes | Yes | Yes (PUT, configurable) | Yes | No | Yes | New/overwritten entries, local outer archive only | No | Same as `zip:`, only if the outer resolves/is detected as zip | Yes | Yes |
-| List (`iterdir`) | Yes | Yes | Yes | Yes (scrapes an HTML index) | Yes | No (`NotADirectoryError`) | Yes (MLSD, falls back to NLST) | Yes | Yes | Yes | Yes (PROPFIND) | Yes (prefix + delimiter emulation) |
-| Stat (`stat`, `exists`, `is_dir`, `is_file`, ...) | Yes | Yes | Yes | Yes (via `HEAD`, falls back to `GET`) | Yes | Yes (`st_size` from decoded payload) | Yes (MLSD, falls back to SIZE for files) | Yes | Yes | Yes | Yes (PROPFIND) | Yes (`is_dir` is prefix emulation) |
-| `mkdir` | Yes | Yes | Yes | No | Yes | No | Yes | Local outer archive only (zero-length `name/` entry) | No | Same as `zip:`, zip-detected only | Yes (MKCOL) | Yes (zero-byte `key/` marker object) |
-| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | Yes (DELETE) | Yes | No | Yes | Yes (local outer archive only) | No | Same as `zip:`, zip-detected only | Yes (`rmdir` requires empty, see notes) | Yes (`rmdir` requires empty prefix) |
-| `rename` | Yes | Yes | No (`move()` falls back to copy+unlink) | No | Yes | No | Yes | Yes (local outer archive only) | No | Same as `zip:`, zip-detected only | Yes (MOVE) | Yes (server-side `copy_object`+delete, same bucket) |
-| `chmod` | Yes | Yes | No | No | Yes (`follow_symlinks=False` works on the asyncssh backend, not paramiko -- see notes) | No | Yes (`SITE CHMOD`, server-dependent) | No | No | No | No | No |
-| Extra required | none | none | none | `http` | `sftp` | none (stdlib) | none (stdlib `ftplib`) | none (stdlib `zipfile`) | none (stdlib `tarfile`) | none (reuses `zip:`/`tar:`) | `http` (reused) | `s3` |
+| Capability | `LocalPath` | `file:` (`FileUri`) | `mem:` (`MemPath`) | `http(s):` (`HttpPath`) | `sftp:` (`SftpPath`) | `data:` (`DataUri`) | `ftp(s):` (`FtpPath`) | `zip:` (`ZipUri`) | `tar:` (`TarUri`) | `archive:`/`archive+<fmt>:` (`ArchiveUri`) | `dav(s):` (`DavPath`) | `s3:` (`S3Path`) | `gs:` (`GsPath`) | `az:` (`AzPath`) | `github:` (`GitHubPath`) | `gitlab:` (`GitLabPath`) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Read (`read_text`/`read_bytes`/`open`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Write (`write_text`/`write_bytes`/`open("w")`) | Yes | Yes | Yes | Yes (PUT, configurable) | Yes | No | Yes | New/overwritten entries, local outer archive only | No | Same as `zip:`, only if the outer resolves/is detected as zip | Yes | Yes | Yes | Yes | No | No |
+| List (`iterdir`) | Yes | Yes | Yes | Yes (scrapes an HTML index) | Yes | No (`NotADirectoryError`) | Yes (MLSD, falls back to NLST) | Yes | Yes | Yes | Yes (PROPFIND) | Yes (prefix + delimiter emulation) | Yes (prefix + delimiter emulation) | Yes (prefix + delimiter emulation) | Yes (contents API) | Yes (tree API) |
+| Stat (`stat`, `exists`, `is_dir`, `is_file`, ...) | Yes | Yes | Yes | Yes (via `HEAD`, falls back to `GET`) | Yes | Yes (`st_size` from decoded payload) | Yes (MLSD, falls back to SIZE for files) | Yes | Yes | Yes | Yes (PROPFIND) | Yes (`is_dir` is prefix emulation) | Yes (`is_dir` is prefix emulation, no mtime) | Yes (`is_dir` is prefix emulation, no mtime) | Yes (no mtime) | Yes (no mtime) |
+| `mkdir` | Yes | Yes | Yes | No | Yes | No | Yes | Local outer archive only (zero-length `name/` entry) | No | Same as `zip:`, zip-detected only | Yes (MKCOL) | Yes (zero-byte `key/` marker object) | Yes (zero-byte `key/` marker object) | Yes (zero-byte `key/` marker object) | No | No |
+| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | Yes (DELETE) | Yes | No | Yes | Yes (local outer archive only) | No | Same as `zip:`, zip-detected only | Yes (`rmdir` requires empty, see notes) | Yes (`rmdir` requires empty prefix) | Yes (`rmdir` requires empty prefix) | Yes (`rmdir` requires empty prefix) | No | No |
+| `rename` | Yes | Yes | No (`move()` falls back to copy+unlink) | No | Yes | No | Yes | Yes (local outer archive only) | No | Same as `zip:`, zip-detected only | Yes (MOVE) | Yes (server-side `copy_object`+delete, same bucket) | Yes (server-side copy+delete, same bucket) | Yes (server-side copy+delete, same container) | No | No |
+| `chmod` | Yes | Yes | No | No | Yes (`follow_symlinks=False` works on the asyncssh backend, not paramiko -- see notes) | No | Yes (`SITE CHMOD`, server-dependent) | No | No | No | No | No | No | No | No | No |
+| Extra required | none | none | none | `http` | `sftp` | none (stdlib) | none (stdlib `ftplib`) | none (stdlib `zipfile`) | none (stdlib `tarfile`) | none (reuses `zip:`/`tar:`) | `http` (reused) | `s3` | `gs` | `az` | `http` (reused) | `http` (reused) |
 
 Notes:
 
@@ -98,6 +98,34 @@ Notes:
   as `dav:`'s `rmdir()` above). A single `boto3` client is cached per
   backend (documented thread-safe, unlike `sftp:`/`ftp:`'s per-thread
   connection pools).
+- **`gs:`** (`gs://bucket/key/path`, Google Cloud Storage) and **`az:`**
+  (`az://account/container/key/path`, Azure Blob Storage) follow the same
+  prefix-emulation directory model as `s3:` -- `is_dir()` checks for any
+  blobs under `"<path>/"`, `mkdir()` creates a zero-byte marker blob,
+  `rmdir()` enforces empty (same semantics). Each backend caches one
+  service client per instance (thread-safe for both GCS and Azure SDKs).
+  Both report no mtime (would require metadata-only calls; `st_mtime` is 0).
+  See `pathlib_next.uri.schemes.gs` and `pathlib_next.uri.schemes.az`.
+- **`github:`/`gitlab:`** (`<scheme>://host/owner/repo/path/in/repo?ref=<ref>`)
+  are read-only views of a git-hosting repository tree over plain `requests`
+  (no PyGithub/python-gitlab SDK). `ref` (branch/tag/SHA) is always optional
+  in the `?ref=` query string; omitted, `github:` falls back to the repo's
+  default branch server-side for free, while `gitlab:` resolves and caches
+  the default branch itself via one extra `GET /projects/:id` call (GitLab's
+  file-content endpoints 400 if `ref` is omitted entirely, unlike its tree
+  endpoint -- see `docs/divergences.md`). `host` defaults to `github.com`/
+  `gitlab.com`; any other host is treated as GitHub Enterprise (API at
+  `https://{host}/api/v3`) or a self-hosted GitLab (`https://{host}/api/v4`).
+  Auth: a bearer token via `RepoBackend(token=...)` or embedded as URI
+  userinfo (`github://TOKEN@github.com/owner/repo`). `GitHubPath` gets full
+  listing metadata (type/size) from one contents-API call per directory and
+  fetches file bodies via the `raw` media type (skips base64 and its ~1MB
+  inline-content cap); `GitLabPath`'s tree API has no size field, so only
+  directory entries get a pre-seeded `stat()` hint, file entries fall back to
+  a real per-file lookup rather than guessing a size. Both are read-only
+  (writing goes through an entirely different commits API, out of scope) and
+  report no mtime (would need a separate, expensive commits-history call).
+  See `pathlib_next.uri.schemes.gitrepo`.
 - See [Divergences from pathlib](../divergences.md) for the "explicitly out
   of scope" list (`resolve`, `symlink_to`, `owner`, `expanduser`, ...) that
   applies uniformly across every non-`LocalPath` implementation.

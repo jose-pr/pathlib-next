@@ -561,6 +561,10 @@ class UriPath(Uri, Path):
             "davs": "pathlib_next.uri.schemes.dav",
             "sftp": "pathlib_next.uri.schemes.sftp",
             "s3": "pathlib_next.uri.schemes.s3",
+            "gs": "pathlib_next.uri.schemes.gs",
+            "az": "pathlib_next.uri.schemes.az",
+            "github": "pathlib_next.uri.schemes.gitrepo",
+            "gitlab": "pathlib_next.uri.schemes.gitrepo",
         }
         module_name = _BUILTIN_SCHEMES.get(scheme)
         if module_name:

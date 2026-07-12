@@ -439,3 +439,583 @@ def sftp_server(fixture_tree):
         loop.call_soon_threadsafe(server.close)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=5)
+
+
+def _build_git_tree(local_dir):
+    """Flatten a local directory into a git-tree-shaped {posix relpath:
+    bytes} dict for the fake GitHub/GitLab servers below. Git has no
+    concept of an empty directory (no tree entry can represent one with no
+    blobs under it) -- a truly empty dir (fixture_tree's `empty_dir/`)
+    would vanish from any listing derived purely from blob-path prefixes,
+    so a `.gitkeep`-style placeholder blob is synthesized under it here,
+    same as a real repo author would have to do. This only affects the
+    fake server's in-memory tree, never `fixture_tree` itself."""
+    import pathlib
+
+    local_dir = pathlib.Path(local_dir)
+    tree = {}
+    for path in sorted(local_dir.rglob("*")):
+        rel = path.relative_to(local_dir).as_posix()
+        if path.is_dir():
+            if not any(path.iterdir()):
+                tree[f"{rel}/.gitkeep"] = b""
+        else:
+            tree[rel] = path.read_bytes()
+    return tree
+
+
+def _git_tree_children(tree, prefix):
+    """Immediate children of `prefix` ("" for root) in a `_build_git_tree`
+    dict -- name -> "dir"/"file", mirroring how GitHub's contents API and
+    GitLab's tree API both report one directory level at a time."""
+    prefix = f"{prefix}/" if prefix else ""
+    children = {}
+    for key in tree:
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix) :]
+        if not rest:
+            continue
+        name, sep, _ = rest.partition("/")
+        children[name] = "dir" if sep else "file"
+    return children
+
+
+@pytest.fixture
+def github_api_server(fixture_tree):
+    """Faithful (not mocked) fake of the subset of the GitHub REST contents
+    API (`GET /repos/{owner}/{repo}/contents/{path}`) that `GitHubPath`
+    actually calls: directory listing (JSON array), file metadata
+    (JSON object, base64 `content`), and raw file bodies (`Accept:
+    .../vnd.github.raw+json`). Two refs are served (`main` the default,
+    `other-branch` with a divergent `a.txt`) so ref plumbing is verified
+    end-to-end, not just default-branch reads. Yields
+    `(base_url, owner, repo)`."""
+    import base64
+    import json
+    import urllib.parse
+
+    main_tree = _build_git_tree(fixture_tree)
+    other_tree = dict(main_tree)
+    other_tree["a.txt"] = b"a-on-other-branch"
+    refs = {"main": main_tree, "other-branch": other_tree}
+    owner, repo = "acme", "widgets"
+
+    class _GitHubApiHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
+            ref = qs.get("ref", ["main"])[0]
+            tree = refs.get(ref)
+            if tree is None:
+                self._send_json(404, {"message": "Not Found"})
+                return
+
+            prefix = f"/repos/{owner}/{repo}/contents"
+            if split.path == prefix:
+                subpath = ""
+            elif split.path.startswith(prefix + "/"):
+                subpath = urllib.parse.unquote(split.path[len(prefix) + 1 :])
+            else:
+                self._send_json(404, {"message": "Not Found"})
+                return
+
+            if subpath in tree:
+                self._send_file(subpath, tree[subpath])
+                return
+
+            children = _git_tree_children(tree, subpath)
+            if children or subpath == "":
+                entries = []
+                for name, kind in sorted(children.items()):
+                    childpath = f"{subpath}/{name}" if subpath else name
+                    size = len(tree.get(childpath, b"")) if kind == "file" else 0
+                    entries.append(
+                        {"name": name, "path": childpath, "type": kind, "size": size}
+                    )
+                self._send_json(200, entries)
+                return
+
+            self._send_json(404, {"message": "Not Found"})
+
+        def _send_file(self, subpath, content):
+            accept = self.headers.get("Accept", "")
+            if "raw" in accept:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            self._send_json(
+                200,
+                {
+                    "name": subpath.rsplit("/", 1)[-1],
+                    "path": subpath,
+                    "type": "file",
+                    "size": len(content),
+                    "encoding": "base64",
+                    "content": base64.b64encode(content).decode(),
+                },
+            )
+
+        def _send_json(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _GitHubApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", owner, repo
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def gitlab_api_server(fixture_tree):
+    """Faithful (not mocked) fake of the subset of the GitLab REST API v4
+    that `GitLabPath` actually calls: `.../repository/tree` (listing, no
+    size -- matches the real endpoint's shape), `.../repository/files/:path`
+    (file metadata) and `.../repository/files/:path/raw` (file body). Yields
+    `(base_url, owner, repo)`."""
+    import json
+    import urllib.parse
+
+    tree = _build_git_tree(fixture_tree)
+    owner, repo = "acme", "widgets"
+    project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
+
+    class _GitLabApiHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
+
+            # `GET /projects/:id` (default_branch lookup) -- no "/repository/"
+            # suffix, must be checked before the repository-scoped prefix below.
+            if split.path == f"/api/v4/projects/{project_id}":
+                self._send_json(200, {"default_branch": "main"})
+                return
+
+            prefix = f"/api/v4/projects/{project_id}/repository/"
+
+            if not split.path.startswith(prefix):
+                self._send_json(404, {"message": "404 Not Found"})
+                return
+            rest = split.path[len(prefix) :]
+
+            if rest == "tree":
+                path = qs.get("path", [""])[0]
+                children = _git_tree_children(tree, path)
+                entries = [
+                    {
+                        "id": f"fake-{name}",
+                        "name": name,
+                        "type": "tree" if kind == "dir" else "blob",
+                        "path": f"{path}/{name}" if path else name,
+                        "mode": "040000" if kind == "dir" else "100644",
+                    }
+                    for name, kind in sorted(children.items())
+                ]
+                self._send_json(200, entries)
+                return
+
+            if rest.startswith("files/"):
+                filerest = rest[len("files/") :]
+                raw = filerest.endswith("/raw")
+                encoded_path = filerest[: -len("/raw")] if raw else filerest
+                path = urllib.parse.unquote(encoded_path)
+                # Real GitLab requires `ref` on the files endpoints (both
+                # metadata and /raw) -- omitting it is a 400, not a
+                # default-branch fallback like the tree endpoint gets
+                # (confirmed live against gitlab.com; GitLabPath resolves
+                # and sends it, this just mirrors the real requirement).
+                if "ref" not in qs:
+                    self._send_json(400, {"error": "ref is missing, ref is empty"})
+                    return
+                content = tree.get(path)
+                if content is None:
+                    self._send_json(404, {"message": "404 File Not Found"})
+                    return
+                if raw:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
+                self._send_json(
+                    200,
+                    {
+                        "file_name": path.rsplit("/", 1)[-1],
+                        "file_path": path,
+                        "size": len(content),
+                    },
+                )
+                return
+
+            self._send_json(404, {"message": "404 Not Found"})
+
+        def _send_json(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _GitLabApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", owner, repo
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def gcs_api_server(fixture_tree):
+    """Faithful (not mocked) fake of the Google Cloud Storage JSON REST API
+    subset that `GsPath` actually calls: list, get, put, delete. Yields
+    `(base_url, bucket_name)`."""
+    import json
+    import urllib.parse
+    from pathlib_next.uri.schemes.gs import GsBackend
+
+    # Build an in-memory object store from fixture_tree
+    objects = {}
+    def populate_objects(path, prefix=""):
+        for item in path.iterdir():
+            rel = item.relative_to(fixture_tree)
+            key = str(rel).replace("\\", "/")
+            if item.is_file():
+                objects[key] = item.read_bytes()
+            else:
+                for subitem in item.rglob("*"):
+                    if subitem.is_file():
+                        rel = subitem.relative_to(fixture_tree)
+                        key = str(rel).replace("\\", "/")
+                        objects[key] = subitem.read_bytes()
+                break
+    populate_objects(fixture_tree)
+
+    bucket_name = "test-bucket"
+
+    class _GcsApiHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
+
+            # LIST: /storage/v1/b/{bucket}/o?prefix=&delimiter=/
+            if split.path == f"/storage/v1/b/{bucket_name}/o":
+                prefix = qs.get("prefix", [""])[0]
+                delimiter = qs.get("delimiter", [None])[0]
+                result = {"kind": "storage#objects", "items": [], "prefixes": []}
+                prefixes_set = set()
+                for key in sorted(objects.keys()):
+                    if key.startswith(prefix):
+                        rest = key[len(prefix):]
+                        if delimiter:
+                            parts = rest.split(delimiter, 1)
+                            if len(parts) > 1:
+                                pre = prefix + parts[0] + delimiter
+                                if pre not in prefixes_set:
+                                    prefixes_set.add(pre)
+                                    result["prefixes"].append(pre)
+                            else:
+                                result["items"].append({
+                                    "kind": "storage#object",
+                                    "name": key,
+                                    "size": str(len(objects[key])),
+                                    "updated": "2026-07-12T00:00:00Z",
+                                })
+                        else:
+                            result["items"].append({
+                                "kind": "storage#object",
+                                "name": key,
+                                "size": str(len(objects[key])),
+                                "updated": "2026-07-12T00:00:00Z",
+                            })
+                self._send_json(200, result)
+                return
+
+            # GET metadata: /storage/v1/b/{bucket}/o/{object}
+            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/"):
+                obj_name = urllib.parse.unquote(split.path[len(f"/storage/v1/b/{bucket_name}/o/"):])
+                if obj_name in objects:
+                    self._send_json(200, {
+                        "kind": "storage#object",
+                        "name": obj_name,
+                        "size": str(len(objects[obj_name])),
+                        "updated": "2026-07-12T00:00:00Z",
+                    })
+                    return
+                self._send_json(404, {})
+                return
+
+            # GET raw body: /storage/v1/b/{bucket}/o/{object}?alt=media
+            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/") and qs.get("alt") == ["media"]:
+                obj_name = urllib.parse.unquote(split.path[len(f"/storage/v1/b/{bucket_name}/o/"):])
+                if obj_name in objects:
+                    content = objects[obj_name]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
+                self._send_json(404, {})
+                return
+
+            # PUT (upload): /upload/storage/v1/b/{bucket}/o?uploadType=media&name=
+            if split.path == f"/upload/storage/v1/b/{bucket_name}/o":
+                obj_name = qs.get("name", [""])[0]
+                if obj_name:
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    objects[obj_name] = self.rfile.read(content_length)
+                    self._send_json(200, {
+                        "kind": "storage#object",
+                        "name": obj_name,
+                        "size": str(len(objects[obj_name])),
+                        "updated": "2026-07-12T00:00:00Z",
+                    })
+                    return
+                self._send_json(400, {})
+                return
+
+            # DELETE: /storage/v1/b/{bucket}/o/{object}
+            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/"):
+                obj_name = urllib.parse.unquote(split.path[len(f"/storage/v1/b/{bucket_name}/o/"):])
+                if obj_name in objects:
+                    del objects[obj_name]
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                self._send_json(404, {})
+                return
+
+            self._send_json(404, {})
+
+        def do_PUT(self):
+            # Delegate to GET handler for PUT uploads
+            self.do_GET()
+
+        def do_DELETE(self):
+            # Delegate to GET handler for DELETE
+            self.do_GET()
+
+        def _send_json(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _GcsApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        yield base_url, bucket_name
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def gs_server(gcs_api_server):
+    """GCS test server that returns configured BaseGsBackend and a GsPath."""
+    from pathlib_next.uri.schemes.gs import GsBackend, GsPath
+    base_url, bucket_name = gcs_api_server
+    backend = GsBackend(
+        client_options={"api_endpoint": base_url}
+    )
+    return GsPath(f"gs://{bucket_name}", backend=backend), backend
+
+
+@pytest.fixture
+def az_api_server(fixture_tree):
+    """Faithful (not mocked) fake of the Azure Blob Storage XML REST API
+    subset that `AzPath` actually calls. Yields `(base_url, account, container)`."""
+    import urllib.parse
+    from xml.etree import ElementTree as ET
+
+    objects = {}
+    def populate_objects(path, prefix=""):
+        for item in path.iterdir():
+            rel = item.relative_to(fixture_tree)
+            key = str(rel).replace("\\", "/")
+            if item.is_file():
+                objects[key] = item.read_bytes()
+            else:
+                for subitem in item.rglob("*"):
+                    if subitem.is_file():
+                        rel = subitem.relative_to(fixture_tree)
+                        key = str(rel).replace("\\", "/")
+                        objects[key] = subitem.read_bytes()
+                break
+    populate_objects(fixture_tree)
+
+    account = "testaccount"
+    container = "testcontainer"
+
+    class _AzApiHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
+
+            # LIST: /{account}/{container}?restype=container&comp=list
+            if (split.path == f"/{account}/{container}" and
+                qs.get("restype") == ["container"] and
+                qs.get("comp") == ["list"]):
+                prefix = qs.get("prefix", [""])[0]
+                delimiter = qs.get("delimiter", [None])[0]
+
+                root = ET.Element("EnumerationResults")
+                root.set("ContainerName", container)
+
+                blobs_elem = ET.SubElement(root, "Blobs")
+                prefixes_set = set()
+
+                for key in sorted(objects.keys()):
+                    if key.startswith(prefix):
+                        rest = key[len(prefix):]
+                        if delimiter:
+                            parts = rest.split(delimiter, 1)
+                            if len(parts) > 1:
+                                pre = prefix + parts[0] + delimiter
+                                if pre not in prefixes_set:
+                                    prefixes_set.add(pre)
+                                    pre_elem = ET.SubElement(root, "BlobPrefix")
+                                    name_elem = ET.SubElement(pre_elem, "Name")
+                                    name_elem.text = pre
+                            else:
+                                blob_elem = ET.SubElement(blobs_elem, "Blob")
+                                name_elem = ET.SubElement(blob_elem, "Name")
+                                name_elem.text = key
+                                props_elem = ET.SubElement(blob_elem, "Properties")
+                                size_elem = ET.SubElement(props_elem, "Content-Length")
+                                size_elem.text = str(len(objects[key]))
+                                mtime_elem = ET.SubElement(props_elem, "Last-Modified")
+                                mtime_elem.text = "2026-07-12T00:00:00Z"
+                        else:
+                            blob_elem = ET.SubElement(blobs_elem, "Blob")
+                            name_elem = ET.SubElement(blob_elem, "Name")
+                            name_elem.text = key
+                            props_elem = ET.SubElement(blob_elem, "Properties")
+                            size_elem = ET.SubElement(props_elem, "Content-Length")
+                            size_elem.text = str(len(objects[key]))
+                            mtime_elem = ET.SubElement(props_elem, "Last-Modified")
+                            mtime_elem.text = "2026-07-12T00:00:00Z"
+
+                body = ET.tostring(root, encoding="utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/xml")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            # GET blob or HEAD: /{account}/{container}/{blob}
+            if split.path.startswith(f"/{account}/{container}/"):
+                blob_name = urllib.parse.unquote(split.path[len(f"/{account}/{container}/"):])
+                if blob_name in objects:
+                    content = objects[blob_name]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.send_header("x-ms-blob-type", "BlockBlob")
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(content)
+                    return
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            self.send_response(404)
+            self.end_headers()
+
+        def do_HEAD(self):
+            # Delegate to GET
+            self.do_GET()
+
+        def do_PUT(self):
+            split = urllib.parse.urlsplit(self.path)
+
+            if split.path.startswith(f"/{account}/{container}/"):
+                blob_name = urllib.parse.unquote(split.path[len(f"/{account}/{container}/"):])
+                content_length = int(self.headers.get("Content-Length", 0))
+                objects[blob_name] = self.rfile.read(content_length)
+                self.send_response(201)
+                self.end_headers()
+                return
+
+            self.send_response(400)
+            self.end_headers()
+
+        def do_DELETE(self):
+            split = urllib.parse.urlsplit(self.path)
+
+            if split.path.startswith(f"/{account}/{container}/"):
+                blob_name = urllib.parse.unquote(split.path[len(f"/{account}/{container}/"):])
+                if blob_name in objects:
+                    del objects[blob_name]
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AzApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        yield base_url, account, container
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def az_server(az_api_server):
+    """Azure test server that returns configured BaseAzBackend and an AzPath."""
+    from pathlib_next.uri.schemes.az import AzBackend, AzPath
+    from azure.storage.blob import BlobServiceClient
+    base_url, account, container = az_api_server
+    conn_str = (
+        f"DefaultEndpointsProtocol=http;AccountName={account};"
+        f"AccountKey=dGVzdGtleQ==;BlobEndpoint={base_url}/{account};"
+    )
+    client = BlobServiceClient.from_connection_string(conn_str)
+    backend = AzBackend()
+    backend._client = client
+    return AzPath(f"az://{account}/{container}", backend=backend), backend
