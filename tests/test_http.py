@@ -5,8 +5,6 @@ entirely if the http extra isn't installed.
 import pytest
 
 pytest.importorskip("requests")
-pytest.importorskip("bs4")
-pytest.importorskip("htmllistparse")
 
 from pathlib_next.uri import UriPath
 
@@ -179,6 +177,7 @@ def test_http_rmdir_empty(monkeypatch):
     import requests
     monkeypatch.setattr(requests.Session, "request", mock_request)
     monkeypatch.setattr(HttpPath, "_listdir", lambda self: [])
+    monkeypatch.setattr(HttpPath, "is_dir", lambda self: True)
 
     p = UriPath("http://example.com/dir/")
     p.rmdir()
@@ -194,8 +193,118 @@ def test_http_rmdir_not_empty(monkeypatch):
     monkeypatch.setattr(
         HttpPath, "_listdir", lambda self: [_FileEntry("a.txt", None, None, None)]
     )
+    monkeypatch.setattr(HttpPath, "is_dir", lambda self: True)
 
     p = UriPath("http://example.com/dir/")
     with pytest.raises(OSError) as excinfo:
         p.rmdir()
     assert excinfo.value.errno == errno.ENOTEMPTY
+
+
+def test_http_rmdir_on_file_raises_notadirectoryerror(monkeypatch):
+    # rmdir() on a *file* must raise NotADirectoryError (matching
+    # os.rmdir()'s ENOTDIR contract), not silently DELETE it -- an empty
+    # directory's listing and a file whose body parses to zero entries are
+    # indistinguishable from _listdir() alone.
+    from pathlib_next.uri.schemes.http import HttpPath
+
+    monkeypatch.setattr(HttpPath, "is_dir", lambda self: False)
+
+    p = UriPath("http://example.com/file.txt")
+    with pytest.raises(NotADirectoryError):
+        p.rmdir()
+
+
+def test_http_write_stream_marks_closed_on_upload_failure(monkeypatch):
+    # A failed close() must not leave the stream open -- otherwise a
+    # later close() (context-manager __exit__, or GC via
+    # IOBase.__del__) silently retries the PUT.
+    import requests
+    from pathlib_next.uri.schemes.http import HttpWriteStream
+
+    calls = []
+
+    class MockResponse:
+        status_code = 500
+        reason = "Server Error"
+
+        def raise_for_status(self):
+            raise requests.exceptions.HTTPError(response=self)
+
+    def mock_request(self, method, url, **kwargs):
+        calls.append((method, url))
+        return MockResponse()
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/f.txt")
+    stream = HttpWriteStream(p)
+    stream.write(b"x")
+
+    with pytest.raises(OSError):
+        stream.close()
+    assert stream.closed
+
+    # a second close() must be a no-op, not another PUT attempt
+    stream.close()
+    assert len(calls) == 1
+
+
+class _MockHttpResponse:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+        self.content = text.encode()
+        self.reason = "OK" if status_code < 400 else "Not Found"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.exceptions.HTTPError(response=self)
+
+
+def test_listdir_retries_with_trailing_slash_on_404(monkeypatch):
+    # Real servers (incl. this repo's http_server fixture) 301-redirect a
+    # slash-less directory GET, and requests follows that automatically --
+    # but a non-redirecting server/proxy would just 404 the bare path. This
+    # mirrors stat()'s [no-slash, with-slash] retry so _listdir() is
+    # robust to that case too (Phase 2 decision: (b), kept minimal).
+    import requests
+
+    listing_html = (
+        "<html><body><pre>"
+        '<a href="../">../</a>\n'
+        '<a href="a.txt">a.txt</a>  11-Jul-2026 10:23   1K\n'
+        "</pre></body></html>"
+    )
+
+    def mock_request(self, method, url, **kwargs):
+        if url.endswith("/"):
+            return _MockHttpResponse(200, listing_html)
+        return _MockHttpResponse(404)
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/sub")
+    names = {e.name for e in p._listdir()}
+    assert names == {"a.txt"}
+
+
+def test_listdir_no_retry_when_already_trailing_slash(monkeypatch):
+    # A 404 on a path that already ends in "/" is a real 404, not a
+    # missing-redirect case -- must not retry (would just repeat the same
+    # request) and must propagate FileNotFoundError.
+    import requests
+
+    calls = []
+
+    def mock_request(self, method, url, **kwargs):
+        calls.append(url)
+        return _MockHttpResponse(404)
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+
+    p = UriPath("http://example.com/sub/")
+    with pytest.raises(FileNotFoundError):
+        p._listdir()
+    assert calls == ["http://example.com/sub/"]

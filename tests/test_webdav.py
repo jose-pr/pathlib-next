@@ -256,13 +256,33 @@ def test_chmod_not_implemented():
 
 def test_rmdir_nonempty_raises_oserror():
     session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/", "0")] = _FakeResponse(
+        207, _MULTISTATUS_DIR
+    )
     session.responses[("PROPFIND", "http://host/docs/", "1")] = _FakeResponse(
         207, _MULTISTATUS_LISTING
     )
     p = _dav("dav://host/docs/", session)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError) as excinfo:
         p.rmdir()
+    import errno
+    assert excinfo.value.errno == errno.ENOTEMPTY
     # must not have issued DELETE
+    assert not any(call[0] == "DELETE" for call in session.calls)
+
+
+def test_rmdir_on_file_raises_notadirectoryerror():
+    # rmdir() Phase 5/6 fix: a file must not be silently DELETEd -- a
+    # PROPFIND Depth:1 on a non-collection resource only returns the "."
+    # entry describing itself, which _scandir() filters out, so a file
+    # used to look exactly like an empty directory to _listdir() alone.
+    session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/readme.txt", "0")] = _FakeResponse(
+        207, _MULTISTATUS_FILE
+    )
+    p = _dav("dav://host/docs/readme.txt", session)
+    with pytest.raises(NotADirectoryError):
+        p.rmdir()
     assert not any(call[0] == "DELETE" for call in session.calls)
 
 
@@ -280,6 +300,9 @@ def test_rmdir_empty_deletes():
   </D:response>
 </D:multistatus>"""
     session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/", "0")] = _FakeResponse(
+        207, _MULTISTATUS_DIR
+    )
     session.responses[("PROPFIND", "http://host/docs/", "1")] = _FakeResponse(
         207, _MULTISTATUS_EMPTY
     )

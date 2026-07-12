@@ -1,6 +1,7 @@
 import functools
 import http.server
 import threading
+import time
 
 import pytest
 
@@ -61,6 +62,233 @@ def http_server(fixture_tree):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+class _CannedListingHandler(http.server.SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler with `list_directory()` overridden to emit
+    Apache-`<pre>`- or nginx-`<table>`-style listing HTML instead of the
+    stdlib's bare `<ul><li>` -- the real `http_server` fixture never
+    exercises `_DirectoryListingParser`'s two primary (non-fallback) code
+    paths at all, since SimpleHTTPRequestHandler only ever emits `<ul>`.
+    File GET/HEAD/redirect behavior is inherited unchanged from the stdlib
+    handler; only the directory-index HTML differs. `listing_format` is a
+    class attr set per-fixture via subclassing (not `functools.partial`,
+    since we need to override a method, not just bind __init__ args)."""
+
+    listing_format = "pre"  # or "table"
+
+    def list_directory(self, path):
+        import io
+        import os
+        import urllib.parse
+
+        try:
+            entries = os.listdir(path)
+        except OSError:
+            self.send_error(404, "No permission to list directory")
+            return None
+        entries.sort(key=lambda a: a.lower())
+
+        rows = []
+        for name in entries:
+            fullname = os.path.join(path, name)
+            is_dir = os.path.isdir(fullname)
+            displayname = name + ("/" if is_dir else "")
+            href = urllib.parse.quote(displayname)
+            st = os.stat(fullname)
+            mtime = time.strftime("%d-%b-%Y %H:%M:%S", time.localtime(st.st_mtime))
+            size = "-" if is_dir else str(st.st_size)
+            if self.listing_format == "pre":
+                pad = " " * max(1, 45 - len(displayname))
+                rows.append(f'<a href="{href}">{displayname}</a>{pad}{mtime}  {size}\n')
+            else:
+                rows.append(
+                    f'<tr><td><a href="{href}">{displayname}</a></td>'
+                    f"<td>{mtime}</td><td align=\"right\">{size}</td>"
+                    f"<td>&nbsp;</td></tr>\n"
+                )
+        body = "".join(rows)
+
+        title = f"Index of {self.path}"
+        if self.listing_format == "pre":
+            html = (
+                f"<html><head><title>{title}</title></head><body>"
+                f'<h1>{title}</h1><pre><a href="../">../</a>\n{body}</pre>'
+                "</body></html>"
+            )
+        else:
+            head = (
+                '<tr><th><a href="?C=N;O=D">Name</a></th>'
+                '<th><a href="?C=M;O=A">Last modified</a></th>'
+                '<th><a href="?C=S;O=A">Size</a></th><th>Description</th></tr>\n'
+                '<tr><th colspan="4"><hr></th></tr>\n'
+            )
+            parent = (
+                '<tr><td><a href="../">Parent Directory</a></td>'
+                '<td>&nbsp;</td><td align="right">-</td><td>&nbsp;</td></tr>\n'
+            )
+            html = (
+                f"<html><head><title>{title}</title></head><body>"
+                f"<h1>{title}</h1><table>\n{head}{parent}{body}"
+                "</table></body></html>"
+            )
+
+        encoded = html.encode("utf-8", "surrogateescape")
+        f = io.BytesIO(encoded)
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        return f
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _ApachePreListingHandler(_CannedListingHandler):
+    listing_format = "pre"
+
+
+class _NginxTableListingHandler(_CannedListingHandler):
+    listing_format = "table"
+
+
+def _start_canned_server(handler_cls, fixture_tree):
+    handler = functools.partial(handler_cls, directory=str(fixture_tree))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def http_server_apache_pre(fixture_tree):
+    """Like `http_server`, but directory listings are Apache
+    `mod_autoindex`-style `<pre>` HTML -- drives
+    `_DirectoryListingParser`'s `<pre>` code path end-to-end."""
+    yield from _start_canned_server(_ApachePreListingHandler, fixture_tree)
+
+
+@pytest.fixture
+def http_server_nginx_table(fixture_tree):
+    """Like `http_server`, but directory listings are nginx
+    `autoindex`-style `<table>` HTML -- drives
+    `_DirectoryListingParser`'s `<table>` code path end-to-end."""
+    yield from _start_canned_server(_NginxTableListingHandler, fixture_tree)
+
+
+@pytest.fixture
+def http_status_server():
+    """Serves canned status codes / delays on demand, driving
+    `_translate_http_errors` from real `requests` exceptions instead of
+    hand-constructed ones: GET/HEAD/PUT/DELETE `/<code>` returns that
+    status; `/timeout` sleeps past any client-side timeout. Yields the
+    base URL (no trailing slash)."""
+
+    class _StatusHandler(http.server.BaseHTTPRequestHandler):
+        def _handle(self):
+            path = self.path.lstrip("/")
+            if path == "timeout":
+                time.sleep(5)
+                return
+            try:
+                code = int(path)
+            except ValueError:
+                code = 404
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_GET = do_HEAD = do_PUT = do_DELETE = _handle
+
+        def log_message(self, format, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StatusHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class _WritableHandler(http.server.SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler + real PUT/DELETE against files on disk --
+    for a genuine write-then-read-back round trip. Existing
+    `test_http_write_*`/`test_http_unlink` tests only monkeypatch
+    `requests.Session.request` and assert the request was sent; they never
+    verify data actually persists server-side."""
+
+    def do_PUT(self):
+        import pathlib
+
+        length = int(self.headers.get("Content-Length", 0))
+        data = self.rfile.read(length)
+        p = pathlib.Path(self.translate_path(self.path))
+        existed = p.exists()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        self.send_response(204 if existed else 201)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_DELETE(self):
+        import pathlib
+
+        p = pathlib.Path(self.translate_path(self.path))
+        if not p.exists():
+            self.send_error(404)
+            return
+        p.unlink()
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _HeadRejectingHandler(http.server.SimpleHTTPRequestHandler):
+    """GET works normally; HEAD always 405s -- drives `stat()`'s
+    HEAD-405-fallback-to-GET path against a real server."""
+
+    def do_HEAD(self):
+        self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture
+def http_writable_server(fixture_tree):
+    yield from _start_canned_server(_WritableHandler, fixture_tree)
+
+
+@pytest.fixture
+def http_server_head_rejecting(fixture_tree):
+    yield from _start_canned_server(_HeadRejectingHandler, fixture_tree)
+
+
+@pytest.fixture
+def unused_tcp_port():
+    """A port nobody is listening on, for connection-refused coverage."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 @pytest.fixture
