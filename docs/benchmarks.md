@@ -81,11 +81,44 @@ cross-machine contract.
 | SFTP `rm(recursive=True)` 9-file tree | paramiko: 0.3291s, asyncssh: TimeoutError |
 | SFTP cold connect + `stat()` | paramiko: 0.0288s, asyncssh: 0.0552s |
 
+## CI Snapshot
+
+GitHub Actions run `Test #3` on July 12, 2026 also completed the benchmark
+job successfully on `ubuntu-latest`, `windows-latest`, and `macos-latest`.
+Those runner artifacts are a better cross-machine comparison than the local
+developer box.
+
+Selected CI results:
+
+| Case | Ubuntu | Windows | macOS |
+| --- | --- | --- | --- |
+| URI Parse (10k) | 0.0325s | 0.0517s | 0.0582s |
+| LocalPath stat() file (2k) | 0.0105s vs stdlib 0.0132s | 0.0054s vs stdlib 0.0052s | 0.0030s vs stdlib 0.0028s |
+| HTTP Walk (10) | 0.0994s | 0.0949s | 0.1207s |
+| SFTP `iterdir()` 72 entries | p: 0.0143s, a: 0.0157s | p: 0.0029s, a: 0.0041s | p: 0.0061s, a: 0.0074s |
+| SFTP `read_bytes()` 64-file batch | p: 0.0540s, a: 0.1133s | p: 0.0735s, a: 0.1423s | p: 0.0783s, a: 0.1774s |
+| SFTP `write_bytes()` 256 KiB | p: 0.0033s, a: 0.0038s | p: 0.0041s, a: 0.0049s | p: 0.3289s, a: 0.0054s |
+| SFTP `copy()` single 256 KiB file | p: 0.0082s, a: 0.0095s | p: 0.0086s, a: 0.0137s | p: 0.3348s, a: 0.0154s |
+| SFTP cold connect + `stat()` | p: 0.0049s, a: 0.0069s | p: 0.0126s, a: 0.0121s | p: 0.0874s, a: 0.0095s |
+| SFTP `rm(recursive=True)` 9-file tree | p: 0.0546s, a: TimeoutError | p: 0.0429s, a: TimeoutError | p: 0.0494s, a: TimeoutError |
+
+Legend: `p` = `paramiko`, `a` = `asyncssh`.
+
 ## Current Takeaways
 
 - `LocalPath` is competitive with `pathlib.Path` on several hot local
   operations in this run, but still trails on recursive globbing and the
   sampled `read_bytes()` case.
+- Across the three CI runners, `paramiko` still wins most completed
+  sync-style SFTP operations, especially directory traversal and many-small-
+  file workloads.
+- `asyncssh`'s recursive remove probe timed out on all three CI runners, not
+  just on the local Windows machine, which makes this look like a backend or
+  benchmark-shape issue rather than pure local machine noise.
+- The macOS artifact showed large `paramiko` slowdowns on the single-file
+  `write_bytes()` and `copy()` cases plus cold connect. That is worth a
+  follow-up sanity check before treating those particular macOS numbers as a
+  stable performance signal.
 - On this run, every completed sync-style SFTP measurement still favored
   `paramiko`, including `iterdir()`, `glob()`, batched `read_bytes()`, and
   batched `stat()`.
