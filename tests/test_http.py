@@ -251,16 +251,22 @@ def test_http_write_stream_marks_closed_on_upload_failure(monkeypatch):
 
 
 class _MockHttpResponse:
-    def __init__(self, status_code, text=""):
+    def __init__(self, status_code, text="", headers=None, url=None):
         self.status_code = status_code
         self.text = text
         self.content = text.encode()
+        self.headers = headers or {}
+        self.url = url or "http://example.com/file.txt"
+        self.is_redirect = status_code in (301, 302, 303, 307, 308)
         self.reason = "OK" if status_code < 400 else "Not Found"
 
     def raise_for_status(self):
         if self.status_code >= 400:
             import requests
             raise requests.exceptions.HTTPError(response=self)
+
+    def close(self):
+        pass
 
 
 def test_listdir_retries_with_trailing_slash_on_404(monkeypatch):
@@ -316,7 +322,7 @@ def test_http_append_rewrite_mode_nonexistent_file(http_writable_server):
     """Append to non-existent file in rewrite mode (default).
     Should behave like write mode."""
     p = UriPath(f"{http_writable_server}/append_new.txt")
-    with p.open("a") as f:
+    with p.open("ab") as f:
         f.write(b"hello")
     assert p.read_bytes() == b"hello"
 
@@ -328,7 +334,7 @@ def test_http_append_rewrite_mode_existing_file(http_writable_server):
     # Write initial content
     p.write_bytes(b"hello")
     # Append to it
-    with p.open("a") as f:
+    with p.open("ab") as f:
         f.write(b" world")
     assert p.read_bytes() == b"hello world"
 
@@ -337,7 +343,7 @@ def test_http_append_rewrite_mode_multiple_writes(http_writable_server):
     """Multiple writes in append mode should concatenate."""
     p = UriPath(f"{http_writable_server}/append_multi.txt")
     p.write_bytes(b"a")
-    with p.open("a") as f:
+    with p.open("ab") as f:
         f.write(b"b")
         f.write(b"c")
     assert p.read_bytes() == b"abc"
@@ -349,17 +355,16 @@ def test_http_append_patch_mode_configured(monkeypatch):
 
     recorded = []
 
-    class MockResponse:
-        status_code = 204
-        content = b""
-        reason = "No Content"
-
-        def raise_for_status(self):
-            pass
-
     def mock_request(self, method, url, **kwargs):
         recorded.append((method, url, kwargs.get("headers", {}), kwargs.get("data")))
-        return MockResponse()
+        if method == "HEAD":
+            return _MockHttpResponse(200, "", headers={"Content-Length": "0"}, url=url)
+        elif method == "GET":
+            return _MockHttpResponse(200, "existing content", url=url)
+        elif method == "PATCH":
+            return _MockHttpResponse(204, url=url)
+        else:
+            return _MockHttpResponse(200, url=url)
 
     monkeypatch.setattr(requests.Session, "request", mock_request)
 
@@ -367,7 +372,7 @@ def test_http_append_patch_mode_configured(monkeypatch):
     session = requests.Session()
     p = p.with_session(session, append_mode="patch")
 
-    with p.open("a") as f:
+    with p.open("ab") as f:
         f.write(b"new content")
 
     # Should have made a STAT call (to get size) and a PATCH call
@@ -380,14 +385,16 @@ def test_http_append_patch_mode_configured(monkeypatch):
 def test_http_append_patch_mode_rejection(monkeypatch):
     """PATCH mode should raise if server rejects with 405."""
     import requests
-    from pathlib_next.uri.schemes.http import HttpPath
 
     def mock_request(self, method, url, **kwargs):
         if method == "PATCH":
-            resp = _MockHttpResponse(405)
+            return _MockHttpResponse(405)
+        elif method == "HEAD":
+            return _MockHttpResponse(200, "", headers={"Content-Length": "15"})
+        elif method == "GET":
+            return _MockHttpResponse(200, "existing content")
         else:
-            resp = _MockHttpResponse(200, "0")
-        return resp
+            return _MockHttpResponse(200)
 
     monkeypatch.setattr(requests.Session, "request", mock_request)
 
@@ -397,7 +404,7 @@ def test_http_append_patch_mode_rejection(monkeypatch):
 
     # Should raise PermissionError on PATCH rejection (405 → PermissionError)
     with pytest.raises(PermissionError):
-        with p.open("a") as f:
+        with p.open("ab") as f:
             f.write(b"new content")
 
 
@@ -407,14 +414,23 @@ def test_http_append_write_stream_marks_closed_on_failure(monkeypatch):
     from pathlib_next.uri.schemes.http import HttpAppendStream
 
     class MockResponse:
-        status_code = 500
-        reason = "Server Error"
+        def __init__(self, status_code=500):
+            self.status_code = status_code
+            self.reason = "Server Error" if status_code >= 400 else "OK"
 
         def raise_for_status(self):
-            raise requests.exceptions.HTTPError(response=self)
+            if self.status_code >= 400:
+                raise requests.exceptions.HTTPError(response=self)
+
+    call_count = [0]
 
     def mock_request(self, method, url, **kwargs):
-        return MockResponse()
+        call_count[0] += 1
+        # First call (GET for initial content in rewrite mode) succeeds
+        if call_count[0] == 1:
+            return MockResponse(404)  # File doesn't exist
+        # Second call (PUT to close) fails
+        return MockResponse(500)
 
     monkeypatch.setattr(requests.Session, "request", mock_request)
 
