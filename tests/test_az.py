@@ -77,11 +77,11 @@ def test_az_open_modes(az_server):
     test_path = path / "mode_test.txt"
 
     # Write mode
-    with test_path.open("w") as f:
+    with test_path.open("wb") as f:
         f.write(b"hello")
 
     # Read mode
-    with test_path.open("r") as f:
+    with test_path.open("rb") as f:
         content = f.read()
     assert content == b"hello"
 

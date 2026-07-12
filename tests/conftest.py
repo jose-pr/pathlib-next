@@ -744,13 +744,76 @@ def gcs_api_server(fixture_tree):
             rel = item.relative_to(fixture_tree)
             key = str(rel).replace("\\", "/")
             objects[key] = item.read_bytes()
+        elif item.is_dir():
+            rel = item.relative_to(fixture_tree)
+            key = str(rel).replace("\\", "/")
+            if key:
+                objects[f"{key}/"] = b""
 
     bucket_name = "test-bucket"
+    updated = "2026-07-12T00:00:00Z"
 
     class _GcsApiHandler(http.server.BaseHTTPRequestHandler):
+        def _object_json(self, name):
+            return {
+                "kind": "storage#object",
+                "name": name,
+                "size": str(len(objects[name])),
+                "updated": updated,
+            }
+
+        def _read_upload_body(self, qs):
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            upload_type = qs.get("uploadType", [""])[0]
+            obj_name = qs.get("name", [""])[0]
+            if upload_type == "media":
+                return obj_name, body
+            if upload_type == "multipart":
+                content_type = self.headers.get("Content-Type", "")
+                _, _, boundary = content_type.partition("boundary=")
+                boundary = boundary.strip().strip('"')
+                if not boundary:
+                    return obj_name, body
+                boundary_bytes = ("--" + boundary).encode()
+                content = b""
+                for part in body.split(boundary_bytes):
+                    part = part.strip()
+                    if not part or part == b"--":
+                        continue
+                    headers_blob, _, payload = part.partition(b"\r\n\r\n")
+                    payload = payload.rstrip(b"\r\n")
+                    header_text = headers_blob.decode("latin1").lower()
+                    if "application/json" in header_text:
+                        metadata = json.loads(payload)
+                        obj_name = metadata.get("name", obj_name)
+                    elif (
+                        "application/octet-stream" in header_text
+                        or "text/plain" in header_text
+                    ):
+                        content = payload
+                return obj_name, content
+            return obj_name, body
+
         def do_GET(self):
             split = urllib.parse.urlsplit(self.path)
             qs = urllib.parse.parse_qs(split.query)
+
+            # GET raw body: /download/storage/v1/b/{bucket}/o/{object}?alt=media
+            if split.path.startswith(f"/download/storage/v1/b/{bucket_name}/o/"):
+                obj_name = urllib.parse.unquote(
+                    split.path[len(f"/download/storage/v1/b/{bucket_name}/o/") :]
+                )
+                if obj_name in objects:
+                    content = objects[obj_name]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
+                self._send_json(404, {})
+                return
 
             # LIST: /storage/v1/b/{bucket}/o?prefix=&delimiter=/
             if split.path == f"/storage/v1/b/{bucket_name}/o":
@@ -769,39 +832,20 @@ def gcs_api_server(fixture_tree):
                                     prefixes_set.add(pre)
                                     result["prefixes"].append(pre)
                             else:
-                                result["items"].append({
-                                    "kind": "storage#object",
-                                    "name": key,
-                                    "size": str(len(objects[key])),
-                                    "updated": "2026-07-12T00:00:00Z",
-                                })
+                                result["items"].append(self._object_json(key))
                         else:
-                            result["items"].append({
-                                "kind": "storage#object",
-                                "name": key,
-                                "size": str(len(objects[key])),
-                                "updated": "2026-07-12T00:00:00Z",
-                            })
+                            result["items"].append(self._object_json(key))
                 self._send_json(200, result)
                 return
 
-            # GET metadata: /storage/v1/b/{bucket}/o/{object}
-            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/"):
-                obj_name = urllib.parse.unquote(split.path[len(f"/storage/v1/b/{bucket_name}/o/"):])
-                if obj_name in objects:
-                    self._send_json(200, {
-                        "kind": "storage#object",
-                        "name": obj_name,
-                        "size": str(len(objects[obj_name])),
-                        "updated": "2026-07-12T00:00:00Z",
-                    })
-                    return
-                self._send_json(404, {})
-                return
-
             # GET raw body: /storage/v1/b/{bucket}/o/{object}?alt=media
-            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/") and qs.get("alt") == ["media"]:
-                obj_name = urllib.parse.unquote(split.path[len(f"/storage/v1/b/{bucket_name}/o/"):])
+            if (
+                split.path.startswith(f"/storage/v1/b/{bucket_name}/o/")
+                and qs.get("alt") == ["media"]
+            ):
+                obj_name = urllib.parse.unquote(
+                    split.path[len(f"/storage/v1/b/{bucket_name}/o/") :]
+                )
                 if obj_name in objects:
                     content = objects[obj_name]
                     self.send_response(200)
@@ -813,25 +857,57 @@ def gcs_api_server(fixture_tree):
                 self._send_json(404, {})
                 return
 
-            # PUT (upload): /upload/storage/v1/b/{bucket}/o?uploadType=media&name=
+            # COPY: /storage/v1/b/{src}/o/{source}/copyTo/b/{dst}/o/{dest}
+            copy_prefix = f"/storage/v1/b/{bucket_name}/o/"
+            copy_mid = f"/copyTo/b/{bucket_name}/o/"
+            if copy_mid in split.path and split.path.startswith(copy_prefix):
+                source_name, _, dest_name = split.path[len(copy_prefix) :].partition(copy_mid)
+                source_name = urllib.parse.unquote(source_name)
+                dest_name = urllib.parse.unquote(dest_name)
+                if source_name in objects:
+                    objects[dest_name] = objects[source_name]
+                    self._send_json(200, self._object_json(dest_name))
+                    return
+                self._send_json(404, {})
+                return
+
+            # GET metadata: /storage/v1/b/{bucket}/o/{object}
+            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/"):
+                obj_name = urllib.parse.unquote(
+                    split.path[len(f"/storage/v1/b/{bucket_name}/o/") :]
+                )
+                if obj_name in objects:
+                    self._send_json(200, self._object_json(obj_name))
+                    return
+                self._send_json(404, {})
+                return
+
+            self._send_json(404, {})
+
+        def do_POST(self):
+            split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
+
             if split.path == f"/upload/storage/v1/b/{bucket_name}/o":
-                obj_name = qs.get("name", [""])[0]
+                obj_name, content = self._read_upload_body(qs)
                 if obj_name:
-                    content_length = int(self.headers.get("Content-Length", 0))
-                    objects[obj_name] = self.rfile.read(content_length)
-                    self._send_json(200, {
-                        "kind": "storage#object",
-                        "name": obj_name,
-                        "size": str(len(objects[obj_name])),
-                        "updated": "2026-07-12T00:00:00Z",
-                    })
+                    objects[obj_name] = content
+                    self._send_json(200, self._object_json(obj_name))
                     return
                 self._send_json(400, {})
                 return
 
-            # DELETE: /storage/v1/b/{bucket}/o/{object}
+            self.do_GET()
+
+        def do_PUT(self):
+            self.do_POST()
+
+        def do_DELETE(self):
+            split = urllib.parse.urlsplit(self.path)
             if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/"):
-                obj_name = urllib.parse.unquote(split.path[len(f"/storage/v1/b/{bucket_name}/o/"):])
+                obj_name = urllib.parse.unquote(
+                    split.path[len(f"/storage/v1/b/{bucket_name}/o/") :]
+                )
                 if obj_name in objects:
                     del objects[obj_name]
                     self.send_response(204)
@@ -839,16 +915,7 @@ def gcs_api_server(fixture_tree):
                     return
                 self._send_json(404, {})
                 return
-
             self._send_json(404, {})
-
-        def do_PUT(self):
-            # Delegate to GET handler for PUT uploads
-            self.do_GET()
-
-        def do_DELETE(self):
-            # Delegate to GET handler for DELETE
-            self.do_GET()
 
         def _send_json(self, status, payload):
             body = json.dumps(payload).encode()
@@ -897,11 +964,30 @@ def az_api_server(fixture_tree):
             rel = item.relative_to(fixture_tree)
             key = str(rel).replace("\\", "/")
             objects[key] = item.read_bytes()
+        elif item.is_dir():
+            rel = item.relative_to(fixture_tree)
+            key = str(rel).replace("\\", "/")
+            if key:
+                objects[f"{key}/"] = b""
 
     account = "testaccount"
     container = "testcontainer"
+    last_modified = "Sun, 12 Jul 2026 00:00:00 GMT"
+
+    def _copy_status_headers():
+        return {
+            "x-ms-copy-id": "copy-id",
+            "x-ms-copy-status": "success",
+        }
 
     class _AzApiHandler(http.server.BaseHTTPRequestHandler):
+        def _send_blob_headers(self, length):
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Last-Modified", last_modified)
+            self.send_header("ETag", '"etag"')
+            self.send_header("x-ms-blob-type", "BlockBlob")
+
         def do_GET(self):
             split = urllib.parse.urlsplit(self.path)
             qs = urllib.parse.parse_qs(split.query)
@@ -928,7 +1014,7 @@ def az_api_server(fixture_tree):
                                 pre = prefix + parts[0] + delimiter
                                 if pre not in prefixes_set:
                                     prefixes_set.add(pre)
-                                    pre_elem = ET.SubElement(root, "BlobPrefix")
+                                    pre_elem = ET.SubElement(blobs_elem, "BlobPrefix")
                                     name_elem = ET.SubElement(pre_elem, "Name")
                                     name_elem.text = pre
                             else:
@@ -939,7 +1025,9 @@ def az_api_server(fixture_tree):
                                 size_elem = ET.SubElement(props_elem, "Content-Length")
                                 size_elem.text = str(len(objects[key]))
                                 mtime_elem = ET.SubElement(props_elem, "Last-Modified")
-                                mtime_elem.text = "2026-07-12T00:00:00Z"
+                                mtime_elem.text = last_modified
+                                type_elem = ET.SubElement(props_elem, "BlobType")
+                                type_elem.text = "BlockBlob"
                         else:
                             blob_elem = ET.SubElement(blobs_elem, "Blob")
                             name_elem = ET.SubElement(blob_elem, "Name")
@@ -948,7 +1036,11 @@ def az_api_server(fixture_tree):
                             size_elem = ET.SubElement(props_elem, "Content-Length")
                             size_elem.text = str(len(objects[key]))
                             mtime_elem = ET.SubElement(props_elem, "Last-Modified")
-                            mtime_elem.text = "2026-07-12T00:00:00Z"
+                            mtime_elem.text = last_modified
+                            type_elem = ET.SubElement(props_elem, "BlobType")
+                            type_elem.text = "BlockBlob"
+
+                ET.SubElement(root, "NextMarker").text = ""
 
                 body = ET.tostring(root, encoding="utf-8")
                 self.send_response(200)
@@ -960,16 +1052,34 @@ def az_api_server(fixture_tree):
 
             # GET blob or HEAD: /{account}/{container}/{blob}
             if split.path.startswith(f"/{account}/{container}/"):
-                blob_name = urllib.parse.unquote(split.path[len(f"/{account}/{container}/"):])
+                blob_name = urllib.parse.unquote(
+                    split.path[len(f"/{account}/{container}/") :]
+                )
                 if blob_name in objects:
                     content = objects[blob_name]
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/octet-stream")
-                    self.send_header("Content-Length", str(len(content)))
-                    self.send_header("x-ms-blob-type", "BlockBlob")
+                    range_header = (
+                        self.headers.get("x-ms-range") or self.headers.get("Range")
+                    )
+                    start = 0
+                    end = len(content) - 1
+                    status = 200
+                    if range_header and range_header.startswith("bytes="):
+                        start_text, _, end_text = range_header[6:].partition("-")
+                        if start_text:
+                            start = int(start_text)
+                        if end_text:
+                            end = int(end_text)
+                        status = 206
+                    chunk = content[start : end + 1]
+                    self.send_response(status)
+                    self._send_blob_headers(len(chunk))
+                    self.send_header(
+                        "Content-Range", f"bytes {start}-{end}/{len(content)}"
+                    )
+                    self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
                     if self.command != "HEAD":
-                        self.wfile.write(content)
+                        self.wfile.write(chunk)
                     return
                 self.send_response(404)
                 self.end_headers()
@@ -984,12 +1094,36 @@ def az_api_server(fixture_tree):
 
         def do_PUT(self):
             split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
 
             if split.path.startswith(f"/{account}/{container}/"):
-                blob_name = urllib.parse.unquote(split.path[len(f"/{account}/{container}/"):])
+                blob_name = urllib.parse.unquote(
+                    split.path[len(f"/{account}/{container}/") :]
+                )
+                if qs.get("comp") == ["copy"] or self.headers.get("x-ms-copy-source"):
+                    source = self.headers.get("x-ms-copy-source", "")
+                    source_path = urllib.parse.urlsplit(source).path
+                    source_prefix = f"/{account}/{container}/"
+                    if source_path.startswith(source_prefix):
+                        source_name = urllib.parse.unquote(
+                            source_path[len(source_prefix) :]
+                        )
+                        if source_name in objects:
+                            objects[blob_name] = objects[source_name]
+                            self.send_response(202)
+                            for header, value in _copy_status_headers().items():
+                                self.send_header(header, value)
+                            self.end_headers()
+                            return
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+
                 content_length = int(self.headers.get("Content-Length", 0))
                 objects[blob_name] = self.rfile.read(content_length)
                 self.send_response(201)
+                self.send_header("Last-Modified", last_modified)
+                self.send_header("ETag", '"etag"')
                 self.end_headers()
                 return
 

@@ -131,26 +131,26 @@ class AzPath(UriPath):
     def _scandir(self):
         # Each walk_blobs call already carries size/mtime for every blob --
         # reuse it instead of `iterdir()` + a stat call per child.
+        from azure.storage.blob import BlobPrefix
+
         prefix = f"{self.key}/" if self.key else ""
         seen = set()
         # walk_blobs provides both blobs and common prefixes (directories)
         for item in self._container.walk_blobs(name_starts_with=prefix, delimiter="/"):
-            # item is either a blob or a BlobPrefix object
-            if hasattr(item, "name"):
-                # It's a blob
-                name = item.name[len(prefix) :]
-                if name and name not in seen:
-                    seen.add(name)
-                    mtime = int(item.last_modified.timestamp()) if item.last_modified else 0
-                    yield name, FileStat(
-                        st_size=item.size or 0, st_mtime=mtime, is_dir=False
-                    )
-            else:
-                # It's a common prefix (directory-like)
-                name = str(item)[len(prefix) :].rstrip("/")
+            if isinstance(item, BlobPrefix):
+                name = item.name[len(prefix) :].rstrip("/")
                 if name and name not in seen:
                     seen.add(name)
                     yield name, FileStat(is_dir=True)
+                continue
+
+            name = item.name[len(prefix) :]
+            if name and name not in seen:
+                seen.add(name)
+                mtime = int(item.last_modified.timestamp()) if item.last_modified else 0
+                yield name, FileStat(
+                    st_size=item.size or 0, st_mtime=mtime, is_dir=False
+                )
 
     def _listdir(self):
         for name, _stat in self._scandir():
@@ -180,7 +180,12 @@ class AzPath(UriPath):
         if not missing_ok and not self.exists():
             raise FileNotFoundError(self)
         blob_client = self._container.get_blob_client(self.key)
-        blob_client.delete_blob()
+        try:
+            blob_client.delete_blob()
+        except Exception as error:
+            if missing_ok:
+                return
+            raise FileNotFoundError(self) from error
 
     def rmdir(self):
         marker = f"{self.key}/"
@@ -197,7 +202,7 @@ class AzPath(UriPath):
     def rename(self, target: "AzPath | Uri | str"):
         if not isinstance(target, Uri):
             target = Uri(self.parent, target)
-        dest_key = target.path.lstrip("/")
+        dest_key = self.with_segments(target).key if not isinstance(target, AzPath) else target.key
         source_blob_client = self._container.get_blob_client(self.key)
         source_url = source_blob_client.url
         dest_blob_client = self._container.get_blob_client(dest_key)

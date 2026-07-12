@@ -123,6 +123,7 @@ class GsPath(UriPath):
         prefix = f"{self.key}/" if self.key else ""
         seen = set()
         iterator = self._bucket.list_blobs(prefix=prefix, delimiter="/")
+        blobs = list(iterator)
         # Common prefixes (directories)
         for common_prefix in iterator.prefixes:
             name = common_prefix[len(prefix) :].rstrip("/")
@@ -130,8 +131,10 @@ class GsPath(UriPath):
                 seen.add(name)
                 yield name, FileStat(is_dir=True)
         # Blobs (files)
-        for blob in iterator:
+        for blob in blobs:
             name = blob.name[len(prefix) :]
+            if name.endswith("/"):
+                continue
             if name and name not in seen:
                 seen.add(name)
                 mtime = int(blob.updated.timestamp()) if blob.updated else 0
@@ -167,7 +170,12 @@ class GsPath(UriPath):
         if not missing_ok and not self.exists():
             raise FileNotFoundError(self)
         blob = self._bucket.blob(self.key)
-        blob.delete()
+        try:
+            blob.delete()
+        except Exception as error:
+            if missing_ok:
+                return
+            raise FileNotFoundError(self) from error
 
     def rmdir(self):
         marker = f"{self.key}/"
