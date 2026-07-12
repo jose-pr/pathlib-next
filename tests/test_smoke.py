@@ -1,8 +1,8 @@
-"""Regression lock-in for currently-correct behavior (Phase 0 safety net).
+"""Regression lock-in for currently-correct behavior (safety net).
 
 These are the snippets from README.md's Quick start and examples/example.py
 that don't touch the network. On Python 3.9 this file is expected to fail
-until Phase 1 lands (see .agents/plans/robust_base.md, B1-B3).
+until the Python 3.9 compatibility work lands.
 """
 import pathlib_next
 from pathlib_next import Path, glob

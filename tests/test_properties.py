@@ -152,7 +152,7 @@ def test_is_relative_to_matches_pure_posix_path(segs):
     assert u.is_relative_to(u_parent) == pp.is_relative_to(pp_parent) == True
 
 
-# --- uritools oracle: one-pass parse/compose fast paths (uri_parse_perf.md) ---
+# --- uritools oracle: one-pass parse/compose fast paths ---
 # `Uri._parse_uri`/`Uri._format_parsed_parts` bypass uritools' get*()
 # accessors and uricompose() for speed (one-pass authority/path extraction,
 # direct string assembly) but must remain byte-for-byte equivalent to them

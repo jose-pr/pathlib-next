@@ -1,4 +1,4 @@
-"""Phase 3/4 of http_verify_and_fix.md: end-to-end coverage of
+"""End-to-end coverage of
 `_DirectoryListingParser`'s two primary (non-fallback) code paths against
 real servers, real write/delete persistence, the exception-translation
 matrix beyond 404/405/501, and `stat()`'s redirect/HEAD-fallback branches.

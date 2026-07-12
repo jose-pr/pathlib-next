@@ -1,5 +1,5 @@
 """DavPath-specific regression coverage (generic contract behavior lives in
-test_contract.py::TestDavContract). Phase 6 of http_verify_and_fix.md.
+test_contract.py::TestDavContract).
 """
 import pytest
 
@@ -22,7 +22,7 @@ def test_dav_scheme_resolves_via_entry_point(dav_server):
 
 
 def test_dav_rmdir_on_file_raises_notadirectoryerror(dav_server):
-    # Same bug class as HttpPath.rmdir() (Phase 5, finding 5): a PROPFIND
+    # Same bug class as HttpPath.rmdir(): a PROPFIND
     # Depth:1 on a non-collection resource returns only the "." entry
     # describing itself, which _scandir() filters out -- so a *file*
     # looked exactly like an empty directory and rmdir() silently

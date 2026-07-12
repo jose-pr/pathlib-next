@@ -24,7 +24,7 @@ def _split_authority(authority: "str | None") -> "tuple[str | None, str | None, 
     independently re-`rpartition`s `authority` today, ~3-4x redundant work
     per `Uri()` construction across the getter calls this replaces) rather
     than reinventing the logic -- verified equivalent by fuzzing 20000+
-    generated URIs against uritools as the oracle (see uri_parse_perf.md).
+    generated URIs against uritools as the oracle (tests/test_properties.py).
 
     Faithfully reproduces one uritools quirk, not a bug we get to "fix"
     here: `.host` does NOT check whether ':' was actually present in the
@@ -100,7 +100,7 @@ def _remove_dot_segments(path: str) -> str:
     return "/".join(pseg)
 
 
-# --- composer (uri_parse_perf.md Phase 2) -----------------------------
+# --- composer (direct-assembly fast path) ----------------------------
 # `uritools.uricompose()` re-validates every component on every call
 # (scheme regex, authority-string re-parsing, IP-literal detection on
 # plain strings, ...) -- necessary for its own "arbitrary input" contract,

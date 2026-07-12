@@ -272,7 +272,7 @@ def test_rmdir_nonempty_raises_oserror():
 
 
 def test_rmdir_on_file_raises_notadirectoryerror():
-    # rmdir() Phase 5/6 fix: a file must not be silently DELETEd -- a
+    # rmdir() fix: a file must not be silently DELETEd -- a
     # PROPFIND Depth:1 on a non-collection resource only returns the "."
     # entry describing itself, which _scandir() filters out, so a file
     # used to look exactly like an empty directory to _listdir() alone.

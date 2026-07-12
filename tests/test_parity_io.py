@@ -68,7 +68,7 @@ def test_glob_matches_pathlib(fixture_tree):
 
 def test_glob_recursive_auto_enable(fixture_tree):
     root = pathlib_next.LocalPath(fixture_tree)
-    # B-adjacent parity gap (Phase 4): "**" in the pattern auto-enables
+    # Parity gap: "**" in the pattern auto-enables
     # recursion without passing recursive=True explicitly.
     ours = {p.name for p in root.glob("**/*.py")}
     theirs = {p.name for p in fixture_tree.glob("**/*.py")}

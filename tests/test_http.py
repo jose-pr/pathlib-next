@@ -274,7 +274,7 @@ def test_listdir_retries_with_trailing_slash_on_404(monkeypatch):
     # slash-less directory GET, and requests follows that automatically --
     # but a non-redirecting server/proxy would just 404 the bare path. This
     # mirrors stat()'s [no-slash, with-slash] retry so _listdir() is
-    # robust to that case too (Phase 2 decision: (b), kept minimal).
+    # robust to that case too (kept minimal by design).
     import requests
 
     listing_html = (
@@ -316,7 +316,7 @@ def test_listdir_no_retry_when_already_trailing_slash(monkeypatch):
     assert calls == ["http://example.com/sub/"]
 
 
-# --- Append mode tests (Phase 1) ---
+# --- Append mode tests ---
 
 def test_http_append_rewrite_mode_nonexistent_file(http_writable_server):
     """Append to non-existent file in rewrite mode (default).

@@ -62,7 +62,7 @@ def table_row(href, name, modified="", size="", description="&nbsp;"):
     )
 
 
-# --- Phase 1: _DATETIME_FMTs, one representative string per bucket ---
+# --- _DATETIME_FMTs: one representative string per bucket ---
 
 _DATETIME_CASES = [
     ("11-Jul-2026 10:23:00", "%d-%b-%Y %H:%M:%S"),

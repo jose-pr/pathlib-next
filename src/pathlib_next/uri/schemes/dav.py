@@ -72,7 +72,7 @@ class DavPath(HttpPath):
     __slots__ = ()
 
     def _wire_uri(self) -> str:
-        # Direct string assembly (uri_parse_perf.md Phase 2) instead of
+        # Direct string assembly instead of
         # uricompose() -- called on every DAV HTTP request, and every
         # component here already came from this instance's own parsed
         # source/path/query/fragment state. See source.py's _compose_uri.
@@ -166,7 +166,7 @@ class DavPath(HttpPath):
         resp.raise_for_status()
 
     def rmdir(self):
-        # Same fix as HttpPath.rmdir() (http_verify_and_fix.md Phase 5):
+        # Same fix as HttpPath.rmdir():
         # a PROPFIND Depth:1 on a non-collection resource returns only the
         # "." entry describing itself, which _scandir() already filters
         # out -- so a *file* looks exactly like an empty directory to

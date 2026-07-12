@@ -25,7 +25,7 @@ def benchmark_uri_parse_unique():
     # Uri() construction is lazy (no parsing until .source/.path/... is
     # first accessed) and benchmark_uri_parse() above reuses the SAME
     # literal string every call, so it measures neither real parse cost.
-    # This one forces the actual parse (uri_parse_perf.md's one-pass
+    # This one forces the actual parse (the one-pass
     # _parse_uri) with a UNIQUE URI per iteration -- repeated-URI
     # microbenchmarks are not representative of real workloads and can
     # flatter/mislead by an order of magnitude if the underlying string
@@ -55,9 +55,9 @@ def benchmark_uri_parse_and_compose_unique():
     # Full round trip: parse (forced, unique URIs) + compose (as_uri(),
     # uncached -- sanitize=True forces a fresh compose every call instead
     # of hitting the cached-after-first-call fast path) -- exercises both
-    # uri_parse_perf.md Phase 1 (_parse_uri) and Phase 2
+    # the one-pass parse (_parse_uri) and direct-assembly compose
     # (_format_parsed_parts) together, which is what "Uri() construction"
-    # means for that plan's own done-when bar.
+    # means end to end.
     from pathlib_next import Uri
     n = 5000
     urls = [
@@ -171,9 +171,8 @@ def benchmark_http_directory_parser():
     # only ever exercises _DirectoryListingParser's `all_links` fallback
     # branch, never its two primary (and far more common in the real
     # world) Apache-<pre>/nginx-<table> code paths. This benchmarks those
-    # directly against realistic synthetic HTML (see
-    # http_verify_and_fix.md's Phase 1/benchmark notes -- also where this
-    # in-house parser was verified equivalent to, and 2.9x-6.2x faster
+    # directly against realistic synthetic HTML (during the replacement
+    # work this in-house parser was verified equivalent to, and 2.9x-6.2x faster
     # than, the bs4+html5lib+htmllistparse implementation it replaced).
     from pathlib_next.uri.schemes.http import _DirectoryListingParser
 
