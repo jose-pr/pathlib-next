@@ -17,8 +17,9 @@ classifiers = [
 dependencies = []
 [project.optional-dependencies]
 uri = ["uritools"]
-http = ["requests", "pathlib_next[uri]", 'htmllistparse', 'bs4']
+http = ["requests", "pathlib_next[uri]"]
 sftp = ["paramiko", "pathlib_next[uri]"]
+sftp-async = ["asyncssh<2.22; python_version<'3.10'", "asyncssh; python_version>='3.10'", "pathlib_next[uri]"]
 s3 = ["boto3", "pathlib_next[uri]"]
 dev = ['build', 'twine', 'hatchling', 'pytest', 'pytest-cov', 'pyftpdlib', 'wsgidav', 'cheroot', 'moto[s3]', 'hypothesis']
 docs = ['mkdocs', 'mkdocs-material', 'mkdocstrings[python]']
@@ -28,11 +29,14 @@ file = "pathlib_next.uri.schemes.file:FileUri"
 data = "pathlib_next.uri.schemes.data:DataUri"
 zip = "pathlib_next.uri.schemes.archive:ZipUri"
 tar = "pathlib_next.uri.schemes.archive:TarUri"
+archive = "pathlib_next.uri.schemes.archive:ArchiveUri"
+"archive+zip" = "pathlib_next.uri.schemes.archive:ArchiveZipUri"
+"archive+tar" = "pathlib_next.uri.schemes.archive:ArchiveTarUri"
 ftp = "pathlib_next.uri.schemes.ftp:FtpPath"
 http = "pathlib_next.uri.schemes.http:HttpPath"
 https = "pathlib_next.uri.schemes.http:HttpPath"
-dav = "pathlib_next.uri.schemes.webdav:DavPath"
-davs = "pathlib_next.uri.schemes.webdav:DavPath"
+dav = "pathlib_next.uri.schemes.dav:DavPath"
+davs = "pathlib_next.uri.schemes.dav:DavPath"
 sftp = "pathlib_next.uri.schemes.sftp:SftpPath"
 s3 = "pathlib_next.uri.schemes.s3:S3Path"
 
