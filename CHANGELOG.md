@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- HTTP write support (`PUT`, customizable to `POST` or other verbs via `write_method` configuration or `with_session()`) for `HttpPath`.
+- HTTP delete support (`DELETE` for `unlink()` and `rmdir()`) for `HttpPath`.
+- Comprehensive HTTP exception mapping in `HttpPath` translating client/server/timeout/connection errors into standard built-in `OSError` subclasses (`FileNotFoundError`, `PermissionError`, `FileExistsError`, `TimeoutError`, `ConnectionError`, `NotImplementedError`, or generic `OSError`).
 - Dynamic loading of custom URI scheme plugins via standard Python packaging entry points under the `"pathlib_next.schemes"` group, allowing third-party package extensibility.
 - Lazy-loading for all builtin scheme implementations (s3, sftp, http, etc.) to significantly reduce start-up and import overhead when heavy libraries are not needed.
 - MD5 and SHA-256 checksum helpers in `pathlib_next.utils` (`md5` and `sha256`).
@@ -29,8 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Property-based tests (`hypothesis`, new `dev` extra) in `tests/test_properties.py`: URI parse/format round-trip identity, join associativity, and parity with `pathlib.PurePosixPath` for `segments`/`name`/`relative_to`/`match`/`is_relative_to`.
 - `ZipUri`/`ArchiveUri` archive handle registry: independently-constructed `UriPath("zip:...")`/`"tar:..."` instances pointing at the same outer archive now share one `_ArchiveBackend` (keyed by backend class + outer URI, a `weakref.WeakValueDictionary`) instead of each opening its own handle -- fixes stale reads and out-of-sync writes across separately-constructed instances. The backend closes its handle automatically (`__del__`) once every referencing path is garbage-collected.
 - Full `ZipUri` write support: `unlink()`, `rmdir()` (empty-dir check, mirrors `S3Path.rmdir()`), `rename()` (renames a directory's nested entries too), and overwriting an existing entry's content (previously `open("w")` on an existing entry silently appended a duplicate zipfile entry instead of replacing it). All four go through a new safe full-archive rewrite (`_ZipBackend._rewrite`) since `zipfile` has no in-place entry mutation: writes to a temp file beside the outer archive, then atomically replaces it (`os.replace`). Requires a local (`file:`) outer archive, same as existing new-entry writes.
+- `archive:` catch-all URI scheme: auto-detects zip vs. tar for the outer archive (filename extension first, then a magic-byte sniff shared with `unpack_archive` via the new `utils.archive._detect_format` helper) instead of requiring the caller to know the format up front. Explicit `archive+zip:`/`archive+tar:` forms skip detection outright. `archive:...!/x` and `zip:...!/x` pointing at the same outer archive share one backend (same registry as `zip:`/`tar:`), and write support (new/overwritten entries, `unlink`/`rmdir`/`rename`) works through `archive:` exactly as it does through `zip:` when the detected format is zip and the outer archive is local -- tar-detected instances correctly raise `NotImplementedError` on any write attempt.
+- New `sftp-async` extra: an `AsyncsshSftpBackend` (`asyncssh`, async internally, bridged to a sync API through one shared background event loop) alongside the existing paramiko-based `SftpBackend`. Auto-selected when `asyncssh` is importable (paramiko remains the fallback); override via the `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"`/`"asyncssh"`/`"auto"`) or a `SftpPath._default_backend_cls` subclass hook -- precedence, highest to lowest: explicit `backend=` kwarg > `_default_backend_cls` > env var > auto-detect. `PATHLIB_NEXT_SFTP_BACKEND=asyncssh` with the package missing raises immediately rather than silently falling back. Connections are cached per `(backend, source)` (no thread dimension needed -- one shared connection serves concurrent calls from any calling thread, unlike paramiko's `(backend, source, thread)` cache). Works on Python 3.9 too via a verified version pin (`asyncssh<2.22`; current `asyncssh` needs >=3.10) resolved automatically through `pyproject.toml` environment markers -- no code branching. New `SftpPath.symlink_to()`/`readlink()` (both backends -- core SFTPv3 operations) and `hardlink_to()` (asyncssh backend only; paramiko's `SFTPClient` has no hard-link operation, so it raises `NotImplementedError` immediately with no server round trip). `chmod(follow_symlinks=False)` now works on the asyncssh backend (native support) while still raising `NotImplementedError` on paramiko (no `lchmod` equivalent). This is additive, not a performance change -- see `future_async_sftp_perf.md` for the (separate, unscheduled) concurrent-fan-out work that would actually exploit asyncssh's pipelining.
 
 ### Changed
+- Replaced the third-party `htmllistparse` and `bs4` directory listing scraper dependencies with a hand-rolled, zero-dependency `html.parser.HTMLParser` subclass (`_DirectoryListingParser`), achieving an 8x performance speedup while dropping external library dependencies from the `http` extra in `pyproject.toml`.
 - Matrix expansion in GitHub Actions CI to test Python 3.10, 3.11, and 3.12 (on Ubuntu).
 - Added a "no-extras" CI job to run tests without optional dependencies installed.
 - `PathSyncer.log()` now logs through `logging.getLogger("pathlib_next.sync")`
@@ -46,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Cache `Uri.suffix` and `Uri.stem` in slots.
   - Optimize `Source.__bool__` to use lazy index accesses and avoid tuple iteration.
   - Short-circuit `Query.__new__` when the input is already a matching `Query` instance.
+  - `Uri._parse_uri()`/`Source.from_str()`: one-pass component extraction from `uritools.urisplit()`'s raw fields instead of calling its seven `get*()` accessors, each of which independently re-`rpartition`s the authority string and re-decodes. Ported (not reinvented) from `uritools.SplitResult`'s own property/getter logic -- including one of its quirks, reproduced on purpose (see `uri/source.py::_split_authority`) -- and verified equivalent by fuzzing 20,000+ generated URIs against uritools as the oracle (`tests/test_properties.py`, which stays the enforcement mechanism, not just a one-time check). `Uri._format_parsed_parts()`/`DavPath._wire_uri()`: direct string assembly instead of `uritools.uricompose()`'s full re-validation, for the same reason and with the same fuzzing rigor (`uri/source.py::_compose_uri`) -- both bypass a general-purpose library's necessarily-defensive validation only where the input is already known-canonical (parsed or otherwise internally normalized), not for arbitrary/untrusted URIs. `uritools` itself is unchanged as a dependency and remains the parsing/composing engine underneath both fast paths -- a hand-rolled RFC 3986 implementation was evaluated and rejected (see `uri_parse_perf.md`'s "Verdict on full replacement": slower or not worth the permanent edge-case-ownership cost). Measured on `.venv/3.12.10`, unique URIs per iteration (a repeated-URI microbenchmark flatters by masking real per-call cost): the full `Uri(unique_url).as_uri()` round trip (parse + compose, both changes) is ~20-25% faster; the parse side alone, isolated from `Uri.__new__`'s slot-initialization overhead (unaffected by this work), is ~17-30% faster on its own (see `benchmarks/bench.py`'s `1b`/`1c` entries).
 - New `Path._scandir()` / `UriPath._scandir()` protocol: schemes whose
   listing call already returns type/size/mtime for every child (HTML
   directory index, WebDAV PROPFIND, SFTP `listdir_attr`, FTP MLSD, an S3
@@ -62,6 +69,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `stat()`, like every other scheme) in favor of a single-use stat
   hint seeded by `_scandir()`; `DavPath`'s now-redundant `iterdir()`/
   `is_dir()`/`is_file()` overrides are removed for the same reason.
+- **Breaking** (pre-1.0, no compat shim kept): `uri/schemes/` module naming convention
+  -- every module is now named after the main URI scheme it implements (TLS/secondary
+  variants live with their main scheme). `webdav.py` -> `dav.py`; import from
+  `pathlib_next.uri.schemes.dav` (the old `pathlib_next.uri.schemes.webdav` path no
+  longer exists). `archive.py` -> `archive/` package (`_base.py` shared machinery,
+  `zip.py`, `tar.py`) -- import-compatible for free, `pathlib_next.uri.schemes.archive`
+  still resolves (now the package) and re-exports `ArchiveUri`/`ZipUri`/`TarUri`.
+  `sftp.py` -> `sftp/` package (`_paramiko.py` holds the existing paramiko-backed
+  `SftpBackend`; `__init__.py` keeps `SftpPath`/`BaseSftpBackend`) -- same free
+  import-compat, `pathlib_next.uri.schemes.sftp` still resolves and re-exports
+  `SftpPath`/`BaseSftpBackend`/`SftpBackend`. Prepares the layout for an upcoming
+  second (asyncssh) backend; `SftpBackend` gained a `default()` classmethod factory
+  so `SftpPath._initbackend()` doesn't need to import `paramiko` itself.
+- `SftpPath`'s connection caching moved from an external cache wrapping `backend.client()`
+  calls to being each backend's own responsibility (`SftpPath._sftpclient` is now a
+  trivial `self.backend.client(self.source)`, no per-backend branching). Needed so the
+  new asyncssh backend can use its own `(backend, source)`-keyed cache (see the
+  `sftp-async` entry above) without `SftpPath` needing to know which caching scheme
+  applies. **Behavior-affecting for custom `BaseSftpBackend` subclasses**: a `client()`
+  override that doesn't cache internally will now be called on every `_sftpclient`
+  access, not just on a cache miss -- `SftpBackend`/`AsyncsshSftpBackend` both cache
+  internally, so this only matters for third-party/test-double backends.
+- `TestSftpContract`'s in-process test server (`tests/conftest.py::sftp_server`) is now
+  asyncssh's own `SFTPServer` (chrooted to `fixture_tree`) instead of a ~150-line
+  hand-rolled paramiko `ServerInterface`/`SFTPServerInterface` -- a client backend choice
+  is independent of which library the test server uses (verified: a paramiko client
+  talks standard SFTP to an asyncssh server fine). `TestSftpContract` itself is now
+  parametrized across both client backends (`paramiko`, `asyncssh`).
 
 ### Fixed
 - `Uri.relative_to()` computed the remaining segments from the raw `.segments` property instead of the root-aware `_segments_of()` helper `is_relative_to()` already used -- `Uri("/").segments` is the 2-tuple `("", "")` (an artifact of `"/".split("/")`), so `relative_to(<root>)` silently dropped the child's only real segment (e.g. `Uri("/a").relative_to(Uri("/"))` produced `""` instead of `"a"`). Found by the new property-based test suite.
