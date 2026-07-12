@@ -48,45 +48,54 @@ cross-machine contract.
 
 | Benchmark Case | Time / Metric |
 | --- | --- |
-| URI Parse (10k) | 0.0906s |
-| URI Parse, unique URIs, forced (us/parse) | 28.26us |
-| URI Parse+Compose, unique URIs (us/round-trip) | 43.87us |
-| Path Join (10k) | 0.1837s |
-| Segments/Name Access (10k) | 0.0015s |
-| Suffix/Stem Access (10k) | 0.0017s |
-| Glob 1k MemPath (20) | 0.5064s |
-| LocalPath vs Stdlib (2k stat) | Local: 0.0354s, Stdlib: 0.0375s |
-| LocalPath construct path (10k) | Local: 0.0128s, Stdlib: 0.0249s |
-| LocalPath join path (10k) | Local: 0.0667s, Stdlib: 0.0694s |
-| LocalPath stat() file (2k) | Local: 0.0458s, Stdlib: 0.0495s |
-| LocalPath read_bytes() 64 KiB | Local: 0.0005s, Stdlib: 0.0002s |
-| LocalPath iterdir() 8 entries | Local: 0.0001s, Stdlib: 0.0001s |
-| LocalPath glob('**/*.txt') 240 files | Local: 0.0254s, Stdlib: 0.0147s |
-| HTTP Glob (10) | 1.2651s |
-| HTTP Walk (10) | 0.5654s |
-| HTTP dir listing parse, Apache `<pre>` (n=1000) | 76.2783ms/parse |
-| HTTP dir listing parse, nginx `<table>` (n=1000) | 135.5039ms/parse |
-| SFTP warm `stat()` | paramiko: 0.0012s, asyncssh: 0.0026s |
-| SFTP `iterdir()` 72 entries | paramiko: 0.1362s, asyncssh: 0.1424s |
-| SFTP `walk()` 80 files | paramiko: 0.4285s, asyncssh: 0.5982s |
-| SFTP `glob('**/*.txt')` 80 files | paramiko: 0.9762s, asyncssh: 1.2515s |
-| SFTP `read_bytes()` small file | paramiko: 0.0041s, asyncssh: 0.0087s |
-| SFTP `write_bytes()` 256 KiB | paramiko: 0.0155s, asyncssh: 0.0159s |
-| SFTP `mkdir()` leaf dir | paramiko: 0.0023s, asyncssh: 0.0030s |
-| SFTP `rename()` file | paramiko: 0.0031s, asyncssh: 0.0045s |
-| SFTP `unlink()` file | paramiko: 0.0016s, asyncssh: 0.0029s |
-| SFTP `copy()` single 256 KiB file | paramiko: 0.0345s, asyncssh: 0.0385s |
-| SFTP cold connect + `stat()` | paramiko: 0.0171s, asyncssh: 0.0286s |
+| URI Parse (10k) | 0.0790s |
+| URI Parse, unique URIs, forced (us/parse) | 27.24us |
+| URI Parse+Compose, unique URIs (us/round-trip) | 40.30us |
+| Path Join (10k) | 0.1599s |
+| Segments/Name Access (10k) | 0.0014s |
+| Suffix/Stem Access (10k) | 0.0010s |
+| Glob 1k MemPath (20) | 0.5281s |
+| LocalPath vs Stdlib (2k stat) | Local: 0.0388s, Stdlib: 0.0332s |
+| LocalPath construct path (10k) | Local: 0.0175s, Stdlib: 0.0184s |
+| LocalPath join path (10k) | Local: 0.0498s, Stdlib: 0.0456s |
+| LocalPath stat() file (2k) | Local: 0.0296s, Stdlib: 0.0328s |
+| LocalPath read_bytes() 64 KiB | Local: 0.0002s, Stdlib: 0.0003s |
+| LocalPath iterdir() 8 entries | Local: 0.0003s, Stdlib: 0.0003s |
+| LocalPath glob('**/*.txt') 240 files | Local: 0.0143s, Stdlib: 0.0120s |
+| HTTP Glob (10) | 1.0840s |
+| HTTP Walk (10) | 0.4492s |
+| HTTP dir listing parse, Apache `<pre>` (n=1000) | 76.4667ms/parse |
+| HTTP dir listing parse, nginx `<table>` (n=1000) | 140.1685ms/parse |
+| SFTP warm `stat()` | paramiko: 0.0016s, asyncssh: 0.0031s |
+| SFTP `iterdir()` 72 entries | paramiko: 0.1131s, asyncssh: 0.1961s |
+| SFTP `walk()` 80 files | paramiko: 0.3791s, asyncssh: 0.4584s |
+| SFTP `glob('**/*.txt')` 80 files | paramiko: 0.7624s, asyncssh: 1.0949s |
+| SFTP `read_bytes()` small file | paramiko: 0.0034s, asyncssh: 0.0092s |
+| SFTP `read_bytes()` 64-file batch | paramiko: 0.2463s, asyncssh: 0.6104s |
+| SFTP `stat()` 64-file batch | paramiko: 0.0756s, asyncssh: 0.1695s |
+| SFTP `write_bytes()` 256 KiB | paramiko: 0.0140s, asyncssh: 0.0150s |
+| SFTP `mkdir()` leaf dir | paramiko: 0.0018s, asyncssh: 0.0032s |
+| SFTP `rename()` file | paramiko: 0.0034s, asyncssh: 0.0049s |
+| SFTP `unlink()` file | paramiko: 0.0016s, asyncssh: 0.0032s |
+| SFTP `copy()` single 256 KiB file | paramiko: 0.0414s, asyncssh: 0.0544s |
+| SFTP `rm(recursive=True)` 9-file tree | paramiko: 0.3291s, asyncssh: TimeoutError |
+| SFTP cold connect + `stat()` | paramiko: 0.0288s, asyncssh: 0.0552s |
 
 ## Current Takeaways
 
 - `LocalPath` is competitive with `pathlib.Path` on several hot local
   operations in this run, but still trails on recursive globbing and the
   sampled `read_bytes()` case.
+- On this run, every completed sync-style SFTP measurement still favored
+  `paramiko`, including `iterdir()`, `glob()`, batched `read_bytes()`, and
+  batched `stat()`.
+- The current recursive remove probe is a useful warning sign: `paramiko`
+  completed the 9-file tree removal, while `asyncssh` timed out on this
+  loaded Windows machine.
 - Even after aligning auth/config behavior, the loopback SFTP comparison
-  still tends to favor `paramiko` for small sync-style calls. That matches
-  the design tradeoff: `asyncssh` is going through a sync-to-async bridge on
-  every small operation, while paramiko is already a sync client.
+  still points at the same design tradeoff: `asyncssh` is going through a
+  sync-to-async bridge on every small operation, while paramiko is already a
+  sync client.
 - The broad SFTP benchmark is useful for backend comparison even when the
   operation itself is exposed synchronously, because backend internals still
   affect overall throughput.
