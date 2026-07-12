@@ -14,6 +14,7 @@ import asyncssh as _asyncssh
 
 from ... import Source
 from . import BaseSftpBackend
+from ._paramiko import _DEFAULT_SSH_CONFIG
 
 # --- shared background event loop -------------------------------------
 # asyncssh is asyncio-only end to end (connect(), every SFTPClient method,
@@ -440,19 +441,24 @@ class _ConnectionCache:
 _CACHE = _ConnectionCache()
 
 
-async def _aconnect(source: "Source") -> _ConnectionEntry:
+async def _aconnect(
+    source: "Source",
+    connect_opts: "_ty.Mapping[str, _ty.Any] | None" = None,
+    sftp_version: int = 4,
+) -> _ConnectionEntry:
     user, password = source.parsed_userinfo()
     kwargs: "dict[str, _ty.Any]" = {"known_hosts": None}
+    if connect_opts:
+        kwargs.update(connect_opts)
     if user:
         kwargs["username"] = user
     if password:
         kwargs["password"] = password
     conn = await _asyncssh.connect(str(source.host), source.port or 22, **kwargs)
-    # asyncssh's client defaults to requesting v3 for compatibility --
-    # request v6 explicitly; asyncssh negotiates down to whatever the
-    # server actually supports (SFTPClient.version reports what was
-    # granted -- real-world OpenSSH stays at v3 regardless).
-    aclient = await conn.start_sftp_client(sftp_version=6)
+    # asyncssh currently supports SFTP protocol versions 3 and 4 here --
+    # request the configured maximum and let the server negotiate down
+    # (real-world OpenSSH still stays at v3).
+    aclient = await conn.start_sftp_client(sftp_version=sftp_version)
     return _ConnectionEntry(conn, _SyncSftpClient(aclient))
 
 
@@ -466,7 +472,7 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     fork-safe (a `fork()`ed child inherits a dead loop thread; detected via
     stored PID, loop+cache lazily recreated when `os.getpid()` changes)."""
 
-    __slots__ = ("max_concurrency",)
+    __slots__ = ("connect_opts", "max_concurrency", "sftp_version")
 
     #: asyncssh's chmod() takes follow_symlinks natively.
     supports_lchmod = True
@@ -475,18 +481,39 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     #: real-world OpenSSH v3 servers, or the standard opcode against v5/v6).
     supports_hardlink = True
 
-    def __init__(self, max_concurrency: int = 8):
+    def __init__(
+        self,
+        connect_opts: "dict[str, _ty.Any] | None" = None,
+        *,
+        max_concurrency: int = 8,
+        sftp_version: int = 4,
+        ssh_config=_DEFAULT_SSH_CONFIG,
+    ):
+        self.connect_opts = {} if connect_opts is None else dict(connect_opts)
+        if "config" not in self.connect_opts:
+            if ssh_config is None:
+                self.connect_opts["config"] = None
+            elif ssh_config is not _DEFAULT_SSH_CONFIG:
+                self.connect_opts["config"] = ssh_config
         self.max_concurrency = max_concurrency
+        self.sftp_version = sftp_version
 
     def client(self, source: "Source") -> _SyncSftpClient:
         entry = _CACHE.get_or_create(
-            (self, source), lambda: _run(_aconnect(source))
+            (self, source),
+            lambda: _run(
+                _aconnect(
+                    source,
+                    connect_opts=self.connect_opts,
+                    sftp_version=self.sftp_version,
+                )
+            ),
         )
         return entry.client
 
     @classmethod
-    def default(cls) -> "AsyncsshSftpBackend":
-        return cls()
+    def default(cls, ssh_config=_DEFAULT_SSH_CONFIG) -> "AsyncsshSftpBackend":
+        return cls(ssh_config=ssh_config)
 
 
 async def _concurrent_copy(

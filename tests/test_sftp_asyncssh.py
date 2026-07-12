@@ -248,6 +248,67 @@ def test_asyncssh_backend_has_max_concurrency():
 def test_asyncssh_backend_max_concurrency_defaults_to_8():
     backend = backend_mod.AsyncsshSftpBackend()
     assert backend.max_concurrency == 8
+    assert "config" not in backend.connect_opts
+
+
+def test_asyncssh_backend_accepts_connect_opts_and_sftp_version():
+    backend = backend_mod.AsyncsshSftpBackend(
+        {"config": None, "client_keys": None},
+        max_concurrency=12,
+        sftp_version=3,
+    )
+    assert backend.connect_opts == {"config": None, "client_keys": None}
+    assert backend.max_concurrency == 12
+    assert backend.sftp_version == 3
+
+
+def test_asyncssh_backend_ssh_config_kwarg_is_backend_agnostic():
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=None)
+    assert backend.connect_opts["config"] is None
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=("a", "b"))
+    assert backend.connect_opts["config"] == ("a", "b")
+
+
+def test_aconnect_merges_source_credentials_and_connect_opts(monkeypatch):
+    import asyncio
+
+    calls = {}
+
+    class _FakeConn:
+        async def start_sftp_client(self, *, sftp_version):
+            calls["sftp_version"] = sftp_version
+            return object()
+
+    async def _fake_connect(host, port, **kwargs):
+        calls["host"] = host
+        calls["port"] = port
+        calls["kwargs"] = kwargs
+        return _FakeConn()
+
+    monkeypatch.setattr(backend_mod._asyncssh, "connect", _fake_connect)
+
+    entry = asyncio.run(
+        backend_mod._aconnect(
+            Source("sftp", "user:pass", "host", 2222),
+            connect_opts={
+                "config": None,
+                "client_keys": None,
+                "agent_path": None,
+                "username": "ignored",
+            },
+            sftp_version=4,
+        )
+    )
+    assert isinstance(entry.client, backend_mod._SyncSftpClient)
+    assert calls["host"] == "host"
+    assert calls["port"] == 2222
+    assert calls["kwargs"]["config"] is None
+    assert calls["kwargs"]["client_keys"] is None
+    assert calls["kwargs"]["agent_path"] is None
+    assert calls["kwargs"]["known_hosts"] is None
+    assert calls["kwargs"]["username"] == "user"
+    assert calls["kwargs"]["password"] == "pass"
+    assert calls["sftp_version"] == 4
 
 
 def test_concurrent_copy_respects_max_concurrency():

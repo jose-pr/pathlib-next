@@ -100,6 +100,80 @@ def test_opts_merges_connect_opts():
     assert opts["timeout"] == 5
 
 
+def test_opts_uses_ssh_config_defaults(monkeypatch):
+    backend = SftpBackend({}, None)
+    monkeypatch.setattr(
+        "pathlib_next.uri.schemes.sftp._paramiko._lookup_ssh_config",
+        lambda host, ssh_config: {
+            "hostname": "real-host",
+            "port": "2200",
+            "user": "cfg-user",
+            "identityfile": ["id_test"],
+            "proxycommand": "ssh jump nc %h %p",
+        },
+    )
+    opts = backend.opts(Source("sftp", None, "alias-host", None))
+    assert opts["hostname"] == "real-host"
+    assert opts["port"] == 2200
+    assert opts["username"] == "cfg-user"
+    assert opts["key_filename"] == ["id_test"]
+    assert "sock" in opts
+
+
+def test_source_credentials_override_ssh_config(monkeypatch):
+    backend = SftpBackend({}, None)
+    monkeypatch.setattr(
+        "pathlib_next.uri.schemes.sftp._paramiko._lookup_ssh_config",
+        lambda host, ssh_config: {"port": "2200", "user": "cfg-user"},
+    )
+    opts = backend.opts(Source("sftp", "url-user:url-pass", "host", 2222))
+    assert opts["port"] == 2222
+    assert opts["username"] == "url-user"
+    assert opts["password"] == "url-pass"
+
+
+def test_sftppath_default_backend_uses_system_ssh_config(monkeypatch):
+    recorded = {}
+
+    def _fake_default(cls, ssh_config):
+        recorded["ssh_config"] = ssh_config
+        return object()
+
+    monkeypatch.setattr(SftpBackend, "default", classmethod(_fake_default))
+
+    class _PinnedSftpPath(SftpPath):
+        _default_backend_cls = SftpBackend
+        __SCHEMES = ()
+
+    inst = _PinnedSftpPath.__new__(_PinnedSftpPath)
+    inst._init(Source("sftp", None, "host", None), "/", "", "")
+    _ = inst.backend
+    from pathlib_next.uri.schemes.sftp._paramiko import _DEFAULT_SSH_CONFIG
+
+    assert recorded["ssh_config"] is _DEFAULT_SSH_CONFIG
+
+
+def test_sftppath_explicit_ssh_config_disables_system_lookup(monkeypatch):
+    recorded = {}
+
+    def _fake_default(cls, ssh_config):
+        recorded["ssh_config"] = ssh_config
+        return object()
+
+    monkeypatch.setattr(SftpBackend, "default", classmethod(_fake_default))
+
+    class _PinnedSftpPath(SftpPath):
+        _default_backend_cls = SftpBackend
+        __SCHEMES = ()
+
+    inst = _PinnedSftpPath.__new__(_PinnedSftpPath)
+    inst._init(
+        Source("sftp", None, "host", None), "/", "", "", ssh_config=None
+    )
+    _ = inst.backend
+    assert recorded["ssh_config"] is None
+
+
 # --- client cache keying/invalidation ---
 # SftpPath._sftpclient is a trivial `self.backend.client(self.source)`
 # delegation (post-schemes_layout/asyncssh_sftp split) -- caching is each

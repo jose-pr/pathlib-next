@@ -32,7 +32,7 @@ class BaseSftpBackend(object):
     def client(self, source: Source): ...
 
 
-from ._paramiko import SftpBackend as SftpBackend  # noqa: E402
+from ._paramiko import _DEFAULT_SSH_CONFIG, SftpBackend as SftpBackend  # noqa: E402
 
 
 # --- backend selection -----------------------------------------------------
@@ -115,7 +115,7 @@ class SftpPath(UriPath):
     `sftp-async` extra (asyncssh)."""
 
     __SCHEMES = ("sftp",)
-    __slots__ = ()
+    __slots__ = ("_ssh_config",)
 
     #: Class-level backend override, for a subclass to pin its own default
     #: without touching process env state. Wins over the env var, loses to
@@ -127,7 +127,28 @@ class SftpPath(UriPath):
 
     def _initbackend(self):
         cls = self._default_backend_cls or _resolve_default_backend_cls()
-        return cls.default()
+        return cls.default(ssh_config=self._ssh_config)
+
+    def _init(
+        self,
+        source,
+        path,
+        query,
+        fragment,
+        /,
+        backend=None,
+        ssh_config=_DEFAULT_SSH_CONFIG,
+        **kwargs,
+    ):
+        self._ssh_config = ssh_config
+        return super()._init(
+            source,
+            path,
+            query,
+            fragment,
+            backend=backend,
+            **kwargs,
+        )
 
     @property
     def _sftpclient(self):
