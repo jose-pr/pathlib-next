@@ -34,5 +34,6 @@ class GitPath(UriPath):
                 f"git: can only auto-detect github.com and gitlab.com; "
                 f"use github:, gitlab:, git+github:, or git+gitlab: for {uri!r}"
             )
-        return UriPath.__new__(provider_cls, *args, **kwargs)
-
+        inst = UriPath.__new__(provider_cls, *args, **kwargs)
+        inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
+        return inst

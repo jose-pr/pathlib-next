@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("requests")
 
 from pathlib_next.uri.schemes.github import GitHubPath, RepoBackend
-from pathlib_next.uri.schemes.git import GitHubGitPath, GitLabGitPath
+from pathlib_next.uri.schemes.git import GitHubGitPath, GitLabGitPath, GitPath
 from pathlib_next.uri.schemes.gitlab import GitLabPath
 from pathlib_next.uri import UriPath
 
@@ -212,6 +212,15 @@ def test_git_scheme_ref_survives_iterdir_child(github_api_server):
 def test_git_scheme_token_auth_works():
     p = UriPath("git://TOKEN@github.com/acme/widgets")
     assert p.backend.token == "TOKEN"
+
+
+def test_gitpath_direct_constructor_initializes_provider_instance():
+    p = GitPath("git://github.com/acme/widgets/a.txt?ref=dev")
+    assert type(p) is GitHubPath
+    assert p.owner == "acme"
+    assert p.repo == "widgets"
+    assert p.ref == "dev"
+    assert p.as_uri() == "git://github.com/acme/widgets/a.txt?ref=dev"
 
 
 # --- error translation ----------------------------------------------------
