@@ -18,7 +18,7 @@ pip install pathlib_next
 | Extra | Adds | Needed for |
 | --- | --- | --- |
 | `uri` | `uritools` | `Uri`/`UriPath` parsing (any URI scheme) |
-| `http` | `requests`, `bs4`, `htmllistparse` | `http(s)://` and `dav(s)://` (WebDAV) paths |
+| `http` | `requests` | `http(s)://` and `dav(s)://` (WebDAV) paths |
 | `sftp` | `paramiko` | `sftp://` paths (sync backend) |
 | `sftp-async` | `asyncssh` | `sftp://` paths via the asyncssh backend instead |
 | `s3` | `boto3` | `s3://bucket/key` paths |

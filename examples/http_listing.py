@@ -14,10 +14,11 @@ import sys
 
 from pathlib_next.uri import UriPath
 
-# A stable, classic Apache mod_autoindex directory listing -- htmllistparse
-# understands this format. Not every server does (e.g. many modern mirrors
-# render a JS-templated index page instead of a plain HTML listing) --
-# point HTTP_LISTING_URL at your own server if in doubt.
+# A stable, classic Apache mod_autoindex directory listing --
+# _DirectoryListingParser understands this format (and nginx's <table>
+# style). Not every server does (e.g. many modern mirrors render a
+# JS-templated index page instead of a plain HTML listing) -- point
+# HTTP_LISTING_URL at your own server if in doubt.
 DEFAULT_URL = "http://ftp.gnu.org/gnu/"
 
 

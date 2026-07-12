@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - New `sftp-async` extra: an `AsyncsshSftpBackend` (`asyncssh`, async internally, bridged to a sync API through one shared background event loop) alongside the existing paramiko-based `SftpBackend`. Auto-selected when `asyncssh` is importable (paramiko remains the fallback); override via the `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"`/`"asyncssh"`/`"auto"`) or a `SftpPath._default_backend_cls` subclass hook -- precedence, highest to lowest: explicit `backend=` kwarg > `_default_backend_cls` > env var > auto-detect. `PATHLIB_NEXT_SFTP_BACKEND=asyncssh` with the package missing raises immediately rather than silently falling back. Connections are cached per `(backend, source)` (no thread dimension needed -- one shared connection serves concurrent calls from any calling thread, unlike paramiko's `(backend, source, thread)` cache). Works on Python 3.9 too via a verified version pin (`asyncssh<2.22`; current `asyncssh` needs >=3.10) resolved automatically through `pyproject.toml` environment markers -- no code branching. New `SftpPath.symlink_to()`/`readlink()` (both backends -- core SFTPv3 operations) and `hardlink_to()` (asyncssh backend only; paramiko's `SFTPClient` has no hard-link operation, so it raises `NotImplementedError` immediately with no server round trip). `chmod(follow_symlinks=False)` now works on the asyncssh backend (native support) while still raising `NotImplementedError` on paramiko (no `lchmod` equivalent). This is additive, not a performance change -- see `future_async_sftp_perf.md` for the (separate, unscheduled) concurrent-fan-out work that would actually exploit asyncssh's pipelining.
 
 ### Changed
-- Replaced the third-party `htmllistparse` and `bs4` directory listing scraper dependencies with a hand-rolled, zero-dependency `html.parser.HTMLParser` subclass (`_DirectoryListingParser`), achieving an 8x performance speedup while dropping external library dependencies from the `http` extra in `pyproject.toml`.
+- Replaced the third-party `htmllistparse` and `bs4` directory listing scraper dependencies with a hand-rolled, zero-dependency `html.parser.HTMLParser` subclass (`_DirectoryListingParser`), dropping both from the `http` extra in `pyproject.toml`. Verified equivalent output (name/size/modified, both Apache-`<pre>` and nginx-`<table>` formats) against the replaced `bs4`+`html5lib`+`htmllistparse` implementation, and 2.9x-6.2x faster depending on format/listing size (see `http_verify_and_fix.md`'s benchmark notes for the old-vs-new methodology; `benchmarks/bench.py`'s `8`/`9` entries benchmark the new parser alone going forward, since the old implementation no longer exists in the tree).
 - Matrix expansion in GitHub Actions CI to test Python 3.10, 3.11, and 3.12 (on Ubuntu).
 - Added a "no-extras" CI job to run tests without optional dependencies installed.
 - `PathSyncer.log()` now logs through `logging.getLogger("pathlib_next.sync")`
@@ -126,6 +126,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an authority present as the same root as `"/"` (RFC 3986:
   `"http://host"` == `"http://host/"`) instead of joining a bare, ambiguous
   name with no leading slash.
+- `_DirectoryListingParser._RE_FILESIZE`'s digit class excluded `,` -- the
+  `<table>` path strips commas from cell text before matching, but the
+  `<pre>` path matches first, so a comma-thousands size like `1,024`
+  matched only `"1"`, truncating `size` and leaking `,024` into
+  `description`.
+- The RFC-1123 datetime bucket's trailing timezone match
+  (`... \d{2}:\d{2}:\d{2} .+`) used an unbounded, greedy `.+` that
+  swallowed the rest of the `<pre>` listing line, including any trailing
+  size/description text on the same row -- `time.strptime()` then raised
+  on the unconverted data, silently dropping `modified` **and** every
+  field after it for that entry. Narrowed to `\S+` (the timezone is one
+  token).
+- `_DirectoryListingParser`'s absolute-href filter was a blanket
+  `startswith('/')` -- a reverse-proxied/absolute-URL-configured server
+  rendering *every* entry (not just the parent-directory link) as an
+  absolute href got back a completely empty listing, with no fallback
+  able to recover it. Scoped the filter to hrefs outside the listing's own
+  directory (parsed from `<title>Index of ...</title>`) instead, falling
+  back to the old blanket-drop behavior only when no title was parseable.
+- `HttpPath.stat()`'s post-redirect HEAD re-fetch had no HEAD-405-to-GET
+  fallback, unlike the pre-redirect loop -- a server/proxy that rejects
+  HEAD outright (not just pre-redirect) surfaced `PermissionError` for a
+  directory that actually exists. Now mirrors the pre-redirect loop's
+  fallback.
+- `HttpPath._listdir()` now retries once with a trailing slash if the
+  slash-less path 404s (defensive: real redirecting servers already work
+  via `requests`' default GET redirect-following, but a non-redirecting
+  server/proxy previously had no fallback at all).
+- `HttpWriteStream.close()` raised *before* marking the underlying stream
+  closed on a failed upload, so a second `close()` call (context-manager
+  `__exit__` cleanup, or GC via `IOBase.__del__`) silently retried the PUT.
+  Now marks closed even on failure.
+- `HttpPath.rmdir()`/`DavPath.rmdir()` never checked `is_dir()` before
+  falling through to `unlink()` -- an empty directory's listing and a
+  *file* whose body/PROPFIND response yields zero real entries are
+  indistinguishable from `_listdir()` alone, so calling `rmdir()` on a
+  file silently deleted it instead of raising `NotADirectoryError`
+  (`os.rmdir()`'s ENOTDIR contract).
 
 ## [0.7.0] - 2026-07-11
 

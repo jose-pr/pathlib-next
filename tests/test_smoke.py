@@ -17,7 +17,7 @@ def test_import_bare():
 def test_import_optional_submodules_guarded():
     # http/sftp schemes are guarded by try/except ImportError in
     # uri/schemes/__init__.py; importing the package must not require
-    # requests/bs4/htmllistparse/paramiko to be installed.
+    # requests/paramiko to be installed.
     import pathlib_next.uri.schemes  # noqa: F401
 
 

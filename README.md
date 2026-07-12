@@ -55,7 +55,7 @@ Optional features/extras:
 | Extra/flag | Adds | Needed for |
 | --- | --- | --- |
 | `uri` | `uritools` | URI parsing (any `UriPath` scheme) |
-| `http` | `requests`, `bs4`, `htmllistparse` | `http(s):` and `dav(s):` (WebDAV) paths |
+| `http` | `requests` | `http(s):` and `dav(s):` (WebDAV) paths |
 | `sftp` | `paramiko` | `sftp:` path operations and transfers (sync backend) |
 | `sftp-async` | `asyncssh` | `sftp:` path operations via the asyncssh backend instead (see `guides/schemes.md`'s `sftp:` row for selection precedence) |
 | `s3` | `boto3` | `s3://bucket/key` paths |
