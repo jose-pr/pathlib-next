@@ -28,6 +28,7 @@ class _Paginator:
 class _FakeS3Client:
     def __init__(self):
         self.objects = {}  # key -> bytes
+        self.delete_errors = []
 
     def head_bucket(self, Bucket):
         return {}
@@ -75,6 +76,11 @@ class _FakeS3Client:
 
     def delete_object(self, Bucket, Key):
         self.objects.pop(Key, None)
+
+    def delete_objects(self, Bucket, Delete):
+        for item in Delete["Objects"]:
+            self.objects.pop(item["Key"], None)
+        return {"Deleted": Delete["Objects"], "Errors": self.delete_errors}
 
     def copy_object(self, Bucket, Key, CopySource):
         self.objects[Key] = self.objects[CopySource["Key"]]
@@ -195,6 +201,73 @@ def test_rmdir_non_empty_raises_oserror():
     backend._client.objects["dir/file.txt"] = b"x"
     with pytest.raises(OSError):
         _s3("s3://bucket/dir", backend).rmdir()
+
+
+def test_rm_recursive_uses_batch_delete_for_prefix():
+    backend = _FakeBackend()
+    backend._client.objects.update(
+        {
+            "dir/": b"",
+            "dir/a.txt": b"a",
+            "dir/sub/b.txt": b"b",
+            "other.txt": b"keep",
+        }
+    )
+    _s3("s3://bucket/dir", backend).rm(recursive=True)
+    assert backend._client.objects == {"other.txt": b"keep"}
+
+
+def test_rm_recursive_missing_ok():
+    _s3("s3://bucket/missing", _FakeBackend()).rm(recursive=True, missing_ok=True)
+
+
+def test_rm_recursive_missing_without_missing_ok_raises():
+    with pytest.raises(FileNotFoundError):
+        _s3("s3://bucket/missing", _FakeBackend()).rm(recursive=True)
+
+
+def test_rm_recursive_ignore_error_swallows_missing():
+    calls = []
+    _s3("s3://bucket/missing", _FakeBackend()).rm(
+        recursive=True,
+        ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
+    )
+    assert calls == [(FileNotFoundError, "missing")]
+
+
+def test_rm_recursive_root_guard():
+    backend = _FakeBackend()
+    backend._client.objects["a.txt"] = b"x"
+    with pytest.raises(PermissionError):
+        _s3("s3://bucket/", backend).rm(recursive=True)
+    assert backend._client.objects == {"a.txt": b"x"}
+
+
+def test_rm_recursive_delete_objects_errors_raise():
+    backend = _FakeBackend()
+    backend._client.objects["dir/a.txt"] = b"x"
+    backend._client.delete_errors = [{"Key": "dir/a.txt", "Code": "AccessDenied"}]
+    with pytest.raises(OSError, match="delete_objects failed"):
+        _s3("s3://bucket/dir", backend).rm(recursive=True)
+
+
+def test_rm_recursive_delete_objects_errors_ignore_error():
+    backend = _FakeBackend()
+    backend._client.objects["dir/a.txt"] = b"x"
+    backend._client.delete_errors = [{"Key": "dir/a.txt", "Code": "AccessDenied"}]
+    calls = []
+    _s3("s3://bucket/dir", backend).rm(
+        recursive=True,
+        ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
+    )
+    assert calls == [(OSError, "dir")]
+
+
+def test_rm_non_recursive_keeps_rmdir_contract():
+    backend = _FakeBackend()
+    backend._client.objects["dir/file.txt"] = b"x"
+    with pytest.raises(OSError):
+        _s3("s3://bucket/dir", backend).rm()
 
 
 def test_rename_uses_copy_then_delete():
