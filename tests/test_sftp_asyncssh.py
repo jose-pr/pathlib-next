@@ -6,6 +6,7 @@ server) is covered by TestSftpContract's "asyncssh" param in
 test_contract.py.
 """
 import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -311,41 +312,121 @@ def test_aconnect_merges_source_credentials_and_connect_opts(monkeypatch):
     assert calls["sftp_version"] == 4
 
 
-def test_concurrent_copy_respects_max_concurrency():
-    """The real helper should use bounded worker-thread fan-out."""
+class _FakeAsyncCopyFile:
+    def __init__(self, client, path, mode):
+        self.client = client
+        self.path = path
+        self.mode = mode
+
+    async def read(self, size=-1):
+        data = self.client.files[self.path]
+        self.client.files[self.path] = b""
+        return data
+
+    async def write(self, data):
+        self.client.files[self.path] = self.client.files.get(self.path, b"") + data
+
+    async def close(self):
+        pass
+
+
+class _FakeAsyncCopyClient:
+    def __init__(self, *, fail_paths=frozenset(), delay=0):
+        self.files = {
+            "/src/a.txt": b"a",
+            "/src/b.txt": b"b",
+            "/src/c.txt": b"c",
+            "/src/d.txt": b"d",
+        }
+        self.dirs = {"/src": ["a.txt", "b.txt", "c.txt", "d.txt"], "/dst": []}
+        self.fail_paths = set(fail_paths)
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+
+    async def _enter(self, path=None):
+        import asyncio
+
+        if path in self.fail_paths:
+            raise asyncssh.SFTPFailure(path)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+
+    async def _exit(self):
+        self.active -= 1
+
+    async def stat(self, path):
+        await self._enter(path)
+        try:
+            if path in self.dirs:
+                return _sftp_attrs(True)
+            if path in self.files:
+                return _sftp_attrs(False)
+            raise asyncssh.SFTPNoSuchFile(path)
+        finally:
+            await self._exit()
+
+    async def lstat(self, path):
+        return await self.stat(path)
+
+    async def readdir(self, path):
+        await self._enter(path)
+        try:
+            return [SimpleNamespace(filename=name) for name in self.dirs[path]]
+        finally:
+            await self._exit()
+
+    async def mkdir(self, path, attrs):
+        await self._enter(path)
+        try:
+            self.dirs[path] = []
+        finally:
+            await self._exit()
+
+    async def remove(self, path):
+        await self._enter(path)
+        try:
+            self.files.pop(path, None)
+        finally:
+            await self._exit()
+
+    async def chmod(self, path, mode):
+        await self._enter(path)
+        await self._exit()
+
+    async def open(self, path, mode, encoding=None):
+        await self._enter(path)
+        try:
+            if "w" in mode:
+                self.files[path] = b""
+            return _FakeAsyncCopyFile(self, path, mode)
+        finally:
+            await self._exit()
+
+
+class _FakeAsyncCopyPath:
+    def __init__(self, client, path):
+        self.path = path
+        self.name = path.rstrip("/").rsplit("/", 1)[-1]
+        self._sftpclient = SimpleNamespace(_aclient=client)
+
+    def __truediv__(self, name):
+        return type(self)(self._sftpclient._aclient, f"{self.path}/{name}")
+
+    def iterdir(self):
+        return [self / name for name in self._sftpclient._aclient.dirs[self.path]]
+
+
+def test_concurrent_copy_native_respects_max_concurrency():
     import asyncio
-    import threading
-    import time
 
-    in_flight = 0
-    max_in_flight = 0
-    lock = threading.Lock()
-
-    class _FakeTarget:
-        def __truediv__(self, name):
-            return self
-
-    class _FakeChild:
-        def __init__(self, name):
-            self.name = name
-
-        def copy(self, target, **kwargs):
-            nonlocal in_flight, max_in_flight
-            with lock:
-                in_flight += 1
-                max_in_flight = max(max_in_flight, in_flight)
-            time.sleep(0.02)
-            with lock:
-                in_flight -= 1
-
-    class _FakePath:
-        def iterdir(self):
-            return [_FakeChild(str(i)) for i in range(10)]
-
+    client = _FakeAsyncCopyClient(delay=0.01)
     asyncio.run(
         backend_mod._concurrent_copy(
-            _FakePath(),
-            _FakeTarget(),
+            _FakeAsyncCopyPath(client, "/src"),
+            _FakeAsyncCopyPath(client, "/dst"),
             overwrite=False,
             follow_symlinks=True,
             preserve_metadata=True,
@@ -353,37 +434,20 @@ def test_concurrent_copy_respects_max_concurrency():
             ignore_error=None,
         )
     )
-    assert 1 < max_in_flight <= 3
+    assert client.files["/dst/a.txt"] == b"a"
+    assert client.files["/dst/d.txt"] == b"d"
+    assert 1 < client.max_active <= 3
 
 
 def test_concurrent_copy_ignore_error_allows_partial_failure():
-    """The real helper should continue and route errors to ignore_error."""
     import asyncio
 
-    completed = []
+    client = _FakeAsyncCopyClient(fail_paths={"/src/a.txt", "/src/c.txt"})
     errors = []
-
-    class _FakeTarget:
-        def __truediv__(self, name):
-            return self
-
-    class _FakeChild:
-        def __init__(self, name):
-            self.name = name
-
-        def copy(self, target, **kwargs):
-            if int(self.name) % 2 == 0:
-                raise ValueError(f"child {self.name} failed")
-            completed.append(self.name)
-
-    class _FakePath:
-        def iterdir(self):
-            return [_FakeChild(str(i)) for i in range(5)]
-
     asyncio.run(
         backend_mod._concurrent_copy(
-            _FakePath(),
-            _FakeTarget(),
+            _FakeAsyncCopyPath(client, "/src"),
+            _FakeAsyncCopyPath(client, "/dst"),
             overwrite=False,
             follow_symlinks=True,
             preserve_metadata=True,
@@ -391,48 +455,31 @@ def test_concurrent_copy_ignore_error_allows_partial_failure():
             ignore_error=errors.append,
         )
     )
-    assert completed == ["1", "3"]
-    assert len(errors) == 3
-    assert all(isinstance(error, ValueError) for error in errors)
+    assert sorted(path for path in client.files if path.startswith("/dst/")) == [
+        "/dst/b.txt",
+        "/dst/d.txt",
+    ]
+    assert len(errors) == 2
+    assert all(isinstance(error, OSError) for error in errors)
 
 
 def test_concurrent_copy_fail_fast_cancels_queued_children():
-    """Fail-fast should stop the full queued batch from draining."""
     import asyncio
 
-    started = []
-
-    class _FakeTarget:
-        def __truediv__(self, name):
-            return self
-
-    class _FakeChild:
-        def __init__(self, name):
-            self.name = name
-
-        def copy(self, target, **kwargs):
-            started.append(self.name)
-            if self.name == "0":
-                raise ValueError("boom")
-
-    class _FakePath:
-        def iterdir(self):
-            return [_FakeChild(str(i)) for i in range(4)]
-
-    with pytest.raises(ValueError, match="boom"):
+    client = _FakeAsyncCopyClient(fail_paths={"/src/a.txt"}, delay=0.01)
+    with pytest.raises(OSError):
         asyncio.run(
             backend_mod._concurrent_copy(
-                _FakePath(),
-                _FakeTarget(),
+                _FakeAsyncCopyPath(client, "/src"),
+                _FakeAsyncCopyPath(client, "/dst"),
                 overwrite=False,
                 follow_symlinks=True,
                 preserve_metadata=True,
                 max_concurrency=1,
                 ignore_error=None,
             )
-            )
-    assert started[0] == "0"
-    assert len(started) < 4
+        )
+    assert len([path for path in client.files if path.startswith("/dst/")]) < 4
 
 
 def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
@@ -461,3 +508,175 @@ def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
     assert recorded["path"] is src
     assert recorded["target"] is target
     assert recorded["kwargs"]["max_concurrency"] == 5
+
+
+# --- concurrent remove tests ---------------------------------------------
+
+
+def _sftp_attrs(is_dir):
+    permissions = 0o40755 if is_dir else 0o100644
+    file_type = asyncssh.FILEXFER_TYPE_DIRECTORY if is_dir else asyncssh.FILEXFER_TYPE_REGULAR
+    return asyncssh.SFTPAttrs(type=file_type, permissions=permissions)
+
+
+class _FakeAsyncRmClient:
+    def __init__(self, tree, *, delay=0, fail_remove=frozenset()):
+        self.tree = tree
+        self.delay = delay
+        self.fail_remove = set(fail_remove)
+        self.active = 0
+        self.max_active = 0
+        self.removed = []
+        self.rmdirs = []
+
+    async def _enter(self):
+        import asyncio
+
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+
+    async def _exit(self):
+        self.active -= 1
+
+    async def stat(self, path):
+        await self._enter()
+        try:
+            if path not in self.tree:
+                raise asyncssh.SFTPNoSuchFile(path)
+            return _sftp_attrs(self.tree[path] is not None)
+        finally:
+            await self._exit()
+
+    async def lstat(self, path):
+        return await self.stat(path)
+
+    async def readdir(self, path):
+        await self._enter()
+        try:
+            children = self.tree[path] or []
+            return [SimpleNamespace(filename=name) for name in children]
+        finally:
+            await self._exit()
+
+    async def remove(self, path):
+        await self._enter()
+        try:
+            if path in self.fail_remove:
+                raise asyncssh.SFTPFailure(path)
+            self.removed.append(path)
+        finally:
+            await self._exit()
+
+    async def rmdir(self, path):
+        await self._enter()
+        try:
+            self.rmdirs.append(path)
+        finally:
+            await self._exit()
+
+
+class _FakeAsyncRmPath:
+    name = "root"
+
+    def __init__(self, client, path="/root"):
+        self.path = path
+        self._sftpclient = SimpleNamespace(_aclient=client)
+
+    def __truediv__(self, name):
+        child = _FakeAsyncRmPath(self._sftpclient._aclient, f"{self.path}/{name}")
+        child.name = name
+        return child
+
+
+def test_concurrent_rm_uses_native_asyncssh_calls_and_respects_max_concurrency():
+    import asyncio
+
+    tree = {
+        "/root": ["a.txt", "b.txt", "c.txt", "d.txt"],
+        "/root/a.txt": None,
+        "/root/b.txt": None,
+        "/root/c.txt": None,
+        "/root/d.txt": None,
+    }
+    client = _FakeAsyncRmClient(tree, delay=0.01)
+
+    asyncio.run(
+        backend_mod._concurrent_rm(
+            _FakeAsyncRmPath(client),
+            max_concurrency=2,
+            missing_ok=False,
+            on_error=None,
+        )
+    )
+
+    assert set(client.removed) == {"/root/a.txt", "/root/b.txt", "/root/c.txt", "/root/d.txt"}
+    assert client.rmdirs == ["/root"]
+    assert 1 < client.max_active <= 2
+
+
+def test_concurrent_rm_ignore_error_receives_error_and_path():
+    import asyncio
+
+    tree = {
+        "/root": ["ok.txt", "bad.txt"],
+        "/root/ok.txt": None,
+        "/root/bad.txt": None,
+    }
+    client = _FakeAsyncRmClient(tree, fail_remove={"/root/bad.txt"})
+    ignored = []
+
+    asyncio.run(
+        backend_mod._concurrent_rm(
+            _FakeAsyncRmPath(client),
+            max_concurrency=4,
+            missing_ok=False,
+            on_error=lambda error, path: ignored.append((type(error), path.path)) or True,
+        )
+    )
+
+    assert client.removed == ["/root/ok.txt"]
+    assert ignored == [(OSError, "/root/bad.txt")]
+    assert client.rmdirs == ["/root"]
+
+
+def test_concurrent_rm_missing_root_honors_missing_ok():
+    import asyncio
+
+    client = _FakeAsyncRmClient({})
+
+    asyncio.run(
+        backend_mod._concurrent_rm(
+            _FakeAsyncRmPath(client),
+            max_concurrency=4,
+            missing_ok=True,
+            on_error=None,
+        )
+    )
+
+    assert client.removed == []
+    assert client.rmdirs == []
+
+
+def test_sftppath_rm_recursive_uses_concurrent_helper(monkeypatch):
+    import asyncio
+
+    recorded = {}
+
+    async def _fake_concurrent_rm(path, **kwargs):
+        recorded["path"] = path
+        recorded["kwargs"] = kwargs
+
+    monkeypatch.setattr(backend_mod, "_concurrent_rm", _fake_concurrent_rm)
+    monkeypatch.setattr(backend_mod, "_run", lambda coro: asyncio.run(coro))
+
+    src = sftp_pkg.SftpPath(
+        "sftp://host/src", backend=backend_mod.AsyncsshSftpBackend(max_concurrency=6)
+    )
+    src.rm(recursive=True, missing_ok=True, ignore_error=True)
+
+    assert recorded["path"] is src
+    assert recorded["kwargs"]["max_concurrency"] == 6
+    assert recorded["kwargs"]["missing_ok"] is True
+    assert recorded["kwargs"]["on_error"](ValueError("ignored"), src) is True

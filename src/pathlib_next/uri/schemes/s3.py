@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io as _io
+import itertools as _itertools
 import typing as _ty
 
 import botocore.exceptions as _botoexc
@@ -179,6 +180,74 @@ class S3Path(UriPath):
         if any(obj["Key"] != marker for obj in contents):
             raise OSError(f"Directory not empty: {self}")
         self._client.delete_object(Bucket=self.bucket, Key=marker)
+
+    def rm(
+        self,
+        /,
+        recursive=False,
+        missing_ok=False,
+        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+    ):
+        if not recursive:
+            return super().rm(
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+            )
+
+        def on_error(error):
+            if callable(ignore_error):
+                return ignore_error(error, self)
+            return bool(ignore_error)
+
+        if not self.key:
+            error = PermissionError("recursive bucket delete is not enabled")
+            if not on_error(error):
+                raise error
+            return
+
+        marker = f"{self.key}/" if self.key else ""
+        paginator = self._client.get_paginator("list_objects_v2")
+        keys = []
+        try:
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=marker):
+                keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        except Exception as error:
+            if not on_error(error):
+                raise
+            return
+
+        if marker and marker not in keys:
+            try:
+                if self.exists():
+                    keys.append(marker)
+            except FileNotFoundError:
+                pass
+
+        if not keys:
+            if missing_ok:
+                return
+            error = FileNotFoundError(self)
+            if not on_error(error):
+                raise error
+            return
+
+        iterator = iter(keys)
+        while True:
+            batch = list(_itertools.islice(iterator, 1000))
+            if not batch:
+                break
+            try:
+                response = self._client.delete_objects(
+                    Bucket=self.bucket,
+                    Delete={"Objects": [{"Key": key} for key in batch]},
+                )
+                errors = response.get("Errors", []) if response else []
+                if errors:
+                    raise OSError(f"S3 delete_objects failed: {errors!r}")
+            except Exception as error:
+                if not on_error(error):
+                    raise
 
     def rename(self, target: "S3Path | Uri | str"):
         if not isinstance(target, Uri):

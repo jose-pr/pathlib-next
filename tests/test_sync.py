@@ -4,6 +4,7 @@ import pytest
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
+from pathlib_next.utils.stat import FileStat
 from pathlib_next.utils.sync import PathAndStat, PathSyncer
 
 
@@ -145,3 +146,31 @@ def test_sync_default_checksum(tmp_path):
     assert (tmp_path / "a.txt").read_text() == "aaa"
     assert (tmp_path / "sub" / "b.txt").read_text() == "bb"
 
+
+def test_sync_reuses_scandir_metadata_when_not_following_symlinks():
+    class CountingMemPath(MemPath):
+        stat_calls = 0
+
+        def stat(self, *, follow_symlinks=True):
+            type(self).stat_calls += 1
+            return super().stat(follow_symlinks=follow_symlinks)
+
+        def _scandir(self):
+            for child in self.iterdir():
+                yield child.name, FileStat(is_dir=child.name == "sub")
+
+    source = CountingMemPath("/")
+    (source / "a.txt").write_text("aaa")
+    (source / "b.txt").write_text("bbb")
+    target = CountingMemPath("/target")
+    target.mkdir()
+
+    CountingMemPath.stat_calls = 0
+    PathSyncer(lambda entry: entry.stat.st_size, follow_symlinks=False).sync(
+        source, target, dry_run=True
+    )
+
+    # Root source/target are still statted at sync start, but source
+    # children should be built from _scandir() metadata rather than
+    # refreshed one-by-one.
+    assert CountingMemPath.stat_calls == 4

@@ -20,6 +20,18 @@ That opt-in flag enables the recursive SFTP probe rows, which are more
 expensive and are best treated as CI/manual benchmark runs rather than
 something to trust on a loaded development machine.
 
+Narrow SFTP probes:
+
+```bash
+python benchmarks/bench.py sftp-recursive
+python benchmarks/bench.py sftp-recursive-copy
+python benchmarks/bench.py sftp-batch
+python benchmarks/bench.py syncer
+```
+
+Use these when investigating SFTP behavior; `--help` is safe and prints
+available benchmark subcommands without running benchmark work.
+
 ## What It Covers
 
 - URI parse / compose cost
@@ -106,6 +118,34 @@ Legend: `p` = `paramiko`, `a` = `asyncssh`.
 
 ## Current Takeaways
 
+- Post-fix note, July 12, 2026: `asyncssh` recursive remove now has a
+  backend-native bounded async implementation, and generic recursive `rm()`
+  now reuses listing metadata for backends such as paramiko SFTP. On a local
+  Windows `.venv/3.12.10` run, `python benchmarks/bench.py sftp-recursive`
+  completed the 9-file remove probe: paramiko `0.1531s`, asyncssh `0.2293s`
+  (`paramiko/asyncssh=0.67x`). The older timeout rows above are pre-fix
+  snapshots.
+- On the same machine, `python benchmarks/bench.py sftp-batch` reported:
+  64-file reads paramiko `0.1688s` vs asyncssh `0.3664s`; 64-file stats
+  paramiko `0.0526s` vs asyncssh `0.1058s`; single unlink paramiko `0.0014s`
+  vs asyncssh `0.0026s`.
+- After native asyncssh recursive copy, `python benchmarks/bench.py
+  sftp-recursive-copy` completed locally: paramiko `0.1162s`, asyncssh
+  `0.1698s` for the 4-file tree. Asyncssh scaling probes reported
+  `mc=1: 0.2631s` and `mc=4: 0.2921s`, so higher concurrency did not help
+  this tiny loopback fixture.
+- `python benchmarks/bench.py syncer` on the same local run reported
+  PathSyncer copy of 128 local files at `0.4524s`, dry-run at `0.0534s`, and
+  remove-missing plus copy at `0.9260s`. This suggests metadata reuse may be
+  worth investigating before adding parallel sync behavior.
+- After PathSyncer metadata reuse, a later local `syncer` run reported copy
+  at `0.4390s`, dry-run at `0.0535s`, and remove-missing plus copy at
+  `0.4764s`. Treat this as a meaningful remove-missing improvement and a
+  roughly neutral copy/dry-run result; local variance produced one slower
+  outlier run.
+- S3 recursive delete now uses provider-native `delete_objects` batching for
+  prefixed trees while guarding bucket-root recursive delete. This is based
+  on fake-client call-shape tests rather than live AWS timing.
 - `LocalPath` is competitive with `pathlib.Path` on several hot local
   operations in this run, but still trails on recursive globbing and the
   sampled `read_bytes()` case.
