@@ -146,6 +146,16 @@ Legend: `p` = `paramiko`, `a` = `asyncssh`.
 - S3 recursive delete now uses provider-native `delete_objects` batching for
   prefixed trees while guarding bucket-root recursive delete. This is based
   on fake-client call-shape tests rather than live AWS timing.
+- `python benchmarks/bench.py recursive-matrix` on a local Windows
+  `.venv/3.12.10` verification run reported: `LocalPath` recursive copy
+  `0.7687s`, `LocalPath` recursive remove `0.7174s`, `MemPath` recursive copy
+  `0.0181s`, and `MemPath` recursive remove `0.0176s` for a 33-file tree.
+  An earlier same-machine run was faster, so treat local filesystem timings as
+  noisy and use the command primarily for trend checks. The same
+  command reported the fake S3 recursive delete call shape as one
+  `head_object`, one `list_objects_v2`, one `delete_objects`, and 34 deleted
+  keys including the marker. GCS and Azure recursive provider rows were still
+  not implemented in that run.
 - `LocalPath` is competitive with `pathlib.Path` on several hot local
   operations in this run, but still trails on recursive globbing and the
   sampled `read_bytes()` case.

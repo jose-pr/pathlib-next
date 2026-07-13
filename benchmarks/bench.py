@@ -10,6 +10,7 @@ import functools
 import http.server
 import threading
 import time
+import datetime
 from pathlib import Path as StdlibPath
 
 # Add src to sys.path so we can import pathlib_next without installing it
@@ -947,6 +948,166 @@ def print_pathsyncer_results(rows, *, markdown=False):
         print(f"   - {name}: {_fmt_metric(metric)}")
 
 
+def _recursive_matrix_files():
+    files = {}
+    for i in range(4):
+        for j in range(8):
+            files[f"dir_{i}/file_{j:02d}.txt"] = f"{i}-{j}\n"
+    files["dir_0/nested/deep.txt"] = "deep\n"
+    return files
+
+
+def _seed_stdlib_tree(root):
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    _write_tree(root, _recursive_matrix_files())
+
+
+def _seed_mem_tree(path):
+    for relpath, data in _recursive_matrix_files().items():
+        file_path = path / relpath
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(data)
+
+
+def benchmark_recursive_matrix():
+    """Narrow recursive operation probes for local, mem, and fake providers."""
+    rows = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = StdlibPath(tmpdir)
+        src = root / "src"
+        dst = root / "dst"
+        victim = root / "victim"
+        _seed_stdlib_tree(src)
+
+        def local_copy():
+            if dst.exists():
+                shutil.rmtree(dst)
+            LocalPath(src).copy(LocalPath(dst), recursive=True)
+
+        def local_rm():
+            _seed_stdlib_tree(victim)
+            LocalPath(victim).rm(recursive=True)
+
+        rows.append(("LocalPath copy(recursive=True) 33-file tree", _measure_status(local_copy, repeat=3)))
+        rows.append(("LocalPath rm(recursive=True) 33-file tree", _measure_status(local_rm, repeat=3)))
+
+    def mem_copy():
+        backend = MemPathBackend()
+        src = MemPath("/src", backend=backend)
+        dst = MemPath("/dst", backend=backend)
+        src.mkdir()
+        _seed_mem_tree(src)
+        src.copy(dst, recursive=True)
+
+    def mem_rm():
+        backend = MemPathBackend()
+        victim = MemPath("/victim", backend=backend)
+        victim.mkdir()
+        _seed_mem_tree(victim)
+        victim.rm(recursive=True)
+
+    rows.append(("MemPath copy(recursive=True) 33-file tree", _measure_status(mem_copy, repeat=3)))
+    rows.append(("MemPath rm(recursive=True) 33-file tree", _measure_status(mem_rm, repeat=3)))
+    rows.extend(_provider_recursive_call_count_rows())
+    return rows
+
+
+def _provider_recursive_call_count_rows():
+    rows = []
+
+    try:
+        from pathlib_next.uri.schemes.s3 import BaseS3Backend, S3Path
+    except Exception as error:
+        rows.append(("S3 rm(recursive=True) call count", f"skipped: {error}"))
+    else:
+        class FakeS3Client:
+            def __init__(self):
+                self.objects = {"dir/": b""}
+                self.calls = {
+                    "head_object": 0,
+                    "list_objects_v2": 0,
+                    "delete_objects": 0,
+                }
+                for relpath in _recursive_matrix_files():
+                    self.objects[f"dir/{relpath}"] = b"x"
+
+            def head_object(self, Bucket, Key):
+                self.calls["head_object"] += 1
+                if Key not in self.objects:
+                    from botocore.exceptions import ClientError
+
+                    raise ClientError(
+                        {"Error": {"Code": "404", "Message": "404"}},
+                        "HeadObject",
+                    )
+                return {
+                    "ContentLength": len(self.objects[Key]),
+                    "LastModified": datetime.datetime(2026, 1, 1, 12, 0, 0),
+                }
+
+            def get_paginator(self, name):
+                assert name == "list_objects_v2"
+                return self
+
+            def paginate(self, **kwargs):
+                yield self.list_objects_v2(**kwargs)
+
+            def list_objects_v2(self, Bucket, Prefix="", **_kwargs):
+                self.calls["list_objects_v2"] += 1
+                contents = [
+                    {"Key": key}
+                    for key in sorted(self.objects)
+                    if key.startswith(Prefix)
+                ]
+                return {"KeyCount": len(contents), "Contents": contents}
+
+            def delete_objects(self, Bucket, Delete):
+                self.calls["delete_objects"] += 1
+                for item in Delete["Objects"]:
+                    self.objects.pop(item["Key"], None)
+                return {"Deleted": Delete["Objects"]}
+
+        class FakeS3Backend(BaseS3Backend):
+            def __init__(self):
+                self.client_obj = FakeS3Client()
+
+            def client(self):
+                return self.client_obj
+
+        backend = FakeS3Backend()
+        S3Path("s3://bucket/dir", backend=backend).rm(recursive=True)
+        calls = backend.client_obj.calls
+        deleted = 34 - len(backend.client_obj.objects)
+        rows.append(
+            (
+                "S3 rm(recursive=True) fake 33-file tree",
+                "head_object={head_object}, list_objects_v2={list_objects_v2}, "
+                "delete_objects={delete_objects}, deleted={deleted}".format(
+                    deleted=deleted,
+                    **calls,
+                ),
+            )
+        )
+
+    rows.append(("GCS rm(recursive=True) call count", "not implemented"))
+    rows.append(("Azure rm(recursive=True) call count", "not implemented"))
+    return rows
+
+
+def print_recursive_matrix_results(rows, *, markdown=False):
+    if markdown:
+        print("| Benchmark Case | Time / Metric |")
+        print("|---|---|")
+        for name, metric in rows:
+            print(f"| {name} | {_fmt_metric(metric)} |")
+        return
+    print("Recursive operation matrix:")
+    for name, metric in rows:
+        print(f"   - {name}: {_fmt_metric(metric)}")
+
+
 def main():
     print("Running benchmarks...")
     
@@ -1055,6 +1216,10 @@ def cli(argv=None):
         "syncer",
         help="run PathSyncer local tree probes",
     )
+    subparsers.add_parser(
+        "recursive-matrix",
+        help="run narrow recursive local/mem/provider call-count probes",
+    )
     args = parser.parse_args(argv)
     if args.command == "sftp-recursive":
         print("Running SFTP recursive benchmarks...")
@@ -1071,6 +1236,10 @@ def cli(argv=None):
     if args.command == "syncer":
         print("Running PathSyncer benchmarks...")
         print_pathsyncer_results(benchmark_pathsyncer_matrix(), markdown=True)
+        return
+    if args.command == "recursive-matrix":
+        print("Running recursive operation matrix...")
+        print_recursive_matrix_results(benchmark_recursive_matrix(), markdown=True)
         return
     main()
 
