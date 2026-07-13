@@ -1091,8 +1091,139 @@ def _provider_recursive_call_count_rows():
             )
         )
 
-    rows.append(("GCS rm(recursive=True) call count", "not implemented"))
-    rows.append(("Azure rm(recursive=True) call count", "not implemented"))
+    from pathlib_next.uri.schemes.gs import BaseGsBackend, GsPath
+
+    class FakeGsBlob:
+        def __init__(self, bucket, name):
+            self.bucket = bucket
+            self.name = name
+
+        def reload(self):
+            self.bucket.calls["reload"] += 1
+            if self.name not in self.bucket.objects:
+                raise FileNotFoundError(self.name)
+
+        def delete(self):
+            self.bucket.calls["delete"] += 1
+            self.bucket.objects.pop(self.name, None)
+
+    class FakeGsBucket:
+        def __init__(self):
+            self.objects = {"dir/": b""}
+            self.calls = {"reload": 0, "list_blobs": 0, "delete": 0}
+            for relpath in _recursive_matrix_files():
+                self.objects[f"dir/{relpath}"] = b"x"
+
+        def blob(self, name):
+            return FakeGsBlob(self, name)
+
+        def list_blobs(self, prefix="", **_kwargs):
+            self.calls["list_blobs"] += 1
+            for name in sorted(self.objects):
+                if name.startswith(prefix):
+                    yield FakeGsBlob(self, name)
+
+    class FakeGsClient:
+        def __init__(self):
+            self.bucket_obj = FakeGsBucket()
+
+        def bucket(self, _name):
+            return self.bucket_obj
+
+    class FakeGsBackend(BaseGsBackend):
+        def __init__(self):
+            self.client_obj = FakeGsClient()
+
+        def client(self):
+            return self.client_obj
+
+    gs_backend = FakeGsBackend()
+    GsPath("gs://bucket/dir", backend=gs_backend).rm(recursive=True)
+    gs_bucket = gs_backend.client_obj.bucket_obj
+    rows.append(
+        (
+            "GCS rm(recursive=True) fake 33-file tree",
+            "reload={reload}, list_blobs={list_blobs}, delete={delete}, deleted={deleted}".format(
+                deleted=34 - len(gs_bucket.objects),
+                **gs_bucket.calls,
+            ),
+        )
+    )
+
+    from pathlib_next.uri.schemes.az import AzPath, BaseAzBackend
+
+    class FakeAzBlobClient:
+        def __init__(self, container, name):
+            self.container = container
+            self.name = name
+
+        def get_blob_properties(self):
+            self.container.calls["get_blob_properties"] += 1
+            if self.name not in self.container.objects:
+                raise FileNotFoundError(self.name)
+            return {}
+
+        def delete_blob(self):
+            self.container.calls["delete_blob"] += 1
+            self.container.objects.pop(self.name, None)
+
+    class FakeAzBlobItem:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeAzContainer:
+        def __init__(self):
+            self.objects = {"dir/": b""}
+            self.calls = {
+                "get_blob_properties": 0,
+                "list_blobs": 0,
+                "delete_blobs": 0,
+                "delete_blob": 0,
+            }
+            for relpath in _recursive_matrix_files():
+                self.objects[f"dir/{relpath}"] = b"x"
+
+        def get_blob_client(self, name):
+            return FakeAzBlobClient(self, name)
+
+        def list_blobs(self, name_starts_with=""):
+            self.calls["list_blobs"] += 1
+            for name in sorted(self.objects):
+                if name.startswith(name_starts_with):
+                    yield FakeAzBlobItem(name)
+
+        def delete_blobs(self, *names):
+            self.calls["delete_blobs"] += 1
+            for name in names:
+                self.objects.pop(name, None)
+
+    class FakeAzClient:
+        def __init__(self):
+            self.container = FakeAzContainer()
+
+        def get_container_client(self, _name):
+            return self.container
+
+    class FakeAzBackend(BaseAzBackend):
+        def __init__(self):
+            self.client_obj = FakeAzClient()
+
+        def client(self):
+            return self.client_obj
+
+    az_backend = FakeAzBackend()
+    AzPath("az://account/container/dir", backend=az_backend).rm(recursive=True)
+    az_container = az_backend.client_obj.container
+    rows.append(
+        (
+            "Azure rm(recursive=True) fake 33-file tree",
+            "get_blob_properties={get_blob_properties}, list_blobs={list_blobs}, "
+            "delete_blobs={delete_blobs}, delete_blob={delete_blob}, deleted={deleted}".format(
+                deleted=34 - len(az_container.objects),
+                **az_container.calls,
+            ),
+        )
+    )
     return rows
 
 

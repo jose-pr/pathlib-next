@@ -185,6 +185,63 @@ class GsPath(UriPath):
         marker_blob = self._bucket.blob(marker)
         marker_blob.delete()
 
+    def rm(
+        self,
+        /,
+        recursive=False,
+        missing_ok=False,
+        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+    ):
+        if not recursive:
+            return super().rm(
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+            )
+
+        def on_error(error):
+            if callable(ignore_error):
+                return ignore_error(error, self)
+            return bool(ignore_error)
+
+        if not self.key:
+            error = PermissionError("recursive bucket delete is not enabled")
+            if not on_error(error):
+                raise error
+            return
+
+        keys = []
+        try:
+            blob = self._bucket.blob(self.key)
+            blob.reload()
+            keys.append(self.key)
+        except Exception:
+            keys = []
+
+        if not keys:
+            marker = f"{self.key}/"
+            try:
+                keys.extend(blob.name for blob in self._bucket.list_blobs(prefix=marker))
+            except Exception as error:
+                if not on_error(error):
+                    raise
+                return
+
+        if not keys:
+            if missing_ok:
+                return
+            error = FileNotFoundError(self)
+            if not on_error(error):
+                raise error
+            return
+
+        for key in keys:
+            try:
+                self._bucket.blob(key).delete()
+            except Exception as error:
+                if not on_error(error):
+                    raise
+
     def rename(self, target: "GsPath | Uri | str"):
         if not isinstance(target, Uri):
             target = Uri(self.parent, target)

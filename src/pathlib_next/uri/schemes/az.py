@@ -199,6 +199,80 @@ class AzPath(UriPath):
         marker_blob = self._container.get_blob_client(marker)
         marker_blob.delete_blob()
 
+    def rm(
+        self,
+        /,
+        recursive=False,
+        missing_ok=False,
+        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+    ):
+        if not recursive:
+            return super().rm(
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+            )
+
+        def on_error(error):
+            if callable(ignore_error):
+                return ignore_error(error, self)
+            return bool(ignore_error)
+
+        if not self.key:
+            error = PermissionError("recursive container delete is not enabled")
+            if not on_error(error):
+                raise error
+            return
+
+        keys = []
+        try:
+            blob_client = self._container.get_blob_client(self.key)
+            blob_client.get_blob_properties()
+            keys.append(self.key)
+        except Exception:
+            keys = []
+
+        if not keys:
+            marker = f"{self.key}/"
+            try:
+                keys.extend(
+                    blob.name
+                    for blob in self._container.list_blobs(name_starts_with=marker)
+                )
+            except Exception as error:
+                if not on_error(error):
+                    raise
+                return
+
+        if not keys:
+            if missing_ok:
+                return
+            error = FileNotFoundError(self)
+            if not on_error(error):
+                raise error
+            return
+
+        try:
+            delete_blobs = getattr(self._container, "delete_blobs")
+        except AttributeError:
+            delete_blobs = None
+        if callable(delete_blobs):
+            for index in range(0, len(keys), 256):
+                batch = keys[index : index + 256]
+                try:
+                    delete_blobs(*batch)
+                except Exception as error:
+                    if not on_error(error):
+                        raise
+            return
+
+        for key in keys:
+            try:
+                self._container.get_blob_client(key).delete_blob()
+            except Exception as error:
+                if not on_error(error):
+                    raise
+
     def rename(self, target: "AzPath | Uri | str"):
         if not isinstance(target, Uri):
             target = Uri(self.parent, target)
