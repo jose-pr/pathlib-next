@@ -256,6 +256,46 @@ class SftpPath(UriPath):
         target_path = target.path if isinstance(target, Uri) else str(target)
         self._sftpclient.link(target_path, self.path)
 
+    def rm(
+        self,
+        /,
+        recursive=False,
+        missing_ok=False,
+        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+    ):
+        try:
+            from ._asyncssh import AsyncsshSftpBackend, _concurrent_rm, _run
+        except ImportError:
+            return super().rm(
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+            )
+
+        if not isinstance(self.backend, AsyncsshSftpBackend) or not recursive:
+            return super().rm(
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+            )
+
+        on_error = None
+        if ignore_error:
+            on_error = (
+                ignore_error
+                if callable(ignore_error)
+                else lambda _err, _path: bool(ignore_error)
+            )
+
+        return _run(
+            _concurrent_rm(
+                self,
+                max_concurrency=self.backend.max_concurrency,
+                missing_ok=missing_ok,
+                on_error=on_error,
+            )
+        )
+
     def copy(
         self,
         target,

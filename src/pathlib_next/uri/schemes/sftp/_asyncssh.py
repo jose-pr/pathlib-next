@@ -13,6 +13,7 @@ import typing as _ty
 import asyncssh as _asyncssh
 
 from ... import Source
+from ....utils.stat import FileStat
 from . import BaseSftpBackend
 from ._paramiko import _DEFAULT_SSH_CONFIG
 
@@ -526,14 +527,72 @@ async def _concurrent_copy(
     ignore_error,
 ):
     """Concurrent recursive child copies, bounded by max_concurrency."""
-    semaphore = _asyncio.Semaphore(max_concurrency)
+    semaphore = _asyncio.Semaphore(max(1, max_concurrency))
+    aclient = path._sftpclient._aclient
 
-    async def copy_child(child):
+    async def sftp_call(make_awaitable):
         async with semaphore:
-            child_target = target / child.name
+            try:
+                return await make_awaitable()
+            except _asyncssh.SFTPError as error:
+                raise _translate(error) from error
+
+    async def stat_path(current):
+        stat_coro = aclient.stat if follow_symlinks else aclient.lstat
+        attrs = await sftp_call(lambda: stat_coro(current.path))
+        return FileStat.from_stat(_StatAdapter(attrs))
+
+    async def exists_stat(current):
+        try:
+            return await stat_path(current)
+        except FileNotFoundError:
+            return None
+
+    async def read_dir(current):
+        names = await sftp_call(lambda: aclient.readdir(current.path))
+        return [
+            current / (name.filename.decode() if isinstance(name.filename, bytes) else name.filename)
+            for name in names
+            if name.filename not in (".", "..", b".", b"..")
+        ]
+
+    async def mkdir(current):
+        await sftp_call(lambda: aclient.mkdir(current.path, _asyncssh.SFTPAttrs()))
+
+    async def unlink(current):
+        await sftp_call(lambda: aclient.remove(current.path))
+
+    async def chmod(current, mode):
+        await sftp_call(lambda: aclient.chmod(current.path, mode))
+
+    async def copy_file(src, dst):
+        existing = await exists_stat(dst)
+        if existing is not None:
+            if existing.is_dir():
+                raise IsADirectoryError(dst)
+            if not overwrite:
+                raise FileExistsError(dst)
+            await unlink(dst)
+
+        src_file = await sftp_call(lambda: _aopen(aclient, src.path, "rb"))
+        try:
+            dst_file = await sftp_call(lambda: _aopen(aclient, dst.path, "wb"))
+            try:
+                while True:
+                    chunk = await sftp_call(lambda: src_file.read(1024 * 1024))
+                    if not chunk:
+                        break
+                    await sftp_call(lambda chunk=chunk: dst_file.write(chunk))
+            finally:
+                await sftp_call(lambda: dst_file.close())
+        finally:
+            await sftp_call(lambda: src_file.close())
+
+    async def copy_with_sync_fallback(src, dst):
+        async with semaphore:
             await _asyncio.to_thread(
-                child.copy,
-                child_target,
+                src.copy,
+                dst,
                 overwrite=overwrite,
                 follow_symlinks=follow_symlinks,
                 preserve_metadata=preserve_metadata,
@@ -541,26 +600,140 @@ async def _concurrent_copy(
                 ignore_error=ignore_error,
             )
 
-    tasks = [_asyncio.create_task(copy_child(child)) for child in path.iterdir()]
+    async def copy_node(src, dst):
+        src_stat = await stat_path(src)
+        if src_stat.is_symlink():
+            await copy_with_sync_fallback(src, dst)
+            return
+
+        if src_stat.is_dir():
+            existing = await exists_stat(dst)
+            if existing is not None:
+                if not existing.is_dir():
+                    raise FileExistsError(dst)
+                if not overwrite:
+                    raise FileExistsError(dst)
+            else:
+                await mkdir(dst)
+
+            tasks = [
+                _asyncio.create_task(copy_node(child, dst / child.name))
+                for child in await read_dir(src)
+            ]
+            if tasks:
+                await gather_tasks(tasks)
+        elif src_stat.is_file():
+            await copy_file(src, dst)
+        else:
+            await copy_with_sync_fallback(src, dst)
+            return
+
+        if preserve_metadata:
+            try:
+                await chmod(dst, src_stat.st_mode)
+            except NotImplementedError:
+                pass
+
+    async def gather_tasks(tasks):
+        if ignore_error is not None:
+            results = await _asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    ignore_error(result)
+            return
+
+        pending = set(tasks)
+        while pending:
+            done, pending = await _asyncio.wait(
+                pending, return_when=_asyncio.FIRST_EXCEPTION
+            )
+            for task in done:
+                error = task.exception()
+                if error is not None:
+                    for sibling in pending:
+                        sibling.cancel()
+                    await _asyncio.gather(*pending, return_exceptions=True)
+                    raise error
+
+    async def copy_child(child):
+        await copy_node(child, target / child.name)
+
+    tasks = [_asyncio.create_task(copy_child(child)) for child in await read_dir(path)]
     if not tasks:
         return
+    await gather_tasks(tasks)
 
-    if ignore_error is not None:
-        results = await _asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                ignore_error(result)
-        return
 
-    pending = set(tasks)
-    while pending:
-        done, pending = await _asyncio.wait(
-            pending, return_when=_asyncio.FIRST_EXCEPTION
-        )
-        for task in done:
-            error = task.exception()
-            if error is not None:
-                for sibling in pending:
-                    sibling.cancel()
-                await _asyncio.gather(*pending, return_exceptions=True)
-                raise error
+async def _concurrent_rm(
+    path,
+    *,
+    max_concurrency: int,
+    missing_ok: bool,
+    on_error,
+):
+    """Native asyncssh recursive remove, bounded by max_concurrency."""
+    semaphore = _asyncio.Semaphore(max(1, max_concurrency))
+    aclient = path._sftpclient._aclient
+
+    async def sftp_call(make_awaitable):
+        async with semaphore:
+            try:
+                return await make_awaitable()
+            except _asyncssh.SFTPError as error:
+                raise _translate(error) from error
+
+    async def stat_path(current):
+        attrs = await sftp_call(lambda: aclient.lstat(current.path))
+        return FileStat.from_stat(_StatAdapter(attrs))
+
+    async def read_dir(current):
+        names = await sftp_call(lambda: aclient.readdir(current.path))
+        return [
+            current / (name.filename.decode() if isinstance(name.filename, bytes) else name.filename)
+            for name in names
+            if name.filename not in (".", "..", b".", b"..")
+        ]
+
+    async def remove_file(current):
+        await sftp_call(lambda: aclient.remove(current.path))
+
+    async def remove_dir(current):
+        await sftp_call(lambda: aclient.rmdir(current.path))
+
+    async def wait_fail_fast(tasks):
+        pending = set(tasks)
+        while pending:
+            done, pending = await _asyncio.wait(
+                pending, return_when=_asyncio.FIRST_EXCEPTION
+            )
+            for task in done:
+                error = task.exception()
+                if error is not None:
+                    for sibling in pending:
+                        sibling.cancel()
+                    await _asyncio.gather(*pending, return_exceptions=True)
+                    raise error
+
+    async def rm_one(current, *, allow_missing: bool = False):
+        try:
+            stat = await stat_path(current)
+            if stat.is_dir():
+                tasks = [_asyncio.create_task(rm_one(child)) for child in await read_dir(current)]
+                if tasks:
+                    if on_error is None:
+                        await wait_fail_fast(tasks)
+                    else:
+                        await _asyncio.gather(*tasks)
+                await remove_dir(current)
+            else:
+                await remove_file(current)
+        except FileNotFoundError as error:
+            if allow_missing:
+                return
+            if on_error is None or not on_error(error, current):
+                raise
+        except Exception as error:
+            if on_error is None or not on_error(error, current):
+                raise
+
+    await rm_one(path, allow_missing=missing_ok)

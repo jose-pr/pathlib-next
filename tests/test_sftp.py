@@ -44,6 +44,9 @@ class _FakeSftpClient:
     def stat(self, path):
         return object()
 
+    def lstat(self, path):
+        return self.stat(path)
+
     def open(self, path, mode, buffering):
         return object()
 
@@ -371,4 +374,57 @@ def test_sftppath_operations():
     # rmdir
     p.rmdir()
     assert backend._client.actions[-1] == ("rmdir", "/dir")
+
+
+def test_sftppath_recursive_rm_uses_scandir_metadata_bottom_up():
+    import stat
+
+    class _TreeFakeSftpClient(_FakeSftpClient):
+        def __init__(self):
+            super().__init__()
+            self.actions = []
+            self.tree = {
+                "/root": [("sub", True), ("a.txt", False)],
+                "/root/sub": [("b.txt", False)],
+            }
+
+        def lstat(self, path):
+            self.actions.append(("lstat", path))
+            return _FakeAttr(path.rsplit("/", 1)[-1], stat.S_IFDIR | 0o755)
+
+        def listdir_attr(self, path):
+            self.actions.append(("listdir_attr", path))
+            return [
+                _FakeAttr(name, (stat.S_IFDIR if is_dir else stat.S_IFREG) | 0o755)
+                for name, is_dir in self.tree[path]
+            ]
+
+        def remove(self, path):
+            self.actions.append(("remove", path))
+
+        def rmdir(self, path):
+            self.actions.append(("rmdir", path))
+
+        def stat(self, path):
+            raise AssertionError("recursive rm should use lstat/listdir_attr metadata")
+
+    class _TreeFakeBackend(BaseSftpBackend):
+        def __init__(self):
+            self._client = _TreeFakeSftpClient()
+
+        def client(self, source):
+            return self._client
+
+    backend = _TreeFakeBackend()
+    _sftp("sftp://host/root", backend=backend).rm(recursive=True)
+
+    assert backend._client.actions == [
+        ("lstat", "/root"),
+        ("listdir_attr", "/root"),
+        ("listdir_attr", "/root/sub"),
+        ("remove", "/root/sub/b.txt"),
+        ("rmdir", "/root/sub"),
+        ("remove", "/root/a.txt"),
+        ("rmdir", "/root"),
+    ]
 
