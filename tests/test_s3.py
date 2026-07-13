@@ -217,6 +217,18 @@ def test_rm_recursive_uses_batch_delete_for_prefix():
     assert backend._client.objects == {"other.txt": b"keep"}
 
 
+def test_rm_recursive_deletes_exact_object_key():
+    backend = _FakeBackend()
+    backend._client.objects.update(
+        {
+            "file.txt": b"x",
+            "file.txt/nested.txt": b"keep",
+        }
+    )
+    _s3("s3://bucket/file.txt", backend).rm(recursive=True)
+    assert backend._client.objects == {"file.txt/nested.txt": b"keep"}
+
+
 def test_rm_recursive_missing_ok():
     _s3("s3://bucket/missing", _FakeBackend()).rm(recursive=True, missing_ok=True)
 

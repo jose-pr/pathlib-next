@@ -206,23 +206,25 @@ class S3Path(UriPath):
                 raise error
             return
 
-        marker = f"{self.key}/" if self.key else ""
-        paginator = self._client.get_paginator("list_objects_v2")
         keys = []
         try:
-            for page in paginator.paginate(Bucket=self.bucket, Prefix=marker):
-                keys.extend(obj["Key"] for obj in page.get("Contents", []))
-        except Exception as error:
-            if not on_error(error):
-                raise
-            return
-
-        if marker and marker not in keys:
+            self._client.head_object(Bucket=self.bucket, Key=self.key)
+            keys.append(self.key)
+        except _botoexc.ClientError as error:
+            if not _is_not_found(error):
+                if not on_error(error):
+                    raise
+                return
+        if not keys:
+            marker = f"{self.key}/" if self.key else ""
+            paginator = self._client.get_paginator("list_objects_v2")
             try:
-                if self.exists():
-                    keys.append(marker)
-            except FileNotFoundError:
-                pass
+                for page in paginator.paginate(Bucket=self.bucket, Prefix=marker):
+                    keys.extend(obj["Key"] for obj in page.get("Contents", []))
+            except Exception as error:
+                if not on_error(error):
+                    raise
+                return
 
         if not keys:
             if missing_ok:
