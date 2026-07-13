@@ -334,6 +334,7 @@ def unused_tcp_port():
 
 @pytest.fixture
 def ftp_server(fixture_tree):
+    import errno
     import threading
     import warnings
 
@@ -365,7 +366,15 @@ def ftp_server(fixture_tree):
     # closed from the pytest thread while the server thread is polling it.
     ioloop = Select()
     server = FTPServer(("127.0.0.1", 0), handler, ioloop=ioloop)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+
+    def serve():
+        try:
+            server.serve_forever()
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+
+    thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
         port = server.socket.getsockname()[1]
