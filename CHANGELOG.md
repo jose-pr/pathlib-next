@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-13
+
 ### Added
+- `uripath` command-line tool (`pathlib_next.tools.uripath`) for reading,
+  writing, copying, removing, and syncing local or URI-backed paths. `-`
+  works as stdin/stdout for byte-stream operations.
+- Recursive benchmark probes for local, memory, object-store, and SFTP
+  backends, including provider call-shape rows for recursive deletes.
+- Provider-native recursive delete overrides for `S3Path`, `GsPath`, and
+  `AzPath`, with bucket/container-root guards.
 - `git:` convenience dispatch over the existing `github:`/`gitlab:` providers, plus explicit `git+github:` and `git+gitlab:` forms for self-hosted or enterprise instances. `git:` only auto-detects public `github.com`/`gitlab.com`; ambiguous hosts now raise a clear `ValueError` naming the explicit alternatives.
 - HTTP write support (`PUT`, customizable to `POST` or other verbs via `write_method` configuration or `with_session()`) for `HttpPath`.
 - HTTP delete support (`DELETE` for `unlink()` and `rmdir()`) for `HttpPath`.
@@ -39,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - New `sftp-async` extra: an `AsyncsshSftpBackend` (`asyncssh`, async internally, bridged to a sync API through one shared background event loop) alongside the existing paramiko-based `SftpBackend`. Auto-selected when `asyncssh` is importable (paramiko remains the fallback); override via the `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"`/`"asyncssh"`/`"auto"`) or a `SftpPath._default_backend_cls` subclass hook -- precedence, highest to lowest: explicit `backend=` kwarg > `_default_backend_cls` > env var > auto-detect. `PATHLIB_NEXT_SFTP_BACKEND=asyncssh` with the package missing raises immediately rather than silently falling back. Connections are cached per `(backend, source)` (no thread dimension needed -- one shared connection serves concurrent calls from any calling thread, unlike paramiko's `(backend, source, thread)` cache). Works on Python 3.9 too via a verified version pin (`asyncssh<2.22`; current `asyncssh` needs >=3.10) resolved automatically through `pyproject.toml` environment markers -- no code branching. New `SftpPath.symlink_to()`/`readlink()` (both backends -- core SFTPv3 operations) and `hardlink_to()` (asyncssh backend only; paramiko's `SFTPClient` has no hard-link operation, so it raises `NotImplementedError` immediately with no server round trip). `chmod(follow_symlinks=False)` now works on the asyncssh backend (native support) while still raising `NotImplementedError` on paramiko (no `lchmod` equivalent). This is additive, not a performance change -- the (separate, unscheduled) concurrent-fan-out work that would actually exploit asyncssh's pipelining remains future work.
 
 ### Changed
+- Recursive `Path.rm()` now deletes bottom-up using non-following listing
+  metadata where available, avoiding traversal through directory symlinks
+  and reducing extra stat calls for metadata-rich backends.
+- Asyncssh SFTP recursive copy/remove now use native bounded async helpers
+  for ordinary files/directories instead of recursing through sync path
+  methods on the bridge loop.
+- `PathSyncer` reuses child metadata during tree sync when that metadata is
+  consistent with the active symlink-following policy.
 - Replaced the third-party `htmllistparse` and `bs4` directory listing scraper dependencies with a hand-rolled, zero-dependency `html.parser.HTMLParser` subclass (`_DirectoryListingParser`), dropping both from the `http` extra in `pyproject.toml`. Verified equivalent output (name/size/modified, both Apache-`<pre>` and nginx-`<table>` formats) against the replaced `bs4`+`html5lib`+`htmllistparse` implementation, and 2.9x-6.2x faster depending on format/listing size (`benchmarks/bench.py`'s `8`/`9` entries benchmark the new parser alone going forward, since the old implementation no longer exists in the tree).
 - Matrix expansion in GitHub Actions CI to test Python 3.10, 3.11, and 3.12 (on Ubuntu).
 - Added a "no-extras" CI job to run tests without optional dependencies installed.
@@ -102,6 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   parametrized across both client backends (`paramiko`, `asyncssh`).
 
 ### Fixed
+- Recursive delete on exact object-store keys now treats the exact object as
+  the addressed path before considering a `"<key>/"` prefix tree, preventing
+  accidental prefix-tree deletion for `S3Path`, `GsPath`, and `AzPath`.
+- Azure recursive delete falls back from `delete_blobs()` to per-blob
+  deletion when a provider or emulator rejects the batch API.
 - `Uri.relative_to()` computed the remaining segments from the raw `.segments` property instead of the root-aware `_segments_of()` helper `is_relative_to()` already used -- `Uri("/").segments` is the 2-tuple `("", "")` (an artifact of `"/".split("/")`), so `relative_to(<root>)` silently dropped the child's only real segment (e.g. `Uri("/a").relative_to(Uri("/"))` produced `""` instead of `"a"`). Found by the new property-based test suite.
 - `TestSftpContract`'s in-process paramiko test server (`tests/conftest.py::sftp_server`) deadlocked every real I/O test: its `_SSHServer.check_channel_subsystem_request()` override returned `name == "sftp"` directly instead of delegating to `paramiko.ServerInterface`'s default implementation, which is what actually instantiates and starts the registered `SFTPServer` handler thread (`handler.start()`). Without it, the channel was reported "hooked up" to the client but nothing server-side ever read from or responded on it, so `SFTPClient.from_transport()` blocked forever in version negotiation. Fixed by removing the override (the inherited default already does exactly what the removed comment claimed it did).
 - `SftpPath._mkdir()`/`_open(mode="x")` propagated a generic, untyped `OSError("Failure")` when the target already existed -- SFTPv3 has no dedicated "already exists" status code, so paramiko's server-side `convert_errno()` falls through to `SFTP_FAILURE` for `EEXIST` (unlike `ENOENT`, which it does map, giving a proper `FileNotFoundError`). Both now check `self.exists()` on failure and raise `FileExistsError` to match every other scheme's `mkdir`/`touch(exist_ok=False)` contract (mirrors `FtpPath._mkdir()`'s existing check-after-failure pattern). Found by `TestSftpContract` once the deadlock above was fixed and it could actually run.
