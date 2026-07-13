@@ -353,21 +353,29 @@ def ftp_server(fixture_tree):
         )
         from pyftpdlib.authorizers import DummyAuthorizer
         from pyftpdlib.handlers import FTPHandler
+        from pyftpdlib.ioloop import Select
         from pyftpdlib.servers import FTPServer
 
     authorizer = DummyAuthorizer()
     authorizer.add_user("user", "12345", str(fixture_tree), perm="elradfmwMT")
     handler = FTPHandler
     handler.authorizer = authorizer
-    server = FTPServer(("127.0.0.1", 0), handler)
+    # Force the portable select-based loop for tests. pyftpdlib's macOS
+    # kqueue loop can emit an unhandled thread exception if the server fd is
+    # closed from the pytest thread while the server thread is polling it.
+    ioloop = Select()
+    server = FTPServer(("127.0.0.1", 0), handler, ioloop=ioloop)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         port = server.socket.getsockname()[1]
         yield f"ftp://user:12345@127.0.0.1:{port}/"
     finally:
-        server.close_all()
+        ioloop.call_later(0, server.close_all)
         thread.join(timeout=5)
+        if thread.is_alive():
+            server.close_all()
+            thread.join(timeout=5)
 
 
 @pytest.fixture
