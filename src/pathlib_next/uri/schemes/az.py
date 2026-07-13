@@ -262,8 +262,12 @@ class AzPath(UriPath):
                 try:
                     delete_blobs(*batch)
                 except Exception as error:
-                    if not on_error(error):
-                        raise
+                    try:
+                        for key in batch:
+                            self._container.get_blob_client(key).delete_blob()
+                    except Exception:
+                        if not on_error(error):
+                            raise error
             return
 
         for key in keys:
