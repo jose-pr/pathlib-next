@@ -39,6 +39,13 @@ class PathAndStat(object):
         self._path = path
         self.refresh(follow_symlink)
 
+    @classmethod
+    def from_stat(cls, path: Path, stat: FileStat | None) -> "PathAndStat":
+        entry = cls.__new__(cls)
+        entry._path = path
+        entry._stat = stat
+        return entry
+
     def __str__(self) -> str:
         return str(self.path)
 
@@ -146,6 +153,30 @@ class PathSyncer(object):
             self._hook(source, target, event, dry_run)
         self.log(self.EVENT_LOG_FORMAT, event, source, target, dry_run)
 
+    def _children(self, entry: PathAndStat) -> "list[PathAndStat]":
+        children: "list[PathAndStat]" = []
+        for scan_entry in entry.path._scandir():
+            if isinstance(scan_entry, tuple) and len(scan_entry) == 2:
+                name, stat = scan_entry
+                child = entry.path / name
+                if self.follow_symlinks:
+                    children.append(
+                        PathAndStat(child, follow_symlink=self.follow_symlinks)
+                    )
+                else:
+                    children.append(PathAndStat.from_stat(child, stat))
+                continue
+
+            child = entry.path / scan_entry.name
+            try:
+                stat = FileStat.from_stat(
+                    scan_entry.stat(follow_symlinks=self.follow_symlinks)
+                )
+            except FileNotFoundError:
+                stat = None
+            children.append(PathAndStat.from_stat(child, stat))
+        return children
+
     def sync(
         self,
         source: Path | PathAndStat,
@@ -229,19 +260,28 @@ class PathSyncer(object):
                 ):
                     return
 
+            source_children = None
+
+            def get_source_children():
+                nonlocal source_children
+                if source_children is None:
+                    source_children = self._children(source)
+                return source_children
+
             if self.remove_missing:
 
                 def checkchildren():
-                    for child in target.path.iterdir():
+                    source_names = {child.path.name for child in get_source_children()}
+                    for child in self._children(target):
 
                         def checkchild():
-                            if not (source.path / child.name).exists():
+                            if child.path.name not in source_names:
                                 self.hook(
                                     source,
                                     target,
                                     SyncEvent.RemovedMissing,
                                     dry_run,
-                                    lambda: child.rm(recursive=True),
+                                    lambda child=child: child.path.rm(recursive=True),
                                 )
 
                         self.hook(
@@ -261,15 +301,15 @@ class PathSyncer(object):
                 )
 
             def sync_children():
-                for child in source.path.iterdir():
+                for child in get_source_children():
                     self.hook(
                         source,
                         target,
                         SyncEvent.SyncChild,
                         False,
-                        lambda: self.sync(
+                        lambda child=child: self.sync(
                             child,
-                            target.path / (child.name or child.parent.name),
+                            target.path / (child.path.name or child.path.parent.name),
                             dry_run,
                         ),
                     )
