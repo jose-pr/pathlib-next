@@ -531,21 +531,67 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         _onerror = lambda _err, _path: (
             ignore_error(_err, _path) if callable(ignore_error) else bool(ignore_error)
         )
+
+        def _handle(error, path):
+            if not _onerror(error, path):
+                raise error
+
+        def _scan_entries(path):
+            for entry in path._scandir():
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    yield entry
+                    continue
+                try:
+                    stat = FileStat.from_stat(entry.stat(follow_symlinks=False))
+                except OSError:
+                    stat = None
+                yield entry.name, stat
+
+        def _remove_tree(path):
+            try:
+                entries = list(_scan_entries(path))
+            except Exception as error:
+                _handle(error, path)
+                return
+
+            for name, child_stat in entries:
+                child = path / name
+                try:
+                    if child_stat is None:
+                        child_stat = FileStat.from_path(child, follow_symlink=False)
+                    if child_stat is not None and child_stat.is_dir():
+                        _remove_tree(child)
+                    else:
+                        child.unlink()
+                except Exception as error:
+                    _handle(error, child)
+
+            try:
+                path.rmdir()
+            except Exception as error:
+                _handle(error, path)
+
         try:
-            stat = FileStat.from_path(self)
-            if stat is None:
-                if not missing_ok:
-                    raise FileNotFoundError(self)
-            elif stat.is_dir():
-                if recursive:
-                    for child in self.iterdir():
-                        child.rm(recursive=recursive, ignore_error=ignore_error)
-                self.rmdir()
-            else:
-                self.unlink()
+            stat = FileStat.from_path(self, follow_symlink=False)
         except Exception as error:
-            if not _onerror(error, self):
-                raise
+            _handle(error, self)
+            return
+        if stat is None:
+            if not missing_ok:
+                _handle(FileNotFoundError(self), self)
+        elif stat.is_dir():
+            if recursive:
+                _remove_tree(self)
+            else:
+                try:
+                    self.rmdir()
+                except Exception as error:
+                    _handle(error, self)
+        else:
+            try:
+                self.unlink()
+            except Exception as error:
+                _handle(error, self)
 
     @_utils.notimplemented
     def rename(self, target: "_ty.Self | str"):

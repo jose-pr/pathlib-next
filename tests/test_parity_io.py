@@ -117,6 +117,24 @@ def test_rm_recursive(fixture_tree):
     assert (fixture_tree / "a.txt").exists()
 
 
+def test_rm_recursive_unlinks_symlink_to_directory(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    target = root / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep")
+    link = root / "link"
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
+
+    link.rm(recursive=True)
+
+    assert not os.path.lexists(os.fspath(link))
+    assert target.is_dir()
+    assert (target / "keep.txt").read_text() == "keep"
+
+
 def test_rm_missing_ok(tmp_path):
     p = pathlib_next.LocalPath(tmp_path) / "missing"
     with pytest.raises(FileNotFoundError):
