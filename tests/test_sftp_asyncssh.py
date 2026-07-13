@@ -641,6 +641,36 @@ def test_concurrent_rm_ignore_error_receives_error_and_path():
     assert client.rmdirs == ["/root"]
 
 
+def test_concurrent_rm_fail_fast_cancels_queued_children():
+    import asyncio
+
+    tree = {
+        "/root": ["bad.txt", "a.txt", "b.txt", "c.txt"],
+        "/root/bad.txt": None,
+        "/root/a.txt": None,
+        "/root/b.txt": None,
+        "/root/c.txt": None,
+    }
+    client = _FakeAsyncRmClient(
+        tree,
+        delay=0.01,
+        fail_remove={"/root/bad.txt"},
+    )
+
+    with pytest.raises(OSError):
+        asyncio.run(
+            backend_mod._concurrent_rm(
+                _FakeAsyncRmPath(client),
+                max_concurrency=1,
+                missing_ok=False,
+                on_error=None,
+            )
+        )
+
+    assert len(client.removed) < 3
+    assert client.rmdirs == []
+
+
 def test_concurrent_rm_missing_root_honors_missing_ok():
     import asyncio
 

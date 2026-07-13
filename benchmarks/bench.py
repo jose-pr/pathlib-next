@@ -542,7 +542,7 @@ def benchmark_sftp_backends(mode="all"):
             return
         asyncssh_backend_mod._CACHE.invalidate((backend, source))
 
-    if mode not in {"all", "batch", "recursive", "recursive-copy"}:
+    if mode not in {"all", "batch", "recursive", "recursive-copy", "recursive-large"}:
         raise ValueError(f"unknown SFTP benchmark mode: {mode!r}")
 
     rows = []
@@ -604,6 +604,18 @@ def benchmark_sftp_backends(mode="all"):
                 for j in range(3)
             }
             _write_tree(local_root, recursive_rm_tree)
+            recursive_large_tree = {
+                f"bench/recursive_large/source/dir_{i:02d}/file_{j:02d}.txt": ("large\n" * 8)
+                for i in range(8)
+                for j in range(16)
+            }
+            recursive_large_rm_tree = {
+                f"bench/recursive_large/template/dir_{i:02d}/file_{j:02d}.txt": ("large-rm\n" * 8)
+                for i in range(8)
+                for j in range(16)
+            }
+            _write_tree(local_root, recursive_large_tree)
+            _write_tree(local_root, recursive_large_rm_tree)
             for relpath in (
                 "bench/write",
                 "bench/mkdir",
@@ -613,6 +625,7 @@ def benchmark_sftp_backends(mode="all"):
                 "bench/copy_tree",
                 "bench/copy_tree_small",
                 "bench/rm_tree",
+                "bench/recursive_large",
             ):
                 (local_root / relpath).mkdir(parents=True, exist_ok=True)
             for backend_name in backends:
@@ -859,6 +872,83 @@ def benchmark_sftp_backends(mode="all"):
                         )
                         scaling_rows.append(
                             (f"asyncssh recursive copy mc={max_concurrency}", metric)
+                        )
+                        try:
+                            close_backend(backend, root.source)
+                        except Exception:
+                            pass
+
+                if mode == "recursive-large":
+                    compare_status(
+                        "copy(recursive=True) 128-file tree",
+                        lambda root, backend_name: (
+                            lambda counter=iter(range(1000)): (
+                                (root / "bench/recursive_large/source").copy(
+                                    root
+                                    / f"bench/recursive_large/{backend_name}_copy_{next(counter):03d}",
+                                    overwrite=True,
+                                    recursive=True,
+                                )
+                            )
+                        ),
+                        repeat=1,
+                        warmup=False,
+                    )
+                    compare_status(
+                        "rm(recursive=True) 128-file tree",
+                        lambda root, backend_name: (
+                            lambda counter=iter(range(1000)): (
+                                (lambda idx: (
+                                    shutil.copytree(
+                                        local_root / "bench/recursive_large/template",
+                                        local_root
+                                        / f"bench/recursive_large/{backend_name}_rm_{idx:03d}",
+                                    ),
+                                    (
+                                        root
+                                        / f"bench/recursive_large/{backend_name}_rm_{idx:03d}"
+                                    ).rm(recursive=True),
+                                ))(next(counter))
+                            )
+                        ),
+                        repeat=1,
+                        warmup=False,
+                    )
+                    for max_concurrency in (1, 4, 8):
+                        backend = AsyncsshSftpBackend(
+                            {
+                                "config": None,
+                                "client_keys": None,
+                                "agent_path": None,
+                                "public_key_auth": False,
+                                "kbdint_auth": False,
+                                "gss_kex": False,
+                                "gss_auth": False,
+                                "preferred_auth": "none,password",
+                            },
+                            max_concurrency=max_concurrency,
+                            sftp_version=4,
+                        )
+                        root = SftpPath(server_uri, backend=backend)
+
+                        def large_scaling_operation(
+                            counter=iter(range(1000)),
+                            max_concurrency=max_concurrency,
+                        ):
+                            (root / "bench/recursive_large/source").copy(
+                                root
+                                / f"bench/recursive_large/asyncssh_large_mc{max_concurrency}_{next(counter):03d}",
+                                overwrite=True,
+                                recursive=True,
+                            )
+
+                        metric = _measure_status(
+                            large_scaling_operation,
+                            repeat=1,
+                            warmup=False,
+                        )
+                        scaling_rows.append(
+                            (f"asyncssh large recursive copy mc={max_concurrency}", metric)
                         )
                         try:
                             close_backend(backend, root.source)
@@ -1340,6 +1430,10 @@ def cli(argv=None):
         help="run recursive SFTP copy probe rows",
     )
     subparsers.add_parser(
+        "sftp-recursive-large",
+        help="run larger recursive SFTP copy/remove probe rows",
+    )
+    subparsers.add_parser(
         "sftp-batch",
         help="run only batch SFTP probe rows",
     )
@@ -1359,6 +1453,10 @@ def cli(argv=None):
     if args.command == "sftp-recursive-copy":
         print("Running SFTP recursive copy benchmarks...")
         print_sftp_results(*benchmark_sftp_backends(mode="recursive-copy"), markdown=True)
+        return
+    if args.command == "sftp-recursive-large":
+        print("Running large SFTP recursive benchmarks...")
+        print_sftp_results(*benchmark_sftp_backends(mode="recursive-large"), markdown=True)
         return
     if args.command == "sftp-batch":
         print("Running SFTP batch benchmarks...")

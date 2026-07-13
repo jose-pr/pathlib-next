@@ -134,6 +134,14 @@ Legend: `p` = `paramiko`, `a` = `asyncssh`.
   `0.1698s` for the 4-file tree. Asyncssh scaling probes reported
   `mc=1: 0.2631s` and `mc=4: 0.2921s`, so higher concurrency did not help
   this tiny loopback fixture.
+- `python benchmarks/bench.py sftp-recursive-large` on a local Windows
+  `.venv/3.12.10` run reported a mixed result for a 128-file tree: recursive
+  copy favored asyncssh (`paramiko 13.8991s`, `asyncssh 10.9022s`), while
+  recursive remove favored paramiko (`paramiko 2.8129s`, `asyncssh 4.4896s`).
+  Asyncssh copy scaling was counterintuitive on loopback: `max_concurrency=1`
+  was fastest at `7.6068s`, with `4` at `14.2806s` and `8` at `13.3736s`.
+  Treat this as workload-specific follow-up evidence, not as a default tuning
+  decision.
 - `python benchmarks/bench.py syncer` on the same local run reported
   PathSyncer copy of 128 local files at `0.4524s`, dry-run at `0.0534s`, and
   remove-missing plus copy at `0.9260s`. This suggests metadata reuse may be
