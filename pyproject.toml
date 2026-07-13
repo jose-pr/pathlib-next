@@ -15,6 +15,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = []
+
+[project.scripts]
+uripath = "pathlib_next.tools.uripath:main"
+
 [project.optional-dependencies]
 uri = ["uritools"]
 http = ["requests", "pathlib_next[uri]"]

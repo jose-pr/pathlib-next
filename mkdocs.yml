@@ -26,6 +26,7 @@ nav:
   - Home: index.md
   - Guides:
       - Schemes: guides/schemes.md
+      - CLI: guides/cli.md
       - Extending: guides/extending.md
   - Benchmarks: benchmarks.md
   - Divergences from pathlib: divergences.md
