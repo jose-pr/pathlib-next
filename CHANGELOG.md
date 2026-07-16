@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`LocalPath.walk()`/`rm()` raised `TypeError: cannot unpack non-iterable
+  DirEntry object` on Python 3.11/3.12.** Those stdlib versions define their
+  own `pathlib.Path._scandir()` (returning raw `os.scandir()` `DirEntry`
+  objects), which sits ahead of this project's `_scandir()` in `LocalPath`'s
+  MRO and silently shadowed it -- breaking the `(name, FileStat|None)`
+  contract `walk()`/`glob()`/`rm()` expect. `LocalPath` now defines its own
+  `_scandir()` explicitly, reusing each `DirEntry`'s cached `lstat()` so the
+  perf win from `_scandir()` unification is preserved. Introduced in 0.8.0
+  (`8cdbefa`), exposed on the CI 3.11 leg.
+- **`Test No-Extras` CI job was red.** `tests/test_smoke.py` unconditionally
+  constructed an `http://`/`sftp://` `UriPath` in two tests, requiring
+  `requests`/`paramiko` even though the no-extras job installs neither; a
+  third test wrongly assumed `S3Path` requires `boto3` to register (it only
+  needs `botocore`, imported lazily inside a method). The two hard tests now
+  `pytest.importorskip` their extra; the `S3Path` check now probes for
+  `botocore`. Introduced in 0.8.0 (`94bd545`/`8cdbefa`), fixed with the
+  expected skip count (2) verified in a real no-extras venv.
+
 ## [0.8.1] - 2026-07-16
 
 ### Fixed
