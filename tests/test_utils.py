@@ -1,3 +1,8 @@
+import pathlib
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from pathlib_next import utils
@@ -306,3 +311,51 @@ def test_detect_format_does_not_peek_when_extension_is_conclusive():
     assert _detect_format("a.tar", _boom) == "tar"
 
 
+
+
+def test_paramspec_fallback_importable_without_typing_extensions():
+    # Regression: on Python 3.9 `typing.ParamSpec` does not exist, so the module
+    # falls back to `typing_extensions.ParamSpec` and, failing that, to a local
+    # shim. The old fallback was a bare `TypeVar`, which has no `.args`, so the
+    # `*args: K.args` annotations raised `AttributeError: 'TypeVar' object has no
+    # attribute 'args'` at import. It went unnoticed because every dev/CI env had
+    # `typing_extensions` installed transitively -- but it is not a runtime
+    # dependency, so a clean 3.9 install of the package could not import it.
+    #
+    # Runs in a subprocess with `typing_extensions` blocked so the fallback is
+    # exercised for real (on 3.10+ `typing.ParamSpec` is hidden too).
+    probe = textwrap.dedent(
+        """
+        import builtins, sys, typing
+        _real_import = builtins.__import__
+
+        def _blocked(name, *a, **k):
+            if name == "typing_extensions":
+                raise ImportError("emulating an env without typing_extensions")
+            return _real_import(name, *a, **k)
+
+        builtins.__import__ = _blocked
+        if hasattr(typing, "ParamSpec"):
+            del typing.ParamSpec  # emulate the 3.9 typing module
+
+        from pathlib_next.utils import LRU, K
+
+        assert K.args is not None, "ParamSpec fallback lost .args"
+        assert K.kwargs is not None, "ParamSpec fallback lost .kwargs"
+        lru = LRU(lambda x: x * 2, maxsize=4)
+        assert lru(21) == 42
+        assert lru(21) == 42
+        lru.invalidate(21)
+        assert lru(21) == 42
+        print("FALLBACK_OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=pathlib.Path(utils.__file__).parents[3],
+    )
+    assert "FALLBACK_OK" in result.stdout, (
+        f"fallback import failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+    )

@@ -6,12 +6,29 @@ from email.utils import parsedate as _parsedate
 from threading import RLock
 
 try:
-    ParamSpec = _ty.ParamSpec
+    ParamSpec = _ty.ParamSpec  # 3.10+
 except AttributeError:
     try:
         from typing_extensions import ParamSpec
     except ImportError:
-        ParamSpec = _ty.TypeVar
+
+        class ParamSpec(_ty.TypeVar, _root=True):
+            """Minimal `ParamSpec` stand-in for 3.9 without `typing_extensions`.
+
+            Only the `.args` / `.kwargs` attributes are needed: they appear in
+            annotations that must merely *evaluate*, and a plain `TypeVar` has
+            neither. `typing_extensions` is not a runtime dependency, so the
+            fallback keeps a bare 3.9 install importable.
+            """
+
+            @property
+            def args(self):
+                return self
+
+            @property
+            def kwargs(self):
+                return self
+
 
 K = ParamSpec("K")
 V = _ty.TypeVar("V")
