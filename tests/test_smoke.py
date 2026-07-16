@@ -4,6 +4,8 @@ These are the snippets from README.md's Quick start and examples/example.py
 that don't touch the network. On Python 3.9 this file is expected to fail
 until the Python 3.9 compatibility work lands.
 """
+import pytest
+
 import pathlib_next
 from pathlib_next import Path, glob
 from pathlib_next.mempath import MemPath
@@ -27,6 +29,7 @@ def test_readme_local_path():
 
 
 def test_readme_http_path_construct_only():
+    pytest.importorskip("requests")
     http_path = UriPath("http://example.com/data.txt")
     assert http_path.source.scheme == "http"
 
@@ -80,6 +83,7 @@ def test_example_uripath_norm():
 
 
 def test_example_uripath_sftp_join():
+    pytest.importorskip("paramiko")
     sftp_root = UriPath("sftp://root@sftpexample/")
     sftp_root.as_posix()
     authkeys = sftp_root / "root/.ssh/authorized_keys"
