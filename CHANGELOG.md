@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-16
+
 ### Fixed
 - **`LocalPath.walk()`/`rm()` raised `TypeError: cannot unpack non-iterable
   DirEntry object` on Python 3.11/3.12.** Those stdlib versions define their
@@ -32,10 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `pytest.importorskip` their extra; the `S3Path` check now probes for
   `botocore`. Introduced in 0.8.0 (`94bd545`/`8cdbefa`), fixed with the
   expected skip count (2) verified in a real no-extras venv.
-
-## [0.8.1] - 2026-07-16
-
-### Fixed
 - **Importable on a clean Python 3.9 install.** `pathlib_next.utils` used
   `typing.ParamSpec` (3.10+), falling back to `typing_extensions.ParamSpec` and
   then to a bare `typing.TypeVar`. A `TypeVar` has no `.args`, so the
