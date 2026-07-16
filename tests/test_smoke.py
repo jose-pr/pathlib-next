@@ -115,9 +115,10 @@ def test_optional_schemes_presence_or_absence():
     except ImportError:
         assert not hasattr(schemes, "SftpPath")
 
-    # Check s3
+    # Check s3 -- S3Path only needs botocore at import time (boto3 itself is
+    # a lazy import inside S3Backend.client()), so that's what gates it.
     try:
-        import boto3  # noqa: F401
+        import botocore  # noqa: F401
         assert hasattr(schemes, "S3Path")
     except ImportError:
         assert not hasattr(schemes, "S3Path")
