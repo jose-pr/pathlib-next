@@ -11,6 +11,7 @@ import types as _types
 import typing as _ty
 
 from . import path as _proto
+from .utils.stat import FileStat as _FileStat
 
 # pathlib.Path.stat()/chmod() only accept follow_symlinks= on 3.10+; below
 # that, LocalPath (which inherits them directly from pathlib.Path via MRO,
@@ -83,6 +84,22 @@ class LocalPath(
     `docs/divergences.md`)."""
 
     __slots__ = ()
+
+    def _scandir(self):
+        # On 3.11+, `pathlib.Path._scandir()` (stdlib, ahead of ours in the
+        # MRO via WindowsPath/PosixPath) shadows `_proto.Path._scandir()`
+        # and returns `os.scandir(self)` directly -- an iterator of raw
+        # `os.DirEntry`, not this project's `(name, FileStat|None)` tuples.
+        # walk()/glob() expect the latter, so re-assert our own contract
+        # here regardless of what stdlib does in a given version. DirEntry's
+        # own cached lstat (`follow_symlinks=False`, matching walk()'s
+        # default) is reused instead of a fresh stat() round trip.
+        for entry in _os.scandir(self):
+            try:
+                stat = _FileStat.from_stat(entry.stat(follow_symlinks=False))
+            except OSError:
+                stat = None
+            yield entry.name, stat
 
     def stat(self, *, follow_symlinks=True):
         # pathlib.Path.stat() (next in MRO via WindowsPath/PosixPath) only
