@@ -101,6 +101,20 @@ class LocalPath(
                 stat = None
             yield entry.name, stat
 
+    def walk(self, top_down=True, on_error=None, follow_symlinks=False):
+        # 3.12+ stdlib `pathlib.Path.walk()` sits ahead of ours in the MRO
+        # and would otherwise win here. Its implementation calls
+        # `self._scandir()` expecting stdlib's own context-manager-capable
+        # `os.scandir(self)` return value ("with scandir_it:") -- our
+        # `_scandir()` override above is a plain generator, so stdlib's
+        # `walk()` breaks on it (`TypeError: 'generator' object does not
+        # support the context manager protocol`). Route explicitly to our
+        # own `walk()` (which drives `_scandir()` correctly) regardless of
+        # which one the MRO would otherwise resolve to.
+        return _proto.Path.walk(
+            self, top_down=top_down, on_error=on_error, follow_symlinks=follow_symlinks
+        )
+
     def stat(self, *, follow_symlinks=True):
         # pathlib.Path.stat() (next in MRO via WindowsPath/PosixPath) only
         # accepts follow_symlinks= on 3.10+; below that, lstat() is the

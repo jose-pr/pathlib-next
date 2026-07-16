@@ -15,8 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   MRO and silently shadowed it -- breaking the `(name, FileStat|None)`
   contract `walk()`/`glob()`/`rm()` expect. `LocalPath` now defines its own
   `_scandir()` explicitly, reusing each `DirEntry`'s cached `lstat()` so the
-  perf win from `_scandir()` unification is preserved. Introduced in 0.8.0
-  (`8cdbefa`), exposed on the CI 3.11 leg.
+  perf win from `_scandir()` unification is preserved. On 3.12+, stdlib
+  `pathlib.Path` also defines its own `walk()` ahead of ours in the MRO, and
+  that stdlib `walk()` treats `self._scandir()`'s return value as a context
+  manager (`with scandir_it:`) -- our own `_scandir()` is a plain generator,
+  so stdlib's `walk()` raised `TypeError: 'generator' object does not
+  support the context manager protocol` even with the override above.
+  `LocalPath` now also overrides `walk()` explicitly, routing to this
+  project's own implementation regardless of Python version. Introduced in
+  0.8.0 (`8cdbefa`), exposed on the CI 3.11/3.12 legs.
 - **`Test No-Extras` CI job was red.** `tests/test_smoke.py` unconditionally
   constructed an `http://`/`sftp://` `UriPath` in two tests, requiring
   `requests`/`paramiko` even though the no-extras job installs neither; a
