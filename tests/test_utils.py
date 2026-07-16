@@ -313,6 +313,10 @@ def test_detect_format_does_not_peek_when_extension_is_conclusive():
 
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 10),
+    reason="the ParamSpec fallback is only reachable on 3.9 (3.10+ has typing.ParamSpec)",
+)
 def test_paramspec_fallback_importable_without_typing_extensions():
     # Regression: on Python 3.9 `typing.ParamSpec` does not exist, so the module
     # falls back to `typing_extensions.ParamSpec` and, failing that, to a local
@@ -322,11 +326,17 @@ def test_paramspec_fallback_importable_without_typing_extensions():
     # `typing_extensions` installed transitively -- but it is not a runtime
     # dependency, so a clean 3.9 install of the package could not import it.
     #
+    # 3.9-only by nature, not by convenience: `Generic[K, V]` on 3.9 rejects a
+    # plain object ("Parameters to generic types must be types"), so the shim must
+    # subclass `TypeVar` -- and `TypeVar` stopped being subclassable in 3.12. The
+    # branch is unreachable on 3.10+ anyway, since `typing.ParamSpec` exists there.
+    #
     # Runs in a subprocess with `typing_extensions` blocked so the fallback is
-    # exercised for real (on 3.10+ `typing.ParamSpec` is hidden too).
+    # exercised for real rather than mocked.
     probe = textwrap.dedent(
         """
-        import builtins, sys, typing
+        import builtins
+
         _real_import = builtins.__import__
 
         def _blocked(name, *a, **k):
@@ -335,8 +345,6 @@ def test_paramspec_fallback_importable_without_typing_extensions():
             return _real_import(name, *a, **k)
 
         builtins.__import__ = _blocked
-        if hasattr(typing, "ParamSpec"):
-            del typing.ParamSpec  # emulate the 3.9 typing module
 
         from pathlib_next.utils import LRU, K
 
