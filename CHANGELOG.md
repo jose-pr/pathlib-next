@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-16
+
+### Fixed
+- **Importable on a clean Python 3.9 install.** `pathlib_next.utils` used
+  `typing.ParamSpec` (3.10+), falling back to `typing_extensions.ParamSpec` and
+  then to a bare `typing.TypeVar`. A `TypeVar` has no `.args`, so the
+  `*args: K.args` annotations raised `AttributeError: 'TypeVar' object has no
+  attribute 'args'` at import time, making `import pathlib_next` fail on 3.9
+  whenever `typing_extensions` was absent. Since `typing_extensions` is not a
+  runtime dependency, this broke a plain `pip install pathlib_next` on 3.9. The
+  final fallback is now a minimal `ParamSpec` shim providing `.args`/`.kwargs`,
+  so no runtime dependency is added and 3.10+ keeps using `typing.ParamSpec`
+  unchanged.
+
 ## [0.8.0] - 2026-07-13
 
 ### Added
@@ -437,7 +451,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/jose-pr/pathlib_next/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/jose-pr/pathlib_next/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jose-pr/pathlib_next/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jose-pr/pathlib_next/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...v0.5.0
