@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-07-18
+
 ### Changed
 - **`AsyncsshSftpBackend` default `max_concurrency` raised 8 → 16.** A 128-file
   loopback recursive-copy/rm sweep of `mc ∈ {1,2,4,8,16}` (median of 3) showed
@@ -505,7 +507,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/jose-pr/pathlib_next/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/jose-pr/pathlib_next/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/jose-pr/pathlib_next/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/jose-pr/pathlib_next/compare/v0.7.0...v0.8.0
