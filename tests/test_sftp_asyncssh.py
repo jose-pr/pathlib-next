@@ -293,9 +293,12 @@ def test_asyncssh_backend_has_max_concurrency():
     assert backend.max_concurrency == 16
 
 
-def test_asyncssh_backend_max_concurrency_defaults_to_8():
+def test_asyncssh_backend_max_concurrency_defaults_to_16():
+    # Raised from 8 to 16 in 0.8.3 (loopback recursive-copy sweep); see
+    # DEFAULT_MAX_CONCURRENCY's rationale in _asyncssh.py.
     backend = backend_mod.AsyncsshSftpBackend()
-    assert backend.max_concurrency == 8
+    assert backend.max_concurrency == 16
+    assert backend.max_concurrency == backend_mod.AsyncsshSftpBackend.DEFAULT_MAX_CONCURRENCY
     assert "config" not in backend.connect_opts
 
 
@@ -757,3 +760,14 @@ def test_sftppath_rm_recursive_uses_concurrent_helper(monkeypatch):
     assert recorded["kwargs"]["max_concurrency"] == 6
     assert recorded["kwargs"]["missing_ok"] is True
     assert recorded["kwargs"]["on_error"](ValueError("ignored"), src) is True
+
+
+# --- default max_concurrency -------------------------------------------------
+
+
+def test_explicit_max_concurrency_overrides_default():
+    backend = backend_mod.AsyncsshSftpBackend({"config": None}, max_concurrency=4)
+    assert backend.max_concurrency == 4
+    # 0 is honored as given (the async helpers clamp to >=1 at use time via
+    # `max(1, max_concurrency)`), not silently replaced by the default.
+    assert backend_mod.AsyncsshSftpBackend({"config": None}, max_concurrency=1).max_concurrency == 1

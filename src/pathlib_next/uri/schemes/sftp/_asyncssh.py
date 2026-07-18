@@ -482,14 +482,28 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     #: real-world OpenSSH v3 servers, or the standard opcode against v5/v6).
     supports_hardlink = True
 
+    #: Default bound on concurrent SFTP requests during a recursive copy/rm.
+    #: 16 (raised from 8 in 0.8.3): a 128-file loopback sweep of mc in
+    #: {1,2,4,8,16} (median of 3, 3.14) showed recursive copy improving
+    #: monotonically with concurrency -- mc=1 -> mc=8 ~1.13x, mc=8 -> mc=16 a
+    #: further ~3% -- with recursive rm flat (spread within run-to-run noise) and
+    #: mc=16 fastest-or-tied for both. 16 stays well inside asyncssh's SFTP
+    #: request window, so the extra in-flight requests carry no overload risk.
+    #: NOTE: loopback evidence only (no per-op network latency); a high-latency
+    #: remote link may favour even higher concurrency, but 16 is a safe, modest
+    #: default. Override per-backend via ``max_concurrency=``.
+    DEFAULT_MAX_CONCURRENCY = 16
+
     def __init__(
         self,
         connect_opts: "dict[str, _ty.Any] | None" = None,
         *,
-        max_concurrency: int = 8,
+        max_concurrency: "int | None" = None,
         sftp_version: int = 4,
         ssh_config=_DEFAULT_SSH_CONFIG,
     ):
+        if max_concurrency is None:
+            max_concurrency = self.DEFAULT_MAX_CONCURRENCY
         self.connect_opts = {} if connect_opts is None else dict(connect_opts)
         if "config" not in self.connect_opts:
             if ssh_config is None:

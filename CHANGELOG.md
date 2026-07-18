@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **`AsyncsshSftpBackend` default `max_concurrency` raised 8 → 16.** A 128-file
+  loopback recursive-copy/rm sweep of `mc ∈ {1,2,4,8,16}` (median of 3) showed
+  recursive copy improving monotonically with concurrency (mc=8→16 ≈3% faster on
+  top of mc=1→8 ≈1.13x) and recursive remove flat within noise, with 16
+  fastest-or-tied and well inside asyncssh's SFTP request window. Exposed as
+  `AsyncsshSftpBackend.DEFAULT_MAX_CONCURRENCY`; pass `max_concurrency=` to
+  override. Loopback evidence only — a high-latency remote link may warrant a
+  different value; 16 is a safe modest default, not a tuned optimum.
+
 ## [0.8.2] - 2026-07-18
 
 ### Fixed

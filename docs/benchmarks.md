@@ -142,6 +142,16 @@ Legend: `p` = `paramiko`, `a` = `asyncssh`.
   was fastest at `7.6068s`, with `4` at `14.2806s` and `8` at `13.3736s`.
   Treat this as workload-specific follow-up evidence, not as a default tuning
   decision.
+- **2026-07-18 (0.8.3): `AsyncsshSftpBackend` default `max_concurrency` raised
+  8 → 16.** A cleaner 128-file loopback sweep of `mc ∈ {1,2,4,8,16}` (median of
+  3, py3.14) showed recursive copy improving *monotonically* with concurrency
+  (mc=1 `1.66s` → mc=8 `1.47s` ≈ 1.13x → mc=16 `1.42s`, a further ≈3%), and
+  recursive remove flat within noise (median spread `0.498`..`0.551`, mc=16
+  marginally best). This supersedes the earlier "mc=1 fastest" loopback reading
+  (from the older code path / a different venv). 16 stays within asyncssh's SFTP
+  request window. **Loopback only** — no per-op latency; a high-latency remote
+  link may favour higher concurrency still, so 16 is a safe modest default, not
+  a tuned optimum. Override per backend via `AsyncsshSftpBackend(max_concurrency=…)`.
 - `python benchmarks/bench.py syncer` on the same local run reported
   PathSyncer copy of 128 local files at `0.4524s`, dry-run at `0.0534s`, and
   remove-missing plus copy at `0.9260s`. This suggests metadata reuse may be
