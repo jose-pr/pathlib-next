@@ -15,7 +15,7 @@ import asyncssh as _asyncssh
 from ... import Source
 from ....utils.stat import FileStat
 from . import BaseSftpBackend
-from ._paramiko import _DEFAULT_SSH_CONFIG
+from ._sshconfig import _DEFAULT_SSH_CONFIG
 
 # --- shared background event loop -------------------------------------
 # asyncssh is asyncio-only end to end (connect(), every SFTPClient method,

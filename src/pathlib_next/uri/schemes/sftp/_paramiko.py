@@ -9,20 +9,11 @@ from .... import utils as _utils
 from ... import Source
 from . import BaseSftpBackend
 
-
-_DEFAULT_SSH_CONFIG = object()
-
-
-def _normalize_config_paths(
-    ssh_config: "object",
-) -> "tuple[str, ...] | None":
-    if ssh_config is _DEFAULT_SSH_CONFIG:
-        return (str(_pathlib.Path.home() / ".ssh" / "config"),)
-    if ssh_config is None:
-        return None
-    if isinstance(ssh_config, (str, _pathlib.PurePath)):
-        return (str(ssh_config),)
-    return tuple(str(path) for path in ssh_config)
+# The sentinel + path normalization are paramiko-free and now live in
+# ``_sshconfig`` so the asyncssh backend and the scheme ``__init__`` can use them
+# without importing paramiko. Re-exported here for backward compatibility (older
+# code did ``from ._paramiko import _DEFAULT_SSH_CONFIG``).
+from ._sshconfig import _DEFAULT_SSH_CONFIG, _normalize_config_paths
 
 
 @_utils.LRU

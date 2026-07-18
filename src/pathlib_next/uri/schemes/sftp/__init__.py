@@ -32,7 +32,9 @@ class BaseSftpBackend(object):
     def client(self, source: Source): ...
 
 
-from ._paramiko import _DEFAULT_SSH_CONFIG, SftpBackend as SftpBackend  # noqa: E402
+# The default-config sentinel is paramiko-free (lives in `_sshconfig`) so
+# importing this scheme never pulls paramiko in just to have the sentinel.
+from ._sshconfig import _DEFAULT_SSH_CONFIG
 
 
 # --- backend selection -----------------------------------------------------
@@ -41,10 +43,18 @@ from ._paramiko import _DEFAULT_SSH_CONFIG, SftpBackend as SftpBackend  # noqa: 
 # UriPath backend propagation works, unchanged) > `SftpPath._default_backend_cls`
 # class attribute > `PATHLIB_NEXT_SFTP_BACKEND` env var > auto-detect
 # (asyncssh if importable, else paramiko).
+#
+# BOTH backends are imported lazily (`_probe_asyncssh`/`_probe_paramiko`): merely
+# importing this scheme -- which happens for every `sftp:` URL and for
+# `from ...sftp import SftpPath` -- must not require *either* SSH library. In
+# particular an asyncssh-only install (the `sftp-async` extra, no paramiko) must
+# be able to import and use `SftpPath`; eagerly importing `._paramiko` here broke
+# exactly that.
 
 _ENV_VAR = "PATHLIB_NEXT_SFTP_BACKEND"
-_BACKEND_REGISTRY: "dict[str, type[BaseSftpBackend]]" = {"paramiko": SftpBackend}
+_BACKEND_REGISTRY: "dict[str, type[BaseSftpBackend]]" = {}
 _asyncssh_probed = False
+_paramiko_probed = False
 _resolved_backend_cls: "type[BaseSftpBackend] | None" = None
 
 
@@ -64,47 +74,79 @@ def _probe_asyncssh() -> None:
     _BACKEND_REGISTRY["asyncssh"] = AsyncsshSftpBackend
 
 
+def _probe_paramiko() -> None:
+    # Symmetric with `_probe_asyncssh`: only import paramiko when it is actually
+    # needed (paramiko selected, or auto-detect with asyncssh unavailable), so an
+    # asyncssh-only install never imports paramiko.
+    global _paramiko_probed
+    if _paramiko_probed:
+        return
+    _paramiko_probed = True
+    try:
+        from ._paramiko import SftpBackend
+    except ImportError:
+        return
+    _BACKEND_REGISTRY["paramiko"] = SftpBackend
+
+
 def _resolve_default_backend_cls(reload: bool = False) -> "type[BaseSftpBackend]":
     global _resolved_backend_cls
     if not reload and _resolved_backend_cls is not None:
         return _resolved_backend_cls
     value = _os.environ.get(_ENV_VAR, "auto")
     if value == "paramiko":
-        cls = _BACKEND_REGISTRY["paramiko"]
-    else:
-        _probe_asyncssh()
-        if value == "auto":
-            cls = _BACKEND_REGISTRY.get("asyncssh") or _BACKEND_REGISTRY["paramiko"]
-        elif value == "asyncssh":
-            if "asyncssh" not in _BACKEND_REGISTRY:
-                # Fail loud -- a silent fallback to paramiko would hide a
-                # deployment misconfiguration (asyncssh extra not installed
-                # where the operator explicitly asked for it).
-                raise ImportError(
-                    f"{_ENV_VAR}=asyncssh but the asyncssh package is not "
-                    "installed -- install the 'sftp-async' extra, or unset "
-                    f"{_ENV_VAR} to auto-detect (falls back to paramiko)."
-                )
-            cls = _BACKEND_REGISTRY["asyncssh"]
-        else:
-            raise ValueError(
-                f"{_ENV_VAR}={value!r} is not a recognized SFTP backend "
-                f"(expected one of {sorted({'auto', *_BACKEND_REGISTRY})!r})"
+        _probe_paramiko()
+        if "paramiko" not in _BACKEND_REGISTRY:
+            raise ImportError(
+                f"{_ENV_VAR}=paramiko but the paramiko package is not "
+                "installed -- install the 'sftp' extra, or unset "
+                f"{_ENV_VAR} to auto-detect (uses asyncssh if available)."
             )
+        cls = _BACKEND_REGISTRY["paramiko"]
+    elif value == "asyncssh":
+        _probe_asyncssh()
+        if "asyncssh" not in _BACKEND_REGISTRY:
+            # Fail loud -- a silent fallback to paramiko would hide a
+            # deployment misconfiguration (asyncssh extra not installed
+            # where the operator explicitly asked for it).
+            raise ImportError(
+                f"{_ENV_VAR}=asyncssh but the asyncssh package is not "
+                "installed -- install the 'sftp-async' extra, or unset "
+                f"{_ENV_VAR} to auto-detect (falls back to paramiko)."
+            )
+        cls = _BACKEND_REGISTRY["asyncssh"]
+    elif value == "auto":
+        _probe_asyncssh()
+        if "asyncssh" not in _BACKEND_REGISTRY:
+            _probe_paramiko()
+        cls = _BACKEND_REGISTRY.get("asyncssh") or _BACKEND_REGISTRY.get("paramiko")
+        if cls is None:
+            raise ImportError(
+                "no SFTP backend available -- install the 'sftp-async' "
+                "(asyncssh) or 'sftp' (paramiko) extra."
+            )
+    else:
+        raise ValueError(
+            f"{_ENV_VAR}={value!r} is not a recognized SFTP backend "
+            "(expected one of 'auto', 'asyncssh', 'paramiko')"
+        )
     _resolved_backend_cls = cls
     return cls
 
 
 def __getattr__(name: str):
-    # PEP 562 lazy module attribute: `from .sftp import AsyncsshSftpBackend`
-    # (or `sftp.AsyncsshSftpBackend`) only imports asyncssh at the point
-    # it's actually referenced -- importing `pathlib_next.uri.schemes.sftp`
-    # itself (which happens for every `sftp:` URL, regardless of which
-    # backend ends up selected) must not eagerly import asyncssh.
+    # PEP 562 lazy module attributes: referencing `AsyncsshSftpBackend`,
+    # `SftpBackend` (paramiko), or `_DEFAULT_SSH_CONFIG` via
+    # `from .sftp import ...` imports the relevant backend only at that point --
+    # importing the scheme module itself pulls in neither SSH library.
     if name == "AsyncsshSftpBackend":
         from ._asyncssh import AsyncsshSftpBackend
 
         return AsyncsshSftpBackend
+    if name == "SftpBackend":
+        from ._paramiko import SftpBackend
+
+        return SftpBackend
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

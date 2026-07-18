@@ -137,6 +137,13 @@ def _reset_backend_resolution(monkeypatch):
 
 from pathlib_next.uri.schemes import sftp as sftp_pkg  # noqa: E402
 
+import importlib.util as _importutil  # noqa: E402
+
+_HAS_PARAMIKO = _importutil.find_spec("paramiko") is not None
+_needs_paramiko = pytest.mark.skipif(
+    not _HAS_PARAMIKO, reason="paramiko not installed (asyncssh-only install)"
+)
+
 
 def test_resolve_default_backend_auto_prefers_asyncssh(monkeypatch):
     monkeypatch.delenv(sftp_pkg._ENV_VAR, raising=False)
@@ -144,6 +151,7 @@ def test_resolve_default_backend_auto_prefers_asyncssh(monkeypatch):
     assert cls is backend_mod.AsyncsshSftpBackend
 
 
+@_needs_paramiko
 def test_resolve_default_backend_explicit_paramiko(monkeypatch):
     monkeypatch.setenv(sftp_pkg._ENV_VAR, "paramiko")
     cls = sftp_pkg._resolve_default_backend_cls(reload=True)
@@ -164,7 +172,6 @@ def test_resolve_default_backend_invalid_value_raises(monkeypatch):
 
 def test_resolve_default_backend_asyncssh_unavailable_raises_importerror(monkeypatch):
     monkeypatch.setenv(sftp_pkg._ENV_VAR, "asyncssh")
-    monkeypatch.setitem(sftp_pkg._BACKEND_REGISTRY, "paramiko", sftp_pkg.SftpBackend)
     monkeypatch.delitem(sftp_pkg._BACKEND_REGISTRY, "asyncssh", raising=False)
     monkeypatch.setattr(sftp_pkg, "_asyncssh_probed", True)  # skip the real probe
     with pytest.raises(ImportError, match="sftp-async"):
@@ -172,13 +179,16 @@ def test_resolve_default_backend_asyncssh_unavailable_raises_importerror(monkeyp
 
 
 def test_resolve_default_backend_result_is_cached(monkeypatch):
-    monkeypatch.setenv(sftp_pkg._ENV_VAR, "paramiko")
-    first = sftp_pkg._resolve_default_backend_cls(reload=True)
+    # asyncssh first (always available in this test module), then flip the env
+    # and confirm no-reload returns the cached asyncssh result.
     monkeypatch.setenv(sftp_pkg._ENV_VAR, "asyncssh")
+    first = sftp_pkg._resolve_default_backend_cls(reload=True)
+    monkeypatch.setenv(sftp_pkg._ENV_VAR, "auto")
     second = sftp_pkg._resolve_default_backend_cls()  # no reload -- cached
-    assert first is second is sftp_pkg.SftpBackend
+    assert first is second is backend_mod.AsyncsshSftpBackend
 
 
+@_needs_paramiko
 def test_default_backend_cls_class_attribute_wins_over_env(monkeypatch):
     monkeypatch.setenv(sftp_pkg._ENV_VAR, "asyncssh")
 
@@ -189,6 +199,42 @@ def test_default_backend_cls_class_attribute_wins_over_env(monkeypatch):
     inst = _PinnedSftpPath.__new__(_PinnedSftpPath)
     backend = inst._initbackend()
     assert isinstance(backend, sftp_pkg.SftpBackend)
+
+
+def test_sftp_scheme_imports_and_resolves_without_paramiko():
+    """Regression: an asyncssh-only install (no paramiko) must still import
+    SftpPath and auto-resolve to the asyncssh backend.
+
+    Runs in a subprocess with ``paramiko`` masked (blocked in sys.modules) so the
+    guard holds even in a CI env where paramiko happens to be installed. Before
+    the fix, ``uri/schemes/sftp/__init__`` imported ``._paramiko`` eagerly, so
+    merely importing ``SftpPath`` raised ModuleNotFoundError without paramiko.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import sys
+        # Make `import paramiko` fail, simulating an asyncssh-only install.
+        sys.modules["paramiko"] = None
+        from pathlib_next.uri.schemes.sftp import SftpPath
+        from pathlib_next.uri.schemes import sftp as pkg
+        sp = SftpPath("sftp://root@h:22/etc/hosts")
+        assert sp.source.host == "h" and sp.path == "/etc/hosts"
+        cls = pkg._resolve_default_backend_cls(reload=True)
+        assert cls.__name__ == "AsyncsshSftpBackend", cls
+        print("OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
 
 
 def test_explicit_backend_kwarg_wins_over_everything(monkeypatch):
@@ -219,6 +265,7 @@ def test_asyncssh_backend_supports_lchmod_and_hardlink():
     assert backend.supports_hardlink is True
 
 
+@_needs_paramiko
 def test_paramiko_backend_does_not_support_lchmod_or_hardlink():
     assert sftp_pkg.SftpBackend.supports_lchmod is False
     assert sftp_pkg.SftpBackend.supports_hardlink is False

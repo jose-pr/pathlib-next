@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`SftpPath` could not be imported or used with an asyncssh-only install
+  (no `paramiko`).** `uri/schemes/sftp/__init__.py` imported `._paramiko`
+  eagerly at module load, and `_asyncssh.py` imported the
+  `_DEFAULT_SSH_CONFIG` sentinel from `._paramiko`, so merely importing
+  `SftpPath` (or the `AsyncsshSftpBackend`) required `paramiko` even when the
+  caller only wanted the asyncssh backend from the `sftp-async` extra. The
+  paramiko-free bits (the sentinel + config-path normalization) moved to a new
+  `_sshconfig` module, and the paramiko `SftpBackend` is now imported lazily
+  (via `_probe_paramiko`, mirroring `_probe_asyncssh`) only when actually
+  selected. `SftpBackend`/`_DEFAULT_SSH_CONFIG` remain importable from the
+  scheme package (PEP 562 `__getattr__`) for backward compatibility.
+  `PATHLIB_NEXT_SFTP_BACKEND=paramiko` (or `auto` with neither library) now
+  raises a clear `ImportError` naming the missing extra instead of a bare
+  `ModuleNotFoundError` at import time. Regression test added
+  (`test_sftp_scheme_imports_and_resolves_without_paramiko`, runs in a
+  paramiko-masked subprocess).
+
 ## [0.8.1] - 2026-07-16
 
 ### Fixed
