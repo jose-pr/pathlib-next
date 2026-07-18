@@ -8,7 +8,7 @@ import botocore.exceptions as _botoexc
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
-from .. import Source, Uri, UriPath
+from .. import Uri, UriPath
 
 
 class BaseS3Backend(object):

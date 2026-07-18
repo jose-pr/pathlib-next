@@ -5,7 +5,7 @@ import typing as _ty
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
-from .. import Source, Uri, UriPath
+from .. import Uri, UriPath
 
 
 class BaseAzBackend(object):

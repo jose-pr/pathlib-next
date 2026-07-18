@@ -6,7 +6,7 @@ import io as _io
 import urllib.parse as _urlparse
 
 from ...utils.stat import FileStat
-from ._gitrepo import RepoBackend, _RepoApiPath, _translate_repo_errors
+from ._gitrepo import RepoBackend, _RepoApiPath, _translate_repo_errors  # noqa: F401  (re-exported)
 
 
 class GitHubPath(_RepoApiPath):

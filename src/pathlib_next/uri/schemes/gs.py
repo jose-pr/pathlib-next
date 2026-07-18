@@ -5,7 +5,7 @@ import typing as _ty
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
-from .. import Source, Uri, UriPath
+from .. import Uri, UriPath
 
 
 class BaseGsBackend(object):
@@ -247,5 +247,5 @@ class GsPath(UriPath):
             target = Uri(self.parent, target)
         dest_key = target.path.lstrip("/")
         source_blob = self._bucket.blob(self.key)
-        dest_blob = self._bucket.copy_blob(source_blob, self._bucket, dest_key)
+        self._bucket.copy_blob(source_blob, self._bucket, dest_key)
         source_blob.delete()

@@ -263,7 +263,7 @@ class Uri(Pathname):
             elif os.name == "nt":
                 return f"//{self.source.host}/{self.path.removeprefix('/')}"
             else:
-                raise NotImplementedError(f"OS Support for not local fspath")
+                raise NotImplementedError("OS Support for not local fspath")
 
         raise NotImplementedError(f"fspath for {self.source.scheme}")
 
@@ -513,7 +513,7 @@ class UriPath(Uri, Path):
     def _schemes(cls) -> _ty.Sequence[str]:
         try:
             return getattr(cls, f"_{cls.__name__}__SCHEMES")
-        except AttributeError as _e:
+        except AttributeError:
             return ()
 
     @classmethod

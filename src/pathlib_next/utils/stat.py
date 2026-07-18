@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import abc as _abc
 import stat as _stat
 import typing as _ty
 

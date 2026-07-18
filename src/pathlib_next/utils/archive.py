@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import tarfile
 import typing as _ty
 import zipfile
