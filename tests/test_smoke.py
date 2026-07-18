@@ -108,12 +108,16 @@ def test_optional_schemes_presence_or_absence():
     except ImportError:
         assert not hasattr(schemes, "HttpPath")
 
-    # Check sftp
-    try:
-        import paramiko  # noqa: F401
-        assert hasattr(schemes, "SftpPath")
-    except ImportError:
-        assert not hasattr(schemes, "SftpPath")
+    # Check sftp: as of 0.8.2 importing SftpPath no longer requires an SSH
+    # backend (paramiko/asyncssh) -- those are resolved lazily at USE time. The
+    # scheme is a UriPath, so its import gate is `uritools` (the `uri` extra);
+    # SftpPath is present exactly when that is importable. Using it without any
+    # SSH backend installed is what raises (covered by the backend-selection
+    # tests), not importing it.
+    import importlib.util as _importutil
+
+    _has_uri = _importutil.find_spec("uritools") is not None
+    assert hasattr(schemes, "SftpPath") == _has_uri
 
     # Check s3 -- S3Path only needs botocore at import time (boto3 itself is
     # a lazy import inside S3Backend.client()), so that's what gates it.
