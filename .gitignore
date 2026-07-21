@@ -5,6 +5,7 @@ site/
 
 # Agent/harness tooling
 .agents
+*.local.md
 CLAUDE.md
 CLAUDE.local.md
 .claude/
