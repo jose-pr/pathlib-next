@@ -58,6 +58,15 @@ Homepage = "https://github.com/jose-pr/pathlib_next/"
 Documentation = "https://jose-pr.github.io/pathlib_next/"
 Issues = "https://github.com/jose-pr/pathlib_next/issues"
 
+
+# Ship the consumer-facing docs inside the installed package, so they are
+# readable from site-packages via importlib.resources without the repo.
+# src/pathlib_next/AGENTS.md is included automatically by living in the package
+# dir; the repo-root AGENTS.md is development-only and deliberately not
+# shipped.
+[tool.hatch.build.targets.wheel.force-include]
+"README.md" = "pathlib_next/README.md"
+
 [tool.hatch.build.targets.sdist]
 exclude = ["/.*", "/benchmarks"]
 

@@ -4,7 +4,7 @@ Header-file-style reference for the `pathlib_next` package: every public
 export with its signature, arguments, contract, and gotchas, so this module
 can be consumed without reading its source. Kept current with the public
 API. For the project overview, install extras, and code layout, see the
-repo-root `AGENTS.md`. Any behavioral divergence from `pathlib.Path` is
+<https://github.com/jose-pr/pathlib_next>. Any behavioral divergence from `pathlib.Path` is
 recorded in `docs/divergences.md` — this file documents the *contract*, not
 every internal deviation.
 
@@ -185,7 +185,7 @@ extra that depends on it).
   `single=True`, last value wins).
 
 Built-in scheme modules live under `uri/schemes/` — see the table in the
-repo-root `AGENTS.md`. `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"` /
+<https://github.com/jose-pr/pathlib_next>. `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"` /
 `"asyncssh"` / `"auto"`, default `"auto"`) selects the `sftp:` backend;
 precedence is an explicit class attribute > this env var > auto-detect
 (prefers asyncssh if importable). `gs:` honors `STORAGE_EMULATOR_HOST` (set
