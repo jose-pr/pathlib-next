@@ -11,6 +11,26 @@ in via MRO, so unless noted otherwise it behaves exactly like `pathlib.Path`
 (it inherits the real implementation for anything not explicitly overridden).
 The divergences below apply to `Uri`/`UriPath` and `MemPath`.
 
+## Type relationships
+
+Stdlib inheritance is deliberately limited to local filesystem paths:
+
+- `LocalPath` subclasses both `pathlib.Path` and `pathlib_next.Path`.
+- `PosixPathname` and `WindowsPathname` subclass the matching stdlib
+  `PurePath` classes and `pathlib_next.Pathname`.
+- `MemPath`, `Uri`, `UriPath`, and custom virtual or remote implementations
+  subclass the generic pathlib_next bases, not `pathlib.Path`/`PurePath`.
+- A plain stdlib `pathlib.Path` is not a `pathlib_next.Path`.
+
+The generic classes cannot safely inherit the stdlib classes: pathlib parses
+OS-specific path syntax and supplies operations whose semantics assume a local
+filesystem, neither of which applies to a URI, archive member, object-store key,
+or in-memory path. Registering stdlib paths as virtual `pathlib_next.Path`
+subclasses would likewise promise pathlib_next's extended operation contract on
+Python versions where stdlib paths do not implement it. Code accepting every
+implementation should type against `pathlib_next.Path` or its documented
+protocols; code requiring an OS path should type against `pathlib.Path`.
+
 | Method | pathlib behavior | Our behavior | Why |
 | --- | --- | --- | --- |
 | `Uri("a").parent` | `PurePosixPath("a").parent == PurePosixPath(".")` | `Uri("a").parent` has path `""` (`Uri("")`, which round-trips) | `Uri` has no cwd-relative concept of `"."` -- an empty path is the URI-natural "no path" representation. Changing this would make `Uri("")` non-idempotent under `.parent`. |

@@ -83,10 +83,16 @@ pathlib_next`.
 - **`LocalPath`** — `pathlib.WindowsPath`/`PosixPath` (by `os.name`) with
   this library's `Path` mixed in via MRO. Behaves exactly like
   `pathlib.Path` for anything not explicitly overridden (see
-  `docs/divergences.md`); overrides `_scandir()`, `walk()`, `stat()`,
-  `chmod()`, and `glob()` to keep this project's contracts (tuple-yielding
-  `_scandir`, `follow_symlinks=` support pre-3.10) regardless of what a given
-  Python version's own `pathlib.Path` does at the same MRO position.
+  `docs/divergences.md`); overrides `_scandir()`, `walk()`, `copy()`,
+  `move()`, `stat()`, `chmod()`, and `glob()` to keep this project's
+  contracts (tuple-yielding `_scandir`, extended copy/move kwargs,
+  `follow_symlinks=` support pre-3.10) regardless of what a given Python
+  version's own `pathlib.Path` does at the same MRO position.
+  Stdlib inheritance is intentionally local-only: `MemPath`, `Uri`, and
+  `UriPath` implement the pathlib_next bases but are not stdlib
+  `PurePath`/`Path` instances because stdlib construction and operations
+  assume OS path syntax and a local filesystem. Conversely, a plain stdlib
+  `pathlib.Path` is not a `pathlib_next.Path`.
 - **`PosixPathname`** / **`WindowsPathname`** — pure (no I/O) path classes
   implementing `Pathname` on top of `pathlib.PurePosixPath`/
   `PureWindowsPath`.

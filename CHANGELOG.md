@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-07-26
+
+### Fixed
+- **`LocalPath.copy()` and `LocalPath.move()` resolved to the incompatible
+  stdlib implementations on Python 3.14.** Python 3.14 added methods with
+  those names ahead of `pathlib_next.Path` in `LocalPath`'s MRO, so calls using
+  pathlib_next extensions such as `overwrite=` or `recursive=` failed with
+  `TypeError`. `LocalPath` now routes both methods explicitly through the
+  pathlib_next implementations on every supported Python version.
+- Generic paths now follow Python 3.14's updated `PurePath.with_suffix(".")`
+  behavior while retaining the earlier `ValueError` behavior on older Python
+  versions.
+
+### Changed
+- Documented that stdlib inheritance is deliberately local-only:
+  `LocalPath` is a real `pathlib.Path`, while URI, in-memory, and other virtual
+  implementations inherit the generic pathlib_next contracts without claiming
+  local-filesystem semantics.
+
 ## [0.8.4] - 2026-07-18
 
 ### Changed
@@ -516,7 +535,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/jose-pr/pathlib_next/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/jose-pr/pathlib_next/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/jose-pr/pathlib_next/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/jose-pr/pathlib_next/compare/v0.8.1...v0.8.2
