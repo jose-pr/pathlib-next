@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-07-26
+
+### Fixed
+- **`PathSyncer.sync()` raised `TypeError` instead of honoring
+  `ignore_error`.** `sync()`'s `ignore_error` parameter defaulted to the bool
+  `False` and the symlink branch *called* it directly, so
+  `PathSyncer(ignore_error=True).sync(src, dst)` on a symlink source raised
+  `TypeError: 'bool' object is not callable` rather than the intended
+  `NotImplementedError`. The parameter now defaults to `None`, meaning "use
+  the policy given to `__init__`" -- it no longer silently shadows a
+  constructor-supplied policy -- and every branch consults one resolved
+  callable. Passing a callable explicitly behaves exactly as before.
+- **`Path.copy()` now accepts a bool for `ignore_error`**, matching
+  `Path.rm()`'s bool-or-callable contract. Previously only a callable or
+  `None` was handled, so `copy(recursive=True, ignore_error=True)` broke as
+  soon as a child copy failed. `None` keeps its documented meaning (fail on
+  the first error), and a callable remains a notification hook whose return
+  value is not consulted, so existing handlers such as `errors.append` are
+  unaffected.
+- **Downstream `Path` subclasses resolved stdlib `pathlib` operations
+  instead of pathlib_next's.** Concrete path classes mix a `pathlib` class
+  with `pathlib_next.Path`, so the MRO decided which library implemented a
+  method -- and which one won changed with the interpreter version. On
+  Python 3.14 the new stdlib `copy()`/`move()` displaced ours, crashing with
+  `AttributeError: ... has no attribute '_copy_from'` on non-local backends
+  and *silently* applying stdlib's different timestamp semantics on local
+  ones (making mtime-based syncs converge on 3.14 but never on <=3.13). In
+  the opposite direction, older stdlib lacked keywords this library's
+  protocols promise: `exists(follow_symlinks=)` (3.12+),
+  `read_text`/`write_text`'s `newline=` (3.13+), and `rglob`'s
+  `include_hidden=`/`recursive=`/`dironly=` extensions (never in stdlib), all
+  raising `TypeError` on the 3.9 floor. `Path.__init_subclass__` now
+  re-asserts the pathlib_next implementation of `copy`, `move`, `exists`,
+  `rglob`, `read_text` and `write_text` for any subclass that would otherwise
+  inherit stdlib's, so downstream implementers get correct behavior without
+  hand-written forwarding methods. A subclass or mixin that defines one of
+  these operations itself is never displaced.
+
+### Changed
+- `utils.as_error_handler()` centralizes `ignore_error` bool-to-callable
+  normalization. Callable **arities remain deliberately different per call
+  site** (`rm` -> `(error, path)`, `copy` -> `(error)`, `PathSyncer` ->
+  `(error, source, target, event)`); only the bool case is normalized, so no
+  public signature changed.
+
 ## [0.8.5] - 2026-07-26
 
 ### Fixed
@@ -535,7 +580,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/jose-pr/pathlib_next/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/jose-pr/pathlib_next/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/jose-pr/pathlib_next/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/jose-pr/pathlib_next/compare/v0.8.2...v0.8.3
