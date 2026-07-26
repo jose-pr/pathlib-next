@@ -533,9 +533,10 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
     ):
         """Remove this file or directory, optionally recursively and ignoring errors."""
-        _onerror = lambda _err, _path: (
-            ignore_error(_err, _path) if callable(ignore_error) else bool(ignore_error)
-        )
+        # Same bool-or-callable normalization as copy()/PathSyncer, via the
+        # shared helper. A supplied callable keeps rm()'s own `(error, path)`
+        # arity -- arities differ per call site by design, see the helper.
+        _onerror = _utils.as_error_handler(ignore_error)
 
         def _handle(error, path):
             if not _onerror(error, path):
@@ -622,9 +623,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         (unlike 3.14's False) to match this method's pre-existing behavior
         of always propagating st_mode; only st_mode is preserved, not
         timestamps/xattrs -- full metadata preservation is not implemented.
-        `ignore_error` is a callable matching `Path.rm()`'s contract: when
-        provided, exceptions are passed to it instead of raised; when None
-        (default), fail on the first error.
+        `ignore_error` accepts a bool or a callable, matching `Path.rm()`'s
+        bool-or-callable contract. `True` ignores every error; `False` and
+        `None` (the default) fail on the first error. A callable is invoked
+        as `ignore_error(error)` -- this call site's own arity -- and, as it
+        always has here, is a *notification* hook: the error is suppressed
+        regardless of what it returns, so handlers like `errors.append`
+        (returning None) keep working. Only errors from *child* copies
+        during a `recursive=True` copy are routed here.
         """
         if isinstance(target, str):
             target = type(self)(target)
@@ -649,9 +655,15 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         ignore_error=ignore_error,
                     )
                 except Exception as e:
-                    if ignore_error is None:
+                    # A callable stays a notify-and-suppress hook (its return
+                    # value was never consulted here, and callers such as
+                    # `errors.append` rely on that). Bools are new: True
+                    # suppresses, False/None raise -- matching rm()'s bool
+                    # semantics without changing the callable contract.
+                    if callable(ignore_error):
+                        ignore_error(e)
+                    elif not ignore_error:
                         raise
-                    ignore_error(e)
             return
 
         if target.exists():
