@@ -10,6 +10,7 @@ from __future__ import annotations
 import abc as _abc
 import os as _os
 import re as _re
+import sys as _sys
 import typing as _ty
 
 from . import utils as _utils
@@ -160,7 +161,11 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def with_suffix(self, suffix: str) -> _ty.Self:
         """Return a new path with the suffix changed or added."""
         name = self.name
-        if suffix and not suffix.startswith(".") or suffix == ".":
+        if (
+            suffix
+            and not suffix.startswith(".")
+            or (suffix == "." and _sys.version_info < (3, 14))
+        ):
             raise ValueError("Invalid suffix %r" % (suffix))
         if not name:
             raise ValueError("%r has an empty name" % (self,))
@@ -693,4 +698,3 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
 
 PathLike = _ty.Union[str, Path]
-

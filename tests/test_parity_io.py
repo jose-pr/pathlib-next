@@ -5,6 +5,7 @@ for the handful of methods LocalPath explicitly overrides (touch, mkdir,
 glob, rm/copy/move which have no direct pathlib.Path equivalent to diverge
 from pre-3.14).
 """
+
 import os
 
 import pytest
@@ -84,7 +85,11 @@ def test_glob_hidden_excluded_by_default(fixture_tree):
 def test_walk_matches_os_walk(fixture_tree):
     root = pathlib_next.LocalPath(fixture_tree)
     ours = sorted(
-        (str(p.relative_to(root).as_posix() if p != root else "."), sorted(d), sorted(f))
+        (
+            str(p.relative_to(root).as_posix() if p != root else "."),
+            sorted(d),
+            sorted(f),
+        )
         for p, d, f in root.walk()
     )
     theirs = sorted(
@@ -201,6 +206,11 @@ def test_copy_recursive(tmp_path):
     assert (dst / "f1.txt").read_text() == "1-updated"
 
 
+def test_local_copy_and_move_resolve_to_pathlib_next():
+    assert pathlib_next.LocalPath.copy.__module__.startswith("pathlib_next.")
+    assert pathlib_next.LocalPath.move.__module__.startswith("pathlib_next.")
+
+
 def test_move_recursive_fallback(tmp_path):
     root = pathlib_next.LocalPath(tmp_path)
     src = root / "src"
@@ -220,4 +230,3 @@ def test_move_recursive_fallback(tmp_path):
     assert not src.exists()
     assert (dst / "f1.txt").read_text() == "1"
     assert (dst / "sub" / "f2.txt").read_text() == "2"
-

@@ -4,6 +4,9 @@ Pathname (PosixPathname -- LocalPath itself is excluded here since pathlib's
 own PurePath wins those methods via MRO, see test_parity_pure.py instead),
 Uri, and MemPath.
 """
+
+import pathlib
+
 import pytest
 
 from pathlib_next.fspath import PosixPathname
@@ -57,8 +60,13 @@ def test_with_suffix_invalid_raises(cls):
     p = cls("a/b.txt")
     with pytest.raises(ValueError):
         p.with_suffix("txt")
-    with pytest.raises(ValueError):
-        p.with_suffix(".")
+    try:
+        expected = pathlib.PurePosixPath("a/b.txt").with_suffix(".").name
+    except ValueError:
+        with pytest.raises(ValueError):
+            p.with_suffix(".")
+    else:
+        assert p.with_suffix(".").name == expected
 
 
 @pytest.mark.parametrize("cls", IMPLS)
@@ -88,7 +96,7 @@ def test_parent_and_parents(cls):
     parents = [pp.as_posix() for pp in p.parents]
     assert parents[:2] == ["a/b", "a"]
     assert len(parents) == 3  # trailing root/"." element, like pathlib
-    
+
     # Slicing
     try:
         sliced = p.parents[0:2]
@@ -96,7 +104,7 @@ def test_parent_and_parents(cls):
     except TypeError:
         # Python 3.9 stdlib pathlib.PurePath.parents doesn't support slicing
         pass
-    
+
     # Negative indexing
     try:
         assert p.parents[-1].as_posix() == "" or p.parents[-1].as_posix() == "."
@@ -105,13 +113,12 @@ def test_parent_and_parents(cls):
     except IndexError:
         # Python 3.9 stdlib pathlib.PurePath.parents doesn't support negative indexing
         pass
-    
+
     # IndexError out of bounds
     with pytest.raises(IndexError):
         _ = p.parents[3]
     with pytest.raises(IndexError):
         _ = p.parents[-4]
-
 
 
 @pytest.mark.parametrize("cls", IMPLS)
