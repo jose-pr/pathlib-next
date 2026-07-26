@@ -4,6 +4,7 @@ import enum as _enum
 import logging as _logging
 import typing as _ty
 
+from .. import utils as _utils
 from ..path import Path
 from ..utils.stat import FileStat
 from .checksum import md5 as _md5
@@ -121,11 +122,9 @@ class PathSyncer(object):
         self.remove_missing = remove_missing
         self._hook = hook
         self.follow_symlinks = follow_symlinks
-        if not callable(ignore_error):
-            _ignore_error = lambda *args, **kwargs: bool(ignore_error)
-        else:
-            _ignore_error = ignore_error
-        self.ignore_error = _ty.cast(_OnPathSyncerError, _ignore_error)
+        self.ignore_error = _ty.cast(
+            _OnPathSyncerError, _utils.as_error_handler(ignore_error)
+        )
 
     def log(self, msg: str, *args: object):
         # Overridable hook: subclasses/instances may reassign `log` (or
@@ -141,12 +140,17 @@ class PathSyncer(object):
         event: SyncEvent,
         dry_run: bool,
         do: _ty.Callable[[], None] = None,
+        ignore_error: _OnPathSyncerError = None,
     ):
+        # `ignore_error` lets sync() pass down a per-call policy override;
+        # None keeps the instance-level policy (the only behavior before).
+        if ignore_error is None:
+            ignore_error = self.ignore_error
         if not dry_run and do:
             try:
                 do()
             except Exception as e:
-                if self.ignore_error(e, source, target, event):
+                if ignore_error(e, source, target, event):
                     return e
                 raise
         if self._hook:
@@ -183,11 +187,26 @@ class PathSyncer(object):
         target: Path | PathAndStat,
         /,
         dry_run: bool = False,
-        ignore_error: (
-            bool | _ty.Callable[[Exception, PathAndStat, PathAndStat], None]
-        ) = False,
+        ignore_error: _OnPathSyncerError | bool | None = None,
     ):
+        """Sync `source` onto `target`.
+
+        `ignore_error` overrides the instance-level policy for this call
+        only. It accepts a bool or a callable with the same
+        `(error, source, target, event)` arity as the constructor's; `None`
+        (the default) means "use the policy given to `__init__`".
+
+        The default used to be the bool `False`, which both shadowed a
+        constructor-supplied policy and was *called* directly by the symlink
+        branch (`TypeError: 'bool' object is not callable`). Passing a
+        callable explicitly behaves exactly as before.
+        """
         checksum = self.checksum
+        _ignore_error = (
+            self.ignore_error
+            if ignore_error is None
+            else _utils.as_error_handler(ignore_error)
+        )
 
         def start():
             nonlocal source, target
@@ -202,7 +221,7 @@ class PathSyncer(object):
                 else target
             )
 
-        if self.hook(source, target, SyncEvent.SyncStart, False, start):
+        if self.hook(source, target, SyncEvent.SyncStart, False, start, _ignore_error):
             return
 
         if not source.exists():
@@ -213,11 +232,15 @@ class PathSyncer(object):
                     SyncEvent.RemovedMissing,
                     dry_run,
                     lambda: target.path.rm(recursive=True, missing_ok=True),
+                    _ignore_error,
                 ):
                     return
         elif source.is_symlink():
             error = NotImplementedError("symlink sync not implemented yet")
-            if not ignore_error(error, source, target, None):
+            # Was `ignore_error(...)` -- the raw parameter, whose default was
+            # the bool False, so this raised TypeError instead of honoring
+            # (or reporting) the policy. Use the resolved callable.
+            if not _ignore_error(error, source, target, None):
                 raise error
             return
         elif source.is_file():
@@ -235,7 +258,9 @@ class PathSyncer(object):
                             target.path.rm(recursive=target.is_dir())
                     source.path.copy(target.path)
 
-                if self.hook(source, target, SyncEvent.Copy, dry_run, copy):
+                if self.hook(
+                    source, target, SyncEvent.Copy, dry_run, copy, _ignore_error
+                ):
                     return
         else:
             if target.is_file():
@@ -245,6 +270,7 @@ class PathSyncer(object):
                     SyncEvent.TypeMismatch,
                     dry_run,
                     lambda: target.path.unlink(),
+                    _ignore_error,
                 ):
                     return
 
@@ -257,6 +283,7 @@ class PathSyncer(object):
                     SyncEvent.CreatedDirectory,
                     dry_run,
                     lambda: target.path.mkdir(),
+                    _ignore_error,
                 ):
                     return
 
@@ -282,6 +309,7 @@ class PathSyncer(object):
                                     SyncEvent.RemovedMissing,
                                     dry_run,
                                     lambda child=child: child.path.rm(recursive=True),
+                                    _ignore_error,
                                 )
 
                         self.hook(
@@ -290,6 +318,7 @@ class PathSyncer(object):
                             SyncEvent.CheckTargetChild,
                             False,
                             checkchild,
+                            _ignore_error,
                         )
 
                 self.hook(
@@ -298,6 +327,7 @@ class PathSyncer(object):
                     SyncEvent.CheckTargetChildren,
                     False,
                     checkchildren,
+                    _ignore_error,
                 )
 
             def sync_children():
@@ -307,13 +337,25 @@ class PathSyncer(object):
                         target,
                         SyncEvent.SyncChild,
                         False,
+                        # Propagate the resolved policy into the recursive
+                        # call so a per-call override applies to the whole
+                        # subtree, not just this level.
                         lambda child=child: self.sync(
                             child,
                             target.path / (child.path.name or child.path.parent.name),
                             dry_run,
+                            _ignore_error,
                         ),
+                        _ignore_error,
                     )
 
-            self.hook(source, target, SyncEvent.SyncChildren, False, sync_children)
+            self.hook(
+                source,
+                target,
+                SyncEvent.SyncChildren,
+                False,
+                sync_children,
+                _ignore_error,
+            )
 
-        self.hook(source, target, SyncEvent.Synced, dry_run)
+        self.hook(source, target, SyncEvent.Synced, dry_run, None, _ignore_error)

@@ -174,3 +174,99 @@ def test_sync_reuses_scandir_metadata_when_not_following_symlinks():
     # children should be built from _scandir() metadata rather than
     # refreshed one-by-one.
     assert CountingMemPath.stat_calls == 4
+
+
+# --- PathSyncer ignore_error: bool-or-callable, and the symlink branch -----
+# Regression for the shadowing defect: `sync()`'s `ignore_error` parameter
+# defaulted to the bool `False` and the symlink branch CALLED it directly,
+# so `PathSyncer(ignore_error=True).sync(...)` on a symlink source raised
+# `TypeError: 'bool' object is not callable` instead of the intended
+# `NotImplementedError`. The parameter now defaults to None ("use the
+# instance policy") and every branch consults one resolved callable.
+
+
+def _symlink_source(tmp_path):
+    """A LocalPath pointing at a symlink, or skip if unsupported."""
+    import os
+
+    real = tmp_path / "real.txt"
+    real.write_text("x")
+    link = tmp_path / "link.txt"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink unavailable: {error}")
+    return pathlib_next.LocalPath(link)
+
+
+def _symlink_syncer(**kwargs):
+    # follow_symlinks=False so `source.is_symlink()` is true and the symlink
+    # branch is actually reached (the default resolves through the link).
+    return PathSyncer(checksum, follow_symlinks=False, **kwargs)
+
+
+def test_sync_symlink_ignore_error_ctor_bool_true(tmp_path):
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    # Was TypeError: 'bool' object is not callable.
+    _symlink_syncer(ignore_error=True).sync(source, target)
+
+
+def test_sync_symlink_ignore_error_param_bool_true(tmp_path):
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    _symlink_syncer().sync(source, target, ignore_error=True)
+
+
+def test_sync_symlink_ignore_error_default_raises(tmp_path):
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    with pytest.raises(NotImplementedError):
+        _symlink_syncer().sync(source, target)
+
+
+def test_sync_symlink_ignore_error_bool_false_raises(tmp_path):
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    with pytest.raises(NotImplementedError):
+        _symlink_syncer(ignore_error=False).sync(source, target)
+
+
+def test_sync_symlink_ignore_error_callable_true_tolerates(tmp_path):
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    calls = []
+    _symlink_syncer().sync(
+        source,
+        target,
+        ignore_error=lambda err, s, t, event: calls.append(err) or True,
+    )
+    assert len(calls) == 1
+    assert isinstance(calls[0], NotImplementedError)
+
+
+def test_sync_symlink_ignore_error_callable_false_raises(tmp_path):
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    with pytest.raises(NotImplementedError):
+        _symlink_syncer().sync(source, target, ignore_error=lambda *args: False)
+
+
+def test_sync_symlink_ctor_policy_reaches_symlink_branch(tmp_path):
+    # The constructor-supplied policy used to be silently ineffective for
+    # this branch, because only the (shadowing) parameter was consulted.
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    calls = []
+    _symlink_syncer(
+        ignore_error=lambda err, s, t, event: calls.append(err) or True
+    ).sync(source, target)
+    assert len(calls) == 1
+
+
+def test_sync_param_ignore_error_none_uses_instance_policy(tmp_path):
+    # None means "use the policy given to __init__", not "override with
+    # False" (the old default silently shadowed the constructor).
+    source = _symlink_source(tmp_path)
+    target = pathlib_next.LocalPath(tmp_path / "out.txt")
+    _symlink_syncer(ignore_error=True).sync(source, target, ignore_error=None)

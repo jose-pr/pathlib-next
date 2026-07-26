@@ -109,6 +109,38 @@ def notimplemented(method):
     return _notimplemented
 
 
+def as_error_handler(
+    ignore_error: _ty.Union[bool, _ty.Callable[..., bool], None],
+    *,
+    default: bool = False,
+) -> _ty.Callable[..., bool]:
+    """Normalize an `ignore_error` argument into a *callable* error policy.
+
+    Every `ignore_error` parameter in this library accepts either a bool or
+    a callable, but the callables have **deliberately different arities**
+    per call site (`Path.rm()` -> `(error, path)`, `Path.copy()` ->
+    `(error)`, `PathSyncer.sync()` -> `(error, source, target, event)`).
+    Unifying those arities would break existing callers, so this helper only
+    normalizes the *bool* case and passes a supplied callable through
+    untouched -- it is invoked with whatever arguments its own call site
+    already uses.
+
+    `None` means "no policy supplied": it resolves to `default` (False for
+    every current caller, i.e. raise on the first error), which preserves
+    `Path.copy(ignore_error=None)`'s documented meaning.
+
+    Centralizing this keeps a fourth call site from drifting back into
+    calling a bool (see `PathSyncer.sync()`'s symlink branch, which did
+    exactly that and raised `TypeError: 'bool' object is not callable`).
+    """
+    if callable(ignore_error):
+        return ignore_error
+    if ignore_error is None:
+        ignore_error = default
+    result = bool(ignore_error)
+    return lambda *args, **kwargs: result
+
+
 import ipaddress as _ip
 import socket as _socket
 
@@ -128,4 +160,3 @@ def get_machine_ips():
 
 from .checksum import md5 as md5, sha256 as sha256
 from .archive import make_archive as make_archive, unpack_archive as unpack_archive
-
