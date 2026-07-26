@@ -270,10 +270,89 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 PurePathLike = _ty.Union[str, Pathname]
 
 
+# Operations whose implementation must come from pathlib_next even when a
+# concrete `pathlib` class sits ahead of us in a subclass's MRO. See
+# `Path.__init_subclass__` for why this is needed and how it is applied.
+#
+# Two different, opposite failure modes motivate this list:
+#   * NEW stdlib overriding us: `copy`/`move` landed in CPython 3.14 and
+#     expect the private `_copy_from` protocol, so a downstream
+#     `class X(PosixPathname, Path)` (or any class mixing a concrete
+#     `pathlib` path) either crashes with
+#     `AttributeError: ... has no attribute '_copy_from'` on non-local
+#     backends, or -- worse -- SILENTLY succeeds on local-backed classes
+#     with stdlib's different metadata semantics (it preserves timestamps,
+#     ours preserves st_mode only). That makes mtime-based syncs converge
+#     on 3.14 and never converge on <=3.13.
+#   * OLD stdlib lacking our keywords: `exists(follow_symlinks=)` is 3.12+
+#     and `read_text`/`write_text`'s `newline=` is 3.13+ in CPython, and
+#     `rglob`'s `include_hidden=`/`recursive=`/`dironly=` extensions never
+#     existed there, so on the 3.9 floor the stdlib implementation rejects
+#     keywords this library's protocols promise.
+#
+# `glob`/`walk`/`_scandir` are deliberately absent: `LocalPath` overrides
+# them itself (with local-specific behavior that must be kept), so they are
+# already pathlib_next-owned wherever it matters.
+_OPERATION_NAMES = (
+    "copy",
+    "move",
+    "exists",
+    "rglob",
+    "read_text",
+    "write_text",
+)
+
+
 class Path(Pathname, Chmod, Stat, BinaryOpen):
     """Base class for manipulating paths with I/O."""
 
     __slots__ = ()
+
+    def __init_subclass__(cls, **kwargs):
+        """Guarantee pathlib_next operation precedence in every subclass.
+
+        Concrete path classes are routinely built by mixing a `pathlib`
+        class with this one -- our own `LocalPath` does it, and the
+        documented downstream recipe (`class X(PosixPathname, Path)`) does
+        it transitively. Python's MRO then resolves a name to whichever
+        base declares it first, which for those classes can be `pathlib`
+        rather than `pathlib_next` -- and which one wins changes with the
+        interpreter version, because stdlib `pathlib` keeps gaining and
+        changing methods (see `_OPERATION_NAMES`).
+
+        Rather than making every downstream implementer rediscover this and
+        hand-write forwarding methods, re-assert our implementations here
+        for any subclass that would otherwise inherit a non-pathlib_next
+        one. A subclass (or an intermediate mixin) that defines the method
+        *itself* is always left alone -- this only displaces implementations
+        coming from outside this library.
+        """
+        super().__init_subclass__(**kwargs)
+        for name in _OPERATION_NAMES:
+            # A class that defines the operation in its OWN body is always
+            # authoritative -- never displace a deliberate override (this
+            # also covers `LocalPath.copy`/`move`'s explicit routing).
+            if name in vars(cls):
+                continue
+            # Find which class in the MRO actually supplies the inherited
+            # implementation. Checking the resolved function's `__module__`
+            # is not enough: a downstream mixin may legitimately define the
+            # method in its own module, and that must be honored too.
+            owner = next((base for base in cls.__mro__[1:] if name in vars(base)), None)
+            if owner is None:
+                continue
+            # Only stdlib `pathlib` is displaced. Anything else -- a
+            # downstream mixin, a user base class, or pathlib_next itself --
+            # is a deliberate implementation and is left alone. Matching on
+            # stdlib specifically (rather than "not pathlib_next") is what
+            # keeps this guard from hijacking third-party code.
+            owner_module = getattr(owner, "__module__", "") or ""
+            if owner_module != "pathlib" and not owner_module.startswith("pathlib."):
+                continue
+            ours = getattr(Path, name, None)
+            if ours is None:
+                continue
+            setattr(cls, name, ours)
 
     def __new__(cls, *args, **kwargs):
         if cls is Path:

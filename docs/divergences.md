@@ -31,6 +31,27 @@ Python versions where stdlib paths do not implement it. Code accepting every
 implementation should type against `pathlib_next.Path` or its documented
 protocols; code requiring an OS path should type against `pathlib.Path`.
 
+### Operation precedence in `Path` subclasses
+
+Because concrete classes mix a `pathlib` class with `pathlib_next.Path`, the
+MRO alone would decide which library implements a given method -- and *which
+one wins changes with the interpreter version*, since stdlib `pathlib` keeps
+gaining and changing methods. That produced version-dependent behavior in
+both directions: CPython 3.14's new `copy()`/`move()` displaced ours (loudly
+on non-local backends, silently and with different timestamp semantics on
+local ones), while pre-3.12/3.13 stdlib lacked keywords our protocols
+promise (`exists(follow_symlinks=)`, `read_text`/`write_text`'s `newline=`).
+
+`pathlib_next.Path.__init_subclass__` therefore re-asserts the pathlib_next
+implementation of `copy`, `move`, `exists`, `rglob`, `read_text` and
+`write_text` for any subclass that would otherwise inherit stdlib's. This
+applies automatically to downstream classes built with the documented
+composition pattern (`class X(PosixPathname, Path)`), so implementers do not
+have to hand-write forwarding methods.
+
+Only stdlib `pathlib` is displaced: a subclass or mixin that defines one of
+these operations itself always keeps its own implementation.
+
 | Method | pathlib behavior | Our behavior | Why |
 | --- | --- | --- | --- |
 | `Uri("a").parent` | `PurePosixPath("a").parent == PurePosixPath(".")` | `Uri("a").parent` has path `""` (`Uri("")`, which round-trips) | `Uri` has no cwd-relative concept of `"."` -- an empty path is the URI-natural "no path" representation. Changing this would make `Uri("")` non-idempotent under `.parent`. |
