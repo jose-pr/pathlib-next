@@ -2,6 +2,8 @@
 Source->connect_opts mapping, client cache keying/invalidation, and the
 B12/B13 regressions (chmod follow_symlinks, rename target.path).
 """
+import os
+
 import pytest
 
 pytest.importorskip("paramiko")
@@ -262,6 +264,28 @@ def test_rename_accepts_str_target():
     p = _sftp("sftp://host/a.txt", backend=backend)
     p.rename("b.txt")
     assert backend._client.rename_calls == [("/a.txt", "/b.txt")]
+
+
+def test_fspath_returns_host_path_for_sftp():
+    # sftp: is a _host_filesystem_path scheme: __fspath__ returns the
+    # path on the URI's OWN host, for building a command line that runs
+    # there -- not a locally-openable path.
+    p = _sftp("sftp://user:secret@host/etc/x.conf")
+    assert os.fspath(p) == "/etc/x.conf"
+
+
+def test_host_fspath_returns_path_for_sftp():
+    p = _sftp("sftp://user:secret@host/etc/x.conf")
+    assert p.host_fspath() == "/etc/x.conf"
+
+
+def test_str_drops_password_but_host_fspath_and_path_do_not():
+    p = _sftp("sftp://user:secret@host/etc/x.conf")
+    assert "secret" not in str(p)
+    assert p.host_fspath() == "/etc/x.conf"
+    assert p.path == "/etc/x.conf"
+    # full-fidelity round trip (with credentials) is as_uri(sanitize=False)
+    assert p.as_uri(sanitize=False) == "sftp://user:secret@host/etc/x.conf"
 
 
 def test_sftp_backend_connect_and_client():

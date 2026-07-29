@@ -65,6 +65,12 @@ class Uri(Pathname):
         "_stem_cache",
     )
 
+    #: Set `True` on a subclass whose `.path` is a filesystem path on the
+    #: URI's own host (e.g. `sftp:`) -- lets `__fspath__`/`host_fspath()`
+    #: return it for building a command line that runs *on that host*.
+    #: Unset (`False`) means `.path` has no such meaning (`http:`, `s3:`, ...).
+    _host_filesystem_path = False
+
     def __new__(cls, *uris, **options):
         inst = object.__new__(cls)
         for cls in cls.__mro__:
@@ -252,8 +258,11 @@ class Uri(Pathname):
         )
 
     def __str__(self):
-        """Return the string representation of the path, suitable for
-        passing to system calls."""
+        """Return the string representation of the path. Deliberately
+        sanitized (password dropped from userinfo) since `str()` is what
+        logging/printing reach for -- this does NOT round-trip a
+        credentialed URI. Use `as_uri(sanitize=False)` for the full URI
+        including credentials."""
         return self.as_uri(sanitize=True)
 
     def __fspath__(self):
@@ -265,7 +274,21 @@ class Uri(Pathname):
             else:
                 raise NotImplementedError("OS Support for not local fspath")
 
+        if self._host_filesystem_path:
+            return self.path
+
         raise NotImplementedError(f"fspath for {self.source.scheme}")
+
+    def host_fspath(self) -> str:
+        """Return `.path` for any scheme whose path component is a
+        filesystem path on the URI's own host (see `_host_filesystem_path`),
+        for building a command line that runs *on that host* (e.g. via a
+        remote executor). Unlike `__fspath__`, this never falls back to
+        treating the path as local -- it raises `NotImplementedError` for
+        schemes with no host-filesystem meaning (`http:`, `s3:`, ...)."""
+        if self._host_filesystem_path:
+            return self.path
+        raise NotImplementedError(f"host_fspath for {self.source.scheme}")
 
     def __repr__(self):
         if self._initiated:
