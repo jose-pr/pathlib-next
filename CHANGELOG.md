@@ -5,9 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.0] - 2026-07-29
 
 ### Added
+- **`UriPath.host_fspath()`**, and `__fspath__()` now succeeds for schemes
+  with `_host_filesystem_path = True` (currently `sftp:`) instead of
+  unconditionally raising `NotImplementedError` for any non-`file:`
+  scheme. `os.fspath()` has two consumers -- "open this locally" (where a
+  remote path would silently read the wrong file) and "build a command
+  line for a process that runs on the path's host" (`subprocess`, remote
+  executors) -- and only the second is safe for a scheme like `sftp:`.
+  `host_fspath()` is the unambiguous accessor for that second case: it
+  never falls back to local-path semantics the way `__fspath__` does for
+  the `file:` branch.
 - **`progress` callback for `Path.copy()`/`BinaryOpen.copy()`.** `BinaryOpen.copy(target, *, progress=None, chunk_size=shutil.COPY_BUFSIZE)`
   now streams in caller-sized chunks and, when `progress` is given, calls
   `progress(bytes_copied, total_size)` after each chunk (`total_size` is the
