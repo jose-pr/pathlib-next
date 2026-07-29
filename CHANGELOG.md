@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`PathSyncer` can now create symlinks on `target` instead of always
+  rejecting a symlink source.** New constructor kwarg `symlink_mode`
+  (`"preserve"` default, `"reject"` opt-out), consulted only when
+  `follow_symlinks=False` and `source.is_symlink()` (with the default
+  `follow_symlinks=True`, symlinks are still resolved during traversal,
+  unchanged). `"preserve"` creates a matching symlink on `target` using the
+  exact raw, unresolved target string `readlink()` returned -- dangling
+  links and relative targets included, never validated or resolved against
+  `source`'s parent. If `target`'s implementation has no `symlink_to()` at
+  all (every backend except `LocalPath` and `SftpPath`), `"preserve"` mode
+  raises `NotImplementedError` through the existing `ignore_error`/`hook()`
+  flow, same as every other sync branch -- not a silent skip. New
+  `SyncEvent.Symlink` enum member.
+
+### Changed
+- **`PathSyncer` default behavior change**: `PathSyncer(follow_symlinks=
+  False).sync()` on a symlink source previously always raised
+  `NotImplementedError`. It now creates a matching symlink on `target` by
+  default (`symlink_mode="preserve"`); pass `symlink_mode="reject"` to
+  restore the old unconditional-raise behavior exactly.
+
 ## [0.8.6] - 2026-07-26
 
 ### Fixed
