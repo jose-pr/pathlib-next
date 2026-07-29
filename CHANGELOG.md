@@ -91,10 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `str(source)` (or `f"{source}"`) no longer reconstructs an authenticated
   URI -- verified nothing in this codebase relied on that (every real
   connection site reads individual `Source` fields, never whole-object
-  `str()`), but a downstream caller that did would need
-  `uritools.uricompose(scheme=source.scheme, userinfo=source.userinfo,
-  host=source.host, port=source.port)` (the same unredacted-round-trip
-  escape hatch as `Uri.as_uri(sanitize=False)`) instead.
+  `str()`), but a downstream caller that did would need the new
+  **`Source.as_str(sanitize=True)`** method instead: `sanitize=True` (the
+  default, matching `__str__`) redacts the password; `sanitize=False` is
+  the full, credentialed round trip -- same name/kwarg as
+  `Uri.as_uri(sanitize=)`, so both classes work the same way.
 
 ## [0.8.6] - 2026-07-26
 
