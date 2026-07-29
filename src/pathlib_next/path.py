@@ -692,6 +692,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         preserve_metadata=True,
         recursive=False,
         ignore_error=None,
+        progress: "_ty.Callable[[_ty.Self, int, _ty.Optional[int]], None]" = None,
     ):
         """Copy this file's content to `target`.
 
@@ -710,6 +711,19 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         regardless of what it returns, so handlers like `errors.append`
         (returning None) keep working. Only errors from *child* copies
         during a `recursive=True` copy are routed here.
+
+        `progress`, when given, is called as `progress(path, bytes_copied,
+        total_size)` for every chunk written during each *file* copy (`path`
+        is the source `Path` being streamed -- `self` for a single-file
+        copy, or the relevant child during a `recursive=True` copy).
+        `bytes_copied` increases monotonically per file and reaches
+        `total_size` (or `None` if the size couldn't be determined) at the
+        end of that file. Directories themselves don't get a progress call
+        (only the files inside them do). With `progress=None` (the
+        default), behavior is unchanged -- no per-chunk overhead. Native
+        backend transfers that bypass the generic streaming copy (e.g.
+        `SftpPath`'s asyncssh concurrent fan-out) do not invoke `progress`;
+        see `docs/divergences.md`'s "Deliberate extensions" section.
         """
         if isinstance(target, str):
             target = type(self)(target)
@@ -732,6 +746,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         preserve_metadata=preserve_metadata,
                         recursive=True,
                         ignore_error=ignore_error,
+                        progress=progress,
                     )
                 except Exception as e:
                     # A callable stays a notify-and-suppress hook (its return
@@ -752,7 +767,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 target.unlink()
             else:
                 raise FileExistsError(target)
-        BinaryOpen.copy(src, target)
+        if progress is None:
+            BinaryOpen.copy(src, target)
+        else:
+            BinaryOpen.copy(
+                src,
+                target,
+                progress=lambda copied, total: progress(src, copied, total),
+            )
 
         if preserve_metadata:
             try:

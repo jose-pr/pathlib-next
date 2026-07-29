@@ -115,3 +115,19 @@ because a behavioral decision needed documenting:
   **User decision, 2026-07-11.** `include_hidden=`/`dironly=` are documented
   extensions beyond pathlib's `glob()` signature. **Caution:** on remote
   schemes (http/sftp), a recursive glob walks the whole remote subtree.
+- `BinaryOpen.copy(target, *, progress=None, chunk_size=shutil.COPY_BUFSIZE)`
+  / `Path.copy(target, ..., progress=None)`: optional progress-reporting
+  hook, no pathlib equivalent. `BinaryOpen.copy()`'s `progress(bytes_copied,
+  total_size)` fires after each chunk (`total_size` is `None` when the
+  source doesn't implement `Stat` or `stat()` fails); `Path.copy()`'s
+  `progress(path, bytes_copied, total_size)` adds the source `Path` being
+  streamed, so a `recursive=True` copy can report per-file identity
+  alongside byte progress. `chunk_size` is now caller-visible (previously
+  hardcoded to `shutil.copyfileobj`'s default). `progress=None` (the
+  default) is byte-for-byte identical to the prior `shutil.copyfileobj`
+  behavior -- no per-chunk overhead when unused. **Known limitation:**
+  native/batch transfer paths that bypass the generic streaming copy --
+  currently only `SftpPath`'s asyncssh concurrent fan-out
+  (`copy(recursive=True)` on a directory) -- do not invoke `progress`; this
+  was a deliberate scope decision for the first cut (generic-stream-only),
+  not an oversight. **2026-07-28.**

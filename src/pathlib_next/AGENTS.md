@@ -64,14 +64,22 @@ pathlib_next`.
     walk is swallowed (predicate return `True`) or re-raised.
   - `rename(target)` — not implemented by default.
   - `copy(target, *, overwrite=False, follow_symlinks=True,
-    preserve_metadata=True, recursive=False, ignore_error=None)` —
-    `follow_symlinks`/`preserve_metadata` names match CPython 3.14's
-    `Path.copy()`; `overwrite` is this library's own extension (3.14 always
-    raises if the destination exists). `preserve_metadata` defaults `True`
-    here (3.14 defaults `False`) and only preserves `st_mode`, not
-    timestamps/xattrs. `ignore_error`, when given, receives exceptions
-    instead of raising (same contract as `rm()`'s callable form); `None`
-    (default) fails on the first error.
+    preserve_metadata=True, recursive=False, ignore_error=None,
+    progress=None)` — `follow_symlinks`/`preserve_metadata` names match
+    CPython 3.14's `Path.copy()`; `overwrite` is this library's own
+    extension (3.14 always raises if the destination exists).
+    `preserve_metadata` defaults `True` here (3.14 defaults `False`) and
+    only preserves `st_mode`, not timestamps/xattrs. `ignore_error`, when
+    given, receives exceptions instead of raising (same contract as
+    `rm()`'s callable form); `None` (default) fails on the first error.
+    `progress`, when given, is called as `progress(path, bytes_copied,
+    total_size)` per chunk written for each file streamed (`path` is the
+    source file; `total_size` is `None` if unknown); with `recursive=True`
+    this fires once per copied file, giving per-file identity alongside
+    byte progress. `progress=None` (default) has no per-chunk overhead and
+    is bytewise identical to before this kwarg existed. Not honored by
+    `SftpPath`'s asyncssh concurrent fan-out (native transfer, out of
+    scope) — see `docs/divergences.md`.
   - `move(target, *, overwrite=False)` — tries `rename()` first, falls back
     to `copy(recursive=True)` + `rm(recursive=True)`/`unlink()` when
     `rename()` raises `NotImplementedError`.
@@ -128,8 +136,12 @@ pathlib_next`.
   Derives `open(mode="r", buffering=-1, encoding=None, errors=None,
   newline=None)`, `read_bytes()`, `read_text(encoding=None, errors=None,
   newline=None)`, `write_bytes(data)`, `write_text(data, encoding=None,
-  errors=None, newline=None)`, `copy(target)` (streams this object's binary
-  content into another `BinaryOpen`).
+  errors=None, newline=None)`, `copy(target, *, progress=None,
+  chunk_size=shutil.COPY_BUFSIZE)` (streams this object's binary content
+  into another `BinaryOpen`; `progress(bytes_copied, total_size)` fires
+  per chunk when given — `total_size` from `stat().st_size` if `self` also
+  implements `Stat` and it succeeds, else `None`; `progress=None` default
+  is unchanged `shutil.copyfileobj` behavior).
 
 ## URIs (`pathlib_next.uri`)
 
