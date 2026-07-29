@@ -890,7 +890,13 @@ def test_pathsyncer_uses_sftp_native_checksum_no_open_when_supported():
     source = _sftp("sftp://host/a.txt", backend=source_backend)
     target = _sftp("sftp://host/a.txt", backend=target_backend)
 
-    syncer = PathSyncer()
+    # quick_check=False: this test is specifically about native-checksum
+    # preference, not the separately-tested quick_check metadata pre-check
+    # (tests/test_checksum.py). "host" doesn't resolve, and whether
+    # is_local() treats a non-resolving name as local/non-local is an
+    # implementation detail of the resolver chain in use -- isolate this
+    # test from that by disabling quick_check outright.
+    syncer = PathSyncer(quick_check=False)
     events = []
     syncer._hook = lambda s, t, e, dry: events.append(e)
     syncer.sync(source, target)

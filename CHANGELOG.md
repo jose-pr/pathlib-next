@@ -75,32 +75,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `NotImplementedError`. It now creates a matching symlink on `target` by
   default (`symlink_mode="preserve"`); pass `symlink_mode="reject"` to
   restore the old unconditional-raise behavior exactly.
-- **The `uri` extra now requires `netimps`** (alongside `uritools`).
+- **The `uri` extra now requires `netimps>=0.2.0`** (alongside `uritools`).
   `Source.is_local()` (`uri.source`) delegates its "is this address mine"
   check to `netimps.is_local_address()`, which enumerates real network
   interfaces (`netimps.get_interfaces()`) instead of the previous
   `socket.getaddrinfo(socket.gethostname(), None)`-based approach, which
   missed addresses not tied to the resolvable hostname (VMs, containers,
   VPN interfaces, additional NICs on a multi-homed host). The
-  hostname->address step is unchanged (`socket.gethostbyname()` -- the OS
-  resolver: hosts file, NSS, DNS). `utils.get_machine_ips()` (the old
-  implementation's helper, unused elsewhere in this library) is removed.
-  `SftpPath`'s two backends and `FtpPath` now resolve their default ports
-  (22, 21) via `netimps.get_default_port()` instead of three separately
-  hardcoded literals.
+  hostname->address step now uses `netimps.resolve()` (both `"a"`/`"aaaa"`
+  record types; `host` is local if ANY resolved address is) instead of
+  `socket.gethostbyname()` -- `resolve()`'s default backend chain
+  (dnspython, then the OS resolver via `getaddrinfo()`, then `nslookup`)
+  covers the same hosts-file/NSS/DNS resolution `gethostbyname()` did, and
+  additionally never raises for a name that simply doesn't resolve
+  (`resolve()`'s contract: always a list, empty on genuine failure) --
+  `gethostbyname()` raised `socket.gaierror` for that case. `utils.
+  get_machine_ips()` (the old implementation's helper, unused elsewhere in
+  this library) is removed. `SftpPath`'s two backends and `FtpPath` now
+  resolve their default ports (22, 21) via `netimps.get_default_port()`
+  instead of three separately hardcoded literals.
 
 ### Fixed
 - **`Source.is_local()` crashed on a bare IPv6-literal `host` string.**
   `Source(scheme, userinfo, "::1", port)` (a supported direct-construction
   pattern -- `Source`'s fields are public `NamedTuple` fields) raised
   `socket.gaierror` instead of returning a result, because
-  `socket.gethostbyname()` is IPv4-only. `host` bracket-literals arriving
-  via the normal `Source.from_str()`/`Uri()` construction path were
-  unaffected (`_decode_host()` already parses those into a real
-  `IPv6Address` before `is_local()` ever sees a string). `is_local()` now
-  tries `netimps.try_parse()` first (handles any IP literal directly,
-  string or not) before falling back to `gethostbyname()` for a genuine
-  hostname.
+  `socket.gethostbyname()` (this method's original hostname-resolution
+  step) is IPv4-only. `host` bracket-literals arriving via the normal
+  `Source.from_str()`/`Uri()` construction path were unaffected
+  (`_decode_host()` already parses those into a real `IPv6Address` before
+  `is_local()` ever sees a string). `is_local()` now tries
+  `netimps.try_parse()` first (handles any IP literal directly, string or
+  not) before falling through to hostname resolution.
 - **`uri.source.Source` leaked the password in `str()`/`repr()`.**
   `Source.__str__()` called `uricompose()` with the raw `userinfo`
   (password included) -- a genuinely valid, connectable URI string, not

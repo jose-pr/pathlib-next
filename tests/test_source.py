@@ -71,10 +71,34 @@ def test_is_local_bare_ipv6_string_host():
     # B-fix: a directly-constructed Source with host as a bare IPv6 str
     # (bypassing _decode_host()'s usual bracket-literal parsing -- a
     # supported construction pattern, Source's fields are public) used to
-    # crash with socket.gaierror: gethostbyname() is IPv4-only. is_local()
-    # now tries netimps.try_parse() (handles IP literals directly) before
-    # falling back to gethostbyname() for genuine hostnames.
+    # crash with socket.gaierror when is_local() still used gethostbyname()
+    # (IPv4-only). is_local() now tries netimps.try_parse() first, which
+    # handles any IP literal (v4 or v6) directly, before falling through to
+    # hostname resolution.
     assert Source(None, None, "::1", None).is_local()
+
+
+def test_is_local_own_hostname():
+    # Exercises the real hostname->address resolution path end to end
+    # (netimps.resolve()'s default backend chain), not just IP literals.
+    import socket
+
+    assert Source(None, None, socket.gethostname(), None).is_local()
+
+
+def test_is_local_false_for_nonresolving_hostname():
+    # A hostname that genuinely doesn't resolve anywhere now correctly
+    # returns False (definitive non-local answer) rather than raising --
+    # netimps.resolve()'s contract is "always a list, empty on genuine
+    # lookup failure, never an exception for a not-found name" (see
+    # netimps.resolve()'s own docstring). This is an improvement over the
+    # old socket.gethostbyname()-based implementation, which raised
+    # socket.gaierror for the same input -- callers like
+    # utils.sync._is_local() that used to catch that exception and treat
+    # it as "local" (safe-default fallback) now get a real answer instead.
+    assert not Source(
+        None, None, "this-host-does-not-exist.invalid", None
+    ).is_local()
 
 
 def test_is_local_own_interface_address():

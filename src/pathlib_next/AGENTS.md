@@ -227,14 +227,19 @@ extra that depends on it).
   `ValueError` if `source` carries a path/query/fragment).
   `parsed_userinfo() -> (user, password)`.
   `get_scheme_cls(schemesmap=None) -> type[UriPath]` — resolves (and lazily
-  loads) the scheme class. `is_local()` — hostname->address via
-  `socket.gethostbyname()` (OS resolver: hosts file, NSS, DNS; IP-literal
-  `host` skips this via `netimps.try_parse()` first, so an IPv6 literal
-  never hits `gethostbyname()`'s IPv4-only limitation), then
-  `netimps.is_local_address()` decides membership (real interface
-  enumeration via `netimps.get_interfaces()`, not DNS-based guessing).
-  `lru_cache(maxsize=256)`d per `Source` value; never call on a hot path
-  uncached. Requires the `netimps` package (part of the `uri` extra).
+  loads) the scheme class. `is_local()` — IP-literal `host` (`str` or
+  `_IPAddress`) skips resolution via `netimps.try_parse()`; otherwise
+  `netimps.resolve(host, "a")` + `resolve(host, "aaaa")` (default backend
+  chain: dnspython, then the OS resolver via `getaddrinfo()` — hosts file,
+  NSS, DNS, OS cache — then `nslookup`; `host` is local if ANY resolved
+  address is; empty result -> not local, never an exception for a
+  genuinely non-resolving name). `netimps.is_local_address()` then decides
+  membership per address (real interface enumeration via
+  `netimps.get_interfaces()`, not DNS-based guessing). `lru_cache
+  (maxsize=256)`d per `Source` value; never call on a hot path uncached.
+  Requires `netimps>=0.2.0` (part of the `uri` extra; `resolve()`'s
+  OS-resolver-chain support landed in 0.2.0 — earlier versions were
+  dnspython-only).
 - **`Query(str)`** (`uri.query`) — a URI query string, buildable from a
   `str`, a sequence of `(key, value)` pairs, or a mapping (`value` may be a
   sequence to repeat the key). `Query(query, *, encoding="utf-8",
