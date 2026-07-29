@@ -113,3 +113,34 @@ because a behavioral decision needed documenting:
   **User decision, 2026-07-11.** `include_hidden=`/`dironly=` are documented
   extensions beyond pathlib's `glob()` signature. **Caution:** on remote
   schemes (http/sftp), a recursive glob walks the whole remote subtree.
+- `protocols.checksum.NativeChecksum` (`checksum(algorithm="md5") -> str`) --
+  an entirely new, optional protocol with no pathlib equivalent. A `Path`
+  subclass may implement it to compute a file digest server-side (e.g.
+  `SftpPath` against an OpenSSH server's `check-file@openssh.com` SFTP
+  extension) instead of streaming the content through `open("rb")`. Not
+  mixed into the base `Path`/`Pathname` ABC -- most backends never
+  implement it, and a plain `Path` has no `.checksum` attribute at all.
+  **Hard contract, not a style choice:** an implementation MUST raise
+  `NotImplementedError` (never return a value) when it cannot produce a
+  genuine content digest under the requested `algorithm` -- this is what
+  keeps `PathSyncer` (see its class docstring, `utils/sync.py`) from ever
+  comparing a native digest to a streamed one under a mismatched algorithm,
+  or trusting something hash-shaped but not actually a content hash (e.g.
+  S3's ETag for a multipart upload, deliberately NOT implemented here for
+  exactly that reason). `utils.checksum.md5`/`sha256`/`stream` (the
+  pre-existing streaming helpers) are unaffected and keep working for
+  direct callers that don't go through the protocol or `PathSyncer`.
+  `supported_checksums() -> frozenset[str]` (default `frozenset()`) is a
+  companion advisory capability query -- never raises, lets a caller pick a
+  shared algorithm across two paths before calling anything expensive, but
+  is advisory only: `checksum()`'s own `NotImplementedError` contract
+  remains authoritative regardless of what this advertises.
+- `PathSyncer(..., quick_check=True)` -- a new constructor kwarg, no
+  pathlib equivalent. For any sync pair where at least one side is
+  non-local, a metadata-only pre-check (`st_size` + `st_mtime`, from
+  already-cached listing metadata, no extra round trip) skips the checksum
+  call entirely when both already match; a mismatch always falls through
+  to a real checksum rather than being treated as "changed" on its own.
+  Local-to-local pairs never engage this pre-check. `quick_check=False`
+  restores always-checksum behavior for non-local pairs too. **User
+  decision, 2026-07-28.**
