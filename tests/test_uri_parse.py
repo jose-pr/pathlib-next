@@ -117,6 +117,59 @@ def test_str_sanitizes_password_but_as_uri_full_round_trips():
     assert uri.as_uri(sanitize=False) == "http://user:pass@example.com/a/b"
 
 
+def test_source_str_and_repr_redact_password():
+    # Source.__str__ used to call uricompose() with the raw userinfo
+    # (password included) -- a genuinely valid, authenticated URI string,
+    # and exactly the leak: repr() (NamedTuple's default, also unredacted)
+    # is what a traceback frame renders, so a Source anywhere on a failing
+    # call stack leaked the credential, even though Uri.__str__() already
+    # redacted. Both now redact the same way Uri.__str__() does.
+    from pathlib_next.uri.source import Source
+
+    source = Source("sftp", "root:secret", "nas", 22)
+    assert "secret" not in str(source)
+    assert "secret" not in repr(source)
+    assert str(source) == "sftp://root@nas:22"
+    assert repr(source) == "Source(scheme='sftp', userinfo='root', host='nas', port=22)"
+
+
+def test_source_str_no_longer_reconstructs_authenticated_uri():
+    # This is a deliberate behavior change, not just an addition: str(source)
+    # used to be a valid, connectable URI (password included) -- code that
+    # relied on f"{source}"/str(source) to rebuild a working authority
+    # string would now silently get a non-authenticating one instead.
+    # Verified nothing in this codebase does that (every real connection
+    # site reads individual Source fields -- .host/.port/.userinfo/
+    # parsed_userinfo() -- never whole-object str()). The real round trip,
+    # for any caller that genuinely needs it, is uricompose() directly with
+    # the unredacted fields (same escape hatch as Uri.as_uri(sanitize=False)).
+    import uritools
+
+    from pathlib_next.uri.source import Source
+
+    source = Source("sftp", "root:secret", "nas", 22)
+    assert str(source) != "sftp://root:secret@nas:22"
+    full = uritools.uricompose(
+        scheme=source.scheme,
+        userinfo=source.userinfo,
+        host=source.host,
+        port=source.port,
+    )
+    assert full == "sftp://root:secret@nas:22"
+
+
+def test_source_userinfo_field_still_carries_password():
+    # Redaction is display-only (__str__/__repr__) -- the actual data
+    # access API (.userinfo, parsed_userinfo(), keys()/__getitem__) must
+    # still return the real password; only rendering is sanitized.
+    from pathlib_next.uri.source import Source
+
+    source = Source("sftp", "root:secret", "nas", 22)
+    assert source.userinfo == "root:secret"
+    assert source.parsed_userinfo() == ("root", "secret")
+    assert source["userinfo"] == "root:secret"
+
+
 # --- B15 regressions: Uri.__init__ from various source types ---
 
 

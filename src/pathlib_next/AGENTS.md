@@ -214,11 +214,14 @@ extra that depends on it).
   itself.
 - **`Source`** (`uri.source`, re-exported at `uri.Source` via `uri/__init__`
   imports) — `NamedTuple(scheme, userinfo, host, port)`; falsy when every
-  field is empty/`None`. `Source.from_str(source, strict=True) -> Source`
-  (`strict=True` raises `ValueError` if `source` carries a path/query/
-  fragment). `parsed_userinfo() -> (user, password)`. `get_scheme_cls(
-  schemesmap=None) -> type[UriPath]` — resolves (and lazily loads) the
-  scheme class. `is_local()` — DNS lookup, `lru_cache(maxsize=256)`d per
+  field is empty/`None`. `__str__()`/`__repr__()` redact the password from
+  `userinfo` (same rationale as `Uri.__str__()` — see `docs/divergences.md`)
+  — the actual data (`.userinfo`, `parsed_userinfo()`, `["userinfo"]`) is
+  unaffected, only display is sanitized. `Source.from_str(source,
+  strict=True) -> Source` (`strict=True` raises `ValueError` if `source`
+  carries a path/query/fragment). `parsed_userinfo() -> (user, password)`.
+  `get_scheme_cls(schemesmap=None) -> type[UriPath]` — resolves (and lazily
+  loads) the scheme class. `is_local()` — DNS lookup, `lru_cache(maxsize=256)`d per
   `Source` value; never call on a hot path uncached.
 - **`Query(str)`** (`uri.query`) — a URI query string, buildable from a
   `str`, a sequence of `(key, value)` pairs, or a mapping (`value` may be a

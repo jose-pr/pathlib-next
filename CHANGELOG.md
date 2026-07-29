@@ -76,6 +76,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   default (`symlink_mode="preserve"`); pass `symlink_mode="reject"` to
   restore the old unconditional-raise behavior exactly.
 
+### Fixed
+- **`uri.source.Source` leaked the password in `str()`/`repr()`.**
+  `Source.__str__()` called `uricompose()` with the raw `userinfo`
+  (password included) -- a genuinely valid, connectable URI string, not
+  just a debug rendering -- and `Source` had no custom `__repr__` at all,
+  so the `NamedTuple` default rendered every field verbatim too. `repr()`
+  is what a traceback frame renders, so a `Source` anywhere on a failing
+  call stack leaked the credential into logs, even though `Uri.__str__()`
+  already redacted. Both now redact the password from `userinfo` the same
+  way `Uri.__str__()` does; the actual data (`.userinfo`,
+  `.parsed_userinfo()`, `["userinfo"]`) is unaffected, only display is
+  sanitized. **This is a behavior change, not purely additive**:
+  `str(source)` (or `f"{source}"`) no longer reconstructs an authenticated
+  URI -- verified nothing in this codebase relied on that (every real
+  connection site reads individual `Source` fields, never whole-object
+  `str()`), but a downstream caller that did would need
+  `uritools.uricompose(scheme=source.scheme, userinfo=source.userinfo,
+  host=source.host, port=source.port)` (the same unredacted-round-trip
+  escape hatch as `Uri.as_uri(sanitize=False)`) instead.
+
 ## [0.8.6] - 2026-07-26
 
 ### Fixed

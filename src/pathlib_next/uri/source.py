@@ -206,9 +206,35 @@ class Source(_ty.NamedTuple):
             or (self[3] != "" and self[3] is not None)
         )
 
+    def _redacted_userinfo(self) -> "str | None":
+        if not self.userinfo:
+            return self.userinfo
+        return self.userinfo.split(":", maxsplit=1)[0] or None
+
     def __str__(self) -> str:
+        """Deliberately sanitized (password dropped from `userinfo`), same
+        rationale as `Uri.__str__`: this is what logging/printing reach
+        for, and a `Source` on a failing call stack must not leak a
+        credential. Does NOT round-trip a credentialed source -- use
+        `uricompose(scheme=self.scheme, userinfo=self.userinfo,
+        host=self.host, port=self.port)` directly for the unredacted form.
+        """
         return _uritools.uricompose(
-            scheme=self.scheme, userinfo=self.userinfo, host=self.host, port=self.port
+            scheme=self.scheme,
+            userinfo=self._redacted_userinfo(),
+            host=self.host,
+            port=self.port,
+        )
+
+    def __repr__(self) -> str:
+        # NamedTuple's auto-generated __repr__ would include self.userinfo
+        # verbatim (password and all) -- a traceback frame renders repr(),
+        # so an unredacted Source anywhere on a failing call stack leaks
+        # the credential into logs. Redact the same way __str__ does.
+        return (
+            f"{type(self).__name__}(scheme={self.scheme!r}, "
+            f"userinfo={self._redacted_userinfo()!r}, host={self.host!r}, "
+            f"port={self.port!r})"
         )
 
     @classmethod
