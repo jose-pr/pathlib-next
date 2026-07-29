@@ -86,7 +86,40 @@ class BinaryOpen(_ty.Protocol):
         ) as f:
             return f.write(data)
 
-    def copy(self, target: "BinaryOpen"):
-        """Copy the binary content from this object to a target object."""
+    def copy(
+        self,
+        target: "BinaryOpen",
+        *,
+        progress: "_ty.Callable[[int, _ty.Optional[int]], None]" = None,
+        chunk_size: int = _shutil.COPY_BUFSIZE,
+    ):
+        """Copy the binary content from this object to a target object.
+
+        `progress`, when given, is called after each chunk is written as
+        `progress(bytes_copied, total_size)`: `bytes_copied` increases
+        monotonically and equals `total_size` (if known) after the final
+        call. `total_size` is this object's `stat().st_size` when `self`
+        also implements the `Stat` protocol and `stat()` succeeds,
+        otherwise `None` -- `BinaryOpen` alone has no size concept.
+        `chunk_size` controls how many bytes are read per iteration
+        (default: `shutil.COPY_BUFSIZE`). With `progress=None` (the
+        default), behavior and bytes-on-wire are identical to before this
+        was added (a plain `shutil.copyfileobj`).
+        """
+        if progress is None:
+            with target.open("wb") as output, self.open("rb") as input:
+                _shutil.copyfileobj(input, output, chunk_size)
+            return
+
+        total_size = None
+        try:
+            total_size = self.stat().st_size
+        except (AttributeError, NotImplementedError, OSError):
+            total_size = None
+
+        copied = 0
         with target.open("wb") as output, self.open("rb") as input:
-            _shutil.copyfileobj(input, output)
+            while chunk := input.read(chunk_size):
+                output.write(chunk)
+                copied += len(chunk)
+                progress(copied, total_size)

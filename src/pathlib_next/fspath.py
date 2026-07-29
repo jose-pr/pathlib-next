@@ -124,11 +124,13 @@ class LocalPath(
         preserve_metadata=True,
         recursive=False,
         ignore_error=None,
+        progress=None,
     ):
         # Python 3.14 added pathlib.Path.copy(), which sits ahead of our
         # generic implementation in the MRO and does not accept pathlib_next's
-        # overwrite=/recursive=/ignore_error= extensions. Keep LocalPath's
-        # cross-version contract stable by routing explicitly to our method.
+        # overwrite=/recursive=/ignore_error=/progress= extensions. Keep
+        # LocalPath's cross-version contract stable by routing explicitly to
+        # our method.
         return _proto.Path.copy(
             self,
             target,
@@ -137,6 +139,7 @@ class LocalPath(
             preserve_metadata=preserve_metadata,
             recursive=recursive,
             ignore_error=ignore_error,
+            progress=progress,
         )
 
     def move(self, target, *, overwrite=False):

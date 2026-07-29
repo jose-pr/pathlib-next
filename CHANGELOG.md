@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`progress` callback for `Path.copy()`/`BinaryOpen.copy()`.** `BinaryOpen.copy(target, *, progress=None, chunk_size=shutil.COPY_BUFSIZE)`
+  now streams in caller-sized chunks and, when `progress` is given, calls
+  `progress(bytes_copied, total_size)` after each chunk (`total_size` is the
+  source's `stat().st_size` when available, else `None`). `Path.copy(target,
+  ..., progress=None)` wraps this with per-file identity:
+  `progress(path, bytes_copied, total_size)`, so a `recursive=True` copy
+  reports which file is being streamed alongside its byte progress, not just
+  an anonymous byte stream. `progress=None` (the default) is behaviorally
+  identical to before this change -- no per-chunk overhead, same
+  `shutil.copyfileobj` bytes-on-wire. `SftpPath`'s asyncssh concurrent
+  fan-out (`copy(recursive=True)`) does not invoke `progress` -- native/batch
+  transfer paths are out of scope for this first cut (see
+  `docs/divergences.md`'s "Deliberate extensions" section).
+
 ## [0.8.6] - 2026-07-26
 
 ### Fixed
