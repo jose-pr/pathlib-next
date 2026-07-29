@@ -211,6 +211,111 @@ def test_local_copy_and_move_resolve_to_pathlib_next():
     assert pathlib_next.LocalPath.move.__module__.startswith("pathlib_next.")
 
 
+def test_copy_progress_hook_monotonic_and_reaches_total(tmp_path):
+    # Copy progress hook (BinaryOpen.copy level): bytes_copied must
+    # increase monotonically and the final call must report the file's
+    # full size.
+    root = pathlib_next.LocalPath(tmp_path)
+    data = b"x" * (256 * 1024 + 17)  # not a multiple of chunk_size
+    (root / "src.bin").write_bytes(data)
+
+    # Path.copy() doesn't take chunk_size directly; exercise the lower
+    # level BinaryOpen.copy() for chunk_size control, and Path.copy()
+    # separately below for the public surface.
+    from pathlib_next.protocols.io import BinaryOpen
+
+    calls = []
+
+    BinaryOpen.copy(
+        root / "src.bin",
+        root / "dst2.bin",
+        chunk_size=64 * 1024,
+        progress=lambda copied, total: calls.append((copied, total)),
+    )
+
+    assert (root / "dst2.bin").read_bytes() == data
+    assert len(calls) >= 2
+    # Monotonically increasing byte counts.
+    counts = [c for c, _ in calls]
+    assert counts == sorted(counts)
+    assert all(b > a for a, b in zip(counts, counts[1:]))
+    # Final call reaches the file's total size, and total_size is stable
+    # and correct throughout (known from stat()).
+    assert calls[-1][0] == len(data)
+    assert all(total == len(data) for _, total in calls)
+
+
+def test_copy_progress_hook_not_called_without_callback_and_no_behavior_change(
+    tmp_path,
+):
+    # No callback => identical behavior/content to plain shutil.copyfileobj
+    # (Phase 1's "no behavior change" requirement).
+    root = pathlib_next.LocalPath(tmp_path)
+    data = b"hello world" * 1000
+    (root / "src.bin").write_bytes(data)
+    (root / "src.bin").copy(root / "dst.bin")
+    assert (root / "dst.bin").read_bytes() == data
+
+
+def test_copy_progress_hook_fires_on_path_copy(tmp_path):
+    # Public Path.copy() surface: progress(path, bytes_copied, total_size),
+    # path identifies the file being streamed.
+    root = pathlib_next.LocalPath(tmp_path)
+    data = b"y" * 1000
+    src = root / "src.bin"
+    src.write_bytes(data)
+    dst = root / "dst.bin"
+
+    calls = []
+    src.copy(dst, progress=lambda path, copied, total: calls.append((path, copied, total)))
+
+    assert calls
+    assert all(path == src for path, _, _ in calls)
+    assert calls[-1][1] == len(data)
+    assert calls[-1][2] == len(data)
+
+
+def test_copy_recursive_progress_hook_reports_per_file_identity(tmp_path):
+    # Phase 2: recursive copy must report per-file identity alongside byte
+    # progress -- not just an anonymous byte stream.
+    root = pathlib_next.LocalPath(tmp_path)
+    src = root / "src"
+    src.mkdir()
+    (src / "f1.txt").write_bytes(b"a" * 500)
+    (src / "sub").mkdir()
+    (src / "sub" / "f2.txt").write_bytes(b"b" * 700)
+
+    dst = root / "dst"
+
+    calls = []
+    src.copy(
+        dst,
+        recursive=True,
+        progress=lambda path, copied, total: calls.append((path, copied, total)),
+    )
+
+    assert (dst / "f1.txt").read_bytes() == b"a" * 500
+    assert (dst / "sub" / "f2.txt").read_bytes() == b"b" * 700
+
+    seen_paths = {path for path, _, _ in calls}
+    assert seen_paths == {src / "f1.txt", src / "sub" / "f2.txt"}
+
+    # Per file: monotonic and final call equals that file's total size.
+    by_path = {}
+    for path, copied, total in calls:
+        by_path.setdefault(path, []).append((copied, total))
+
+    f1_calls = by_path[src / "f1.txt"]
+    f1_counts = [c for c, _ in f1_calls]
+    assert f1_counts == sorted(f1_counts)
+    assert f1_calls[-1] == (500, 500)
+
+    f2_calls = by_path[src / "sub" / "f2.txt"]
+    f2_counts = [c for c, _ in f2_calls]
+    assert f2_counts == sorted(f2_counts)
+    assert f2_calls[-1] == (700, 700)
+
+
 def test_move_recursive_fallback(tmp_path):
     root = pathlib_next.LocalPath(tmp_path)
     src = root / "src"
