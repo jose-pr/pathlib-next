@@ -158,6 +158,7 @@ class SftpPath(UriPath):
 
     __SCHEMES = ("sftp",)
     __slots__ = ("_ssh_config",)
+    _host_filesystem_path = True
 
     #: Class-level backend override, for a subclass to pin its own default
     #: without touching process env state. Wins over the env var, loses to

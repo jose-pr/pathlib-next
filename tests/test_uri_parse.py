@@ -1,3 +1,4 @@
+import os
 import pathlib
 
 import pytest
@@ -97,6 +98,23 @@ def test_join_without_root():
     authkeys = Uri("sftp://root@sftpexample") / "root/.ssh/authorized_keys"
     uri = authkeys.as_uri()
     assert uri == "sftp://root@sftpexample/root/.ssh/authorized_keys"
+
+
+def test_fspath_raises_for_non_host_filesystem_scheme():
+    # Uri (pure, no _host_filesystem_path override) must keep raising for a
+    # remote scheme whose .path has no meaning as a filesystem path -- e.g.
+    # http: is a URL path component, not a path on the host's filesystem.
+    uri = Uri("http://user:pass@example.com/a/b")
+    with pytest.raises(NotImplementedError):
+        os.fspath(uri)
+    with pytest.raises(NotImplementedError):
+        uri.host_fspath()
+
+
+def test_str_sanitizes_password_but_as_uri_full_round_trips():
+    uri = Uri("http://user:pass@example.com/a/b")
+    assert str(uri) == "http://user@example.com/a/b"
+    assert uri.as_uri(sanitize=False) == "http://user:pass@example.com/a/b"
 
 
 # --- B15 regressions: Uri.__init__ from various source types ---

@@ -151,8 +151,13 @@ extra that depends on it).
   `relative_to(other, *, walk_up=False)`, `is_local()` (delegates to
   `Source.is_local()` — does a DNS lookup, cached per `Source`),
   `as_posix()` (`user@host:path` / `host:path` form when a source is
-  present). `__fspath__()` only succeeds for a `file:`-scheme URI pointing
-  at this machine; otherwise raises `NotImplementedError`.
+  present). `__fspath__()` succeeds for a `file:`-scheme URI pointing at
+  this machine, and for any scheme with `_host_filesystem_path = True`
+  (currently `sftp:` — returns `.path`, meaningful on that URI's own host,
+  not the local one); otherwise raises `NotImplementedError`. `host_fspath()`
+  is the unambiguous accessor for "path on the URI's own host" — same
+  `_host_filesystem_path` gate, but never falls back to local-path
+  semantics. See `docs/divergences.md`.
 - **`UriPath(Uri, Path)`** — `Uri` + `Path` (I/O) + scheme dispatch.
   `UriPath(*uris, **options)` (the bare class) parses the URI and returns an
   instance of the concrete subclass registered for its scheme via
