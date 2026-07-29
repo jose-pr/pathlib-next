@@ -348,12 +348,16 @@ class SftpPath(UriPath):
         preserve_metadata=True,
         recursive=False,
         ignore_error=None,
+        progress=None,
     ):
         """Copy with concurrent fan-out on the asyncssh backend.
 
         When using the asyncssh backend with `recursive=True` on a
         directory, child copies are fanned out over worker threads,
-        bounded by `backend.max_concurrency`.
+        bounded by `backend.max_concurrency`. `progress` is honored on the
+        generic single-file fallback path below, but **not** called during
+        the concurrent native fan-out itself -- see `docs/divergences.md`'s
+        "Deliberate extensions" section for the documented limitation.
         """
         from ._asyncssh import AsyncsshSftpBackend, _concurrent_copy, _run
 
@@ -369,6 +373,7 @@ class SftpPath(UriPath):
                 preserve_metadata=preserve_metadata,
                 recursive=recursive,
                 ignore_error=ignore_error,
+                progress=progress,
             )
 
         if isinstance(target, str):
