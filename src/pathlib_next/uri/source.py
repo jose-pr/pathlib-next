@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import functools as _functools
 import ipaddress as _ip
-import socket as _socket
 import typing as _ty
 
 import netimps as _netimps
@@ -293,35 +292,42 @@ class Source(_ty.NamedTuple):
         """Whether `host` resolves to this machine.
 
         Caches per unique Source (Source is an immutable value type), since
-        this does a DNS lookup (socket.gethostbyname) -- never call it on a
-        hot path uncached.
+        this does a DNS/hosts-file lookup -- never call it on a hot path
+        uncached.
 
-        The hostname->address step still goes through `socket.gethostbyname`
-        (the OS resolver: hosts file, NSS, DNS -- not just DNS), matching
-        this method's pre-existing contract; only the "is this address MINE"
-        comparison uses `netimps.is_local_address()`, which enumerates real
-        network interfaces (`netimps.get_interfaces()`) instead of the
-        weaker `socket.getaddrinfo(socket.gethostname(), None)` this project
-        used before -- that approach misses addresses not tied to the
+        The hostname->address step uses `netimps.resolve()` (default
+        backend chain: dnspython, then the OS resolver via
+        `getaddrinfo()` -- hosts file, NSS, DNS, OS cache -- then
+        `nslookup` as a last resort), trying both `"a"`/`"aaaa"` record
+        types and treating `host` as local if ANY resolved address is.
+        `netimps.resolve()` gained OS-resolver-chain support in 0.2.0 --
+        before that it was dnspython-only, which is why this method
+        originally kept `socket.gethostbyname()` for this step (see
+        `.agents/findings/processed/2026-07-29_netimps_adoption_survey.md`
+        and the companion finding filed against `netimps` itself). The
+        "is this address MINE" comparison uses `netimps.is_local_address()`,
+        which enumerates real network interfaces
+        (`netimps.get_interfaces()`) instead of the weaker
+        `socket.getaddrinfo(socket.gethostname(), None)` this project used
+        originally -- that approach missed addresses not tied to the
         resolvable hostname (VMs, containers, VPN interfaces, additional
-        NICs on a multi-homed host). See
-        `.agents/findings/processed/2026-07-29_netimps_adoption_survey.md`.
+        NICs on a multi-homed host).
 
         `host` as a bare IP-literal `str` (e.g. a directly-constructed
         `Source(..., host="::1", ...)`, bypassing `_decode_host()`'s usual
-        bracket-literal parsing) is handled without going through
-        `gethostbyname()` at all -- `gethostbyname()` is IPv4-only and
-        raises `socket.gaierror` on an IPv6 literal, which would otherwise
-        crash `is_local()` for a perfectly valid IPv6 host string.
+        bracket-literal parsing) is handled by `netimps.try_parse()`
+        without going through resolution at all.
         """
         host = self.host
         if not host or host == "localhost":
             return True
-        if isinstance(host, str):
-            host = _netimps.try_parse(host) or _ip.ip_address(
-                _socket.gethostbyname(host)
-            )
-        return _netimps.is_local_address(host)
+        if not isinstance(host, str):
+            return _netimps.is_local_address(host)
+        literal = _netimps.try_parse(host)
+        if literal is not None:
+            return _netimps.is_local_address(literal)
+        addresses = _netimps.resolve(host, "a") + _netimps.resolve(host, "aaaa")
+        return any(_netimps.is_local_address(address) for address in addresses)
 
 
 _NOSOURCE = Source(None, None, None, None)

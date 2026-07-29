@@ -98,14 +98,17 @@ def _is_local(path) -> bool:
     local -- the safe default, since it only preserves the pre-`quick_check`
     always-checksum behavior rather than skipping a comparison it shouldn't.
 
-    `Uri.is_local()` does a real (`lru_cache`d) DNS lookup
-    (`Source.is_local()`, see `uri/source.py`) -- a hostname that doesn't
-    resolve at all (unreachable, fake/test host, transient DNS hiccup)
-    raises `socket.gaierror`, not just returns `False`. Treated the same
-    as "local" here for the same safe-default reason: quick_check simply
-    doesn't kick in, falling through to a real checksum comparison exactly
-    like pre-`quick_check` behavior, rather than letting an unrelated DNS
-    failure crash the sync outright.
+    `Uri.is_local()` does a real (`lru_cache`d) hostname resolution
+    (`Source.is_local()`, see `uri/source.py`, backed by
+    `netimps.resolve()` since 2026-07-29) -- a hostname that genuinely
+    doesn't resolve anywhere correctly returns `False` (non-local), not an
+    exception, but a transport-level failure in the resolver chain itself
+    (all backends erroring, e.g. no network at all) can still raise
+    `OSError`. Treated as "local" on that exception for the same
+    safe-default reason as the "no `is_local()` method" case above:
+    quick_check simply doesn't kick in, falling through to a real checksum
+    comparison exactly like pre-`quick_check` behavior, rather than
+    letting an unrelated resolver failure crash the sync outright.
     """
     is_local = getattr(path, "is_local", None)
     if is_local is None:
