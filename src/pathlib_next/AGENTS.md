@@ -214,12 +214,18 @@ extra that depends on it).
   itself.
 - **`Source`** (`uri.source`, re-exported at `uri.Source` via `uri/__init__`
   imports) — `NamedTuple(scheme, userinfo, host, port)`; falsy when every
-  field is empty/`None`. `__str__()`/`__repr__()` redact the password from
-  `userinfo` (same rationale as `Uri.__str__()` — see `docs/divergences.md`)
-  — the actual data (`.userinfo`, `parsed_userinfo()`, `["userinfo"]`) is
-  unaffected, only display is sanitized. `Source.from_str(source,
-  strict=True) -> Source` (`strict=True` raises `ValueError` if `source`
-  carries a path/query/fragment). `parsed_userinfo() -> (user, password)`.
+  field is empty/`None`. `as_str(sanitize=True) -> str` composes an
+  authority string (`scheme://userinfo@host:port`); `sanitize=True` (the
+  default) drops the password from `userinfo`, `sanitize=False` is the
+  full, credentialed round trip — same name/kwarg as `Uri.as_uri()`, so
+  both classes work the same way. `__str__()` is `as_str(sanitize=True)`;
+  `__repr__()` redacts the same way (`NamedTuple`'s default would render
+  every field, including the password, verbatim — see
+  `docs/divergences.md`). The actual data (`.userinfo`, `parsed_userinfo()`,
+  `["userinfo"]`) is unaffected by any of this, only display is sanitized.
+  `Source.from_str(source, strict=True) -> Source` (`strict=True` raises
+  `ValueError` if `source` carries a path/query/fragment).
+  `parsed_userinfo() -> (user, password)`.
   `get_scheme_cls(schemesmap=None) -> type[UriPath]` — resolves (and lazily
   loads) the scheme class. `is_local()` — DNS lookup, `lru_cache(maxsize=256)`d per
   `Source` value; never call on a hot path uncached.

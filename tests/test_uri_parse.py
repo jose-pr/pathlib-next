@@ -141,21 +141,21 @@ def test_source_str_no_longer_reconstructs_authenticated_uri():
     # Verified nothing in this codebase does that (every real connection
     # site reads individual Source fields -- .host/.port/.userinfo/
     # parsed_userinfo() -- never whole-object str()). The real round trip,
-    # for any caller that genuinely needs it, is uricompose() directly with
-    # the unredacted fields (same escape hatch as Uri.as_uri(sanitize=False)).
-    import uritools
-
+    # for any caller that genuinely needs it, is as_str(sanitize=False)
+    # (mirrors Uri.as_uri(sanitize=False)).
     from pathlib_next.uri.source import Source
 
     source = Source("sftp", "root:secret", "nas", 22)
     assert str(source) != "sftp://root:secret@nas:22"
-    full = uritools.uricompose(
-        scheme=source.scheme,
-        userinfo=source.userinfo,
-        host=source.host,
-        port=source.port,
-    )
-    assert full == "sftp://root:secret@nas:22"
+    assert source.as_str(sanitize=False) == "sftp://root:secret@nas:22"
+
+
+def test_source_as_str_defaults_sanitized_matching_str():
+    from pathlib_next.uri.source import Source
+
+    source = Source("sftp", "root:secret", "nas", 22)
+    assert source.as_str() == str(source) == "sftp://root@nas:22"
+    assert source.as_str(sanitize=True) == "sftp://root@nas:22"
 
 
 def test_source_userinfo_field_still_carries_password():
