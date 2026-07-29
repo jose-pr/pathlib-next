@@ -247,13 +247,28 @@ Subclass one of these with your own `root` fixture to verify a custom
   pathlib 3.13 `full_match()` semantics, `"**"` matches zero or more
   segments. **`glob.RECURSIVE`** = `"**"`.
 - **`sync.PathSyncer(checksum=None, /, remove_missing=False,
-  follow_symlinks=True, hook=None, ignore_error=False)`** — one-way
-  checksum-driven tree sync between any two `Path` implementations.
-  `checksum` defaults to `utils.checksum.md5`. `.sync(source, target, /,
-  dry_run=False, ignore_error=False)` copies/creates in `target` whatever
-  differs from `source`; `remove_missing=True` also removes `target`
-  entries absent from `source`. `hook`/`.log()`/subclassing `.log()` are the
-  progress/logging seams; `SyncEvent` enum names the events fired.
+  follow_symlinks=True, symlink_mode="preserve", hook=None,
+  ignore_error=False)`** — one-way checksum-driven tree sync between any two
+  `Path` implementations. `checksum` defaults to `utils.checksum.md5`.
+  `.sync(source, target, /, dry_run=False, ignore_error=False)`
+  copies/creates in `target` whatever differs from `source`;
+  `remove_missing=True` also removes `target` entries absent from `source`.
+  `follow_symlinks=True` (default) resolves through a symlink source during
+  traversal exactly like content sync (unchanged). With
+  `follow_symlinks=False`, a symlink source is reported as such and
+  `symlink_mode` decides what happens: `"preserve"` (default) creates a
+  matching symlink on `target` using the exact raw, unresolved target
+  string `readlink()` returned — dangling links and relative targets
+  included, never validated or resolved against `source`'s parent;
+  `"reject"` raises `NotImplementedError` instead (the sole behavior before
+  this kwarg existed). If `target`'s implementation has no `symlink_to()`
+  at all (every backend except `LocalPath` and `SftpPath` — see
+  `docs/divergences.md`), `"preserve"` mode also raises
+  `NotImplementedError`, through the same `ignore_error`/`hook()` flow as
+  every other branch, not a silent skip. `hook`/`.log()`/subclassing
+  `.log()` are the progress/logging seams; `SyncEvent` enum names the
+  events fired (`SyncEvent.Symlink` covers symlink creation, replacement,
+  and the not-implemented/error path alike).
   **`sync.PathAndStat`** — a `Path` + cached `stat()` (`None` if missing);
   `is_*` attribute access delegates to the cached stat, returning a
   false-returning callable when the path doesn't exist.
