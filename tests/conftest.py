@@ -323,13 +323,9 @@ def http_server_head_rejecting(fixture_tree):
 @pytest.fixture
 def unused_tcp_port():
     """A port nobody is listening on, for connection-refused coverage."""
-    import socket
+    import netimps
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    return netimps.get_free_port()
 
 
 @pytest.fixture

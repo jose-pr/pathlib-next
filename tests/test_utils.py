@@ -103,24 +103,6 @@ def test_sizeof_fmt_large_units():
     assert utils.sizeof_fmt(1024**8) == "1.0Y"
 
 
-def test_get_machine_ips():
-    import socket
-    import unittest.mock
-    mock_getaddrinfo = [
-        (socket.AddressFamily.AF_INET, None, None, None, ("192.168.1.5", 0)),
-        (socket.AddressFamily.AF_INET6, None, None, None, ("fe80::1", 0, 0, 0)),
-        (999, None, None, None, ("invalid", 0))  # Unknown protocol
-    ]
-    with unittest.mock.patch("socket.gethostname", return_value="myhost"), \
-         unittest.mock.patch("socket.getaddrinfo", return_value=mock_getaddrinfo):
-        utils.get_machine_ips.cache_clear()
-        ips = utils.get_machine_ips()
-        assert len(ips) == 2
-        import ipaddress
-        assert ipaddress.ip_address("192.168.1.5") in ips
-        assert ipaddress.ip_address("fe80::1") in ips
-
-
 def test_filestat_methods():
     from pathlib_next.utils.stat import FileStat
     

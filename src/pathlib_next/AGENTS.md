@@ -227,8 +227,14 @@ extra that depends on it).
   `ValueError` if `source` carries a path/query/fragment).
   `parsed_userinfo() -> (user, password)`.
   `get_scheme_cls(schemesmap=None) -> type[UriPath]` — resolves (and lazily
-  loads) the scheme class. `is_local()` — DNS lookup, `lru_cache(maxsize=256)`d per
-  `Source` value; never call on a hot path uncached.
+  loads) the scheme class. `is_local()` — hostname->address via
+  `socket.gethostbyname()` (OS resolver: hosts file, NSS, DNS; IP-literal
+  `host` skips this via `netimps.try_parse()` first, so an IPv6 literal
+  never hits `gethostbyname()`'s IPv4-only limitation), then
+  `netimps.is_local_address()` decides membership (real interface
+  enumeration via `netimps.get_interfaces()`, not DNS-based guessing).
+  `lru_cache(maxsize=256)`d per `Source` value; never call on a hot path
+  uncached. Requires the `netimps` package (part of the `uri` extra).
 - **`Query(str)`** (`uri.query`) — a URI query string, buildable from a
   `str`, a sequence of `(key, value)` pairs, or a mapping (`value` may be a
   sequence to repeat the key). `Query(query, *, encoding="utf-8",

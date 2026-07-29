@@ -6,6 +6,8 @@ import io as _io
 import threading as _thread
 import typing as _ty
 
+import netimps as _netimps
+
 from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import Source, Uri, UriPath
@@ -35,7 +37,7 @@ class FtpBackend(BaseFtpBackend):
     def client(self, source: Source, tls: bool):
         cls = _ftplib.FTP_TLS if tls else _ftplib.FTP
         client = cls(timeout=self.timeout)
-        client.connect(str(source.host), source.port or 21)
+        client.connect(str(source.host), source.port or _netimps.get_default_port("ftp"))
         user, password = source.parsed_userinfo()
         client.login(user or "anonymous", password or "")
         if tls:

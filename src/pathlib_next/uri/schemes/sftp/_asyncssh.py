@@ -11,6 +11,7 @@ import threading as _thread
 import typing as _ty
 
 import asyncssh as _asyncssh
+import netimps as _netimps
 
 from ... import Source
 from ....utils.stat import FileStat
@@ -455,7 +456,9 @@ async def _aconnect(
         kwargs["username"] = user
     if password:
         kwargs["password"] = password
-    conn = await _asyncssh.connect(str(source.host), source.port or 22, **kwargs)
+    conn = await _asyncssh.connect(
+        str(source.host), source.port or _netimps.get_default_port("sftp"), **kwargs
+    )
     # asyncssh currently supports SFTP protocol versions 3 and 4 here --
     # request the configured maximum and let the server negotiate down
     # (real-world OpenSSH still stays at v3).
