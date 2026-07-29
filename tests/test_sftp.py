@@ -452,3 +452,495 @@ def test_sftppath_recursive_rm_uses_scandir_metadata_bottom_up():
         ("rmdir", "/root"),
     ]
 
+
+# --- native checksum protocol (protocols/checksum.py::NativeChecksum) ------
+# `_FakeBackend` (above) never overrides `checksum()`, so it inherits
+# `BaseSftpBackend.checksum()`'s `notimplemented` stub -- exercising it
+# proves the "server/backend doesn't support this" fallback path for free,
+# with no extra fixture. A second fake backend below DOES implement it, to
+# prove `SftpPath.checksum()` delegates and returns the digest as-is.
+
+
+def test_sftppath_checksum_raises_notimplemented_when_backend_lacks_support():
+    # Covers both the "no client-library support at all" case (this is
+    # exactly what AsyncsshSftpBackend looks like: no checksum() override)
+    # and, transitively, PathSyncer's fallback-to-streaming trigger
+    # (utils.checksum.native() catches exactly this).
+    p = _sftp("sftp://host/a.txt")
+    with pytest.raises(NotImplementedError):
+        p.checksum()
+
+
+def test_sftppath_checksum_raises_notimplemented_for_asyncssh_shaped_backend():
+    # AsyncsshSftpBackend genuinely has no checksum() override (see
+    # sftp/__init__.py's BaseSftpBackend.checksum docstring) -- a bare
+    # BaseSftpBackend subclass with only `client()` implemented models that
+    # shape without requiring the asyncssh extra to be installed.
+    class _AsyncsshShapedBackend(BaseSftpBackend):
+        def client(self, source):
+            return _FakeSftpClient()
+
+    p = _sftp("sftp://host/a.txt", backend=_AsyncsshShapedBackend())
+    with pytest.raises(NotImplementedError):
+        p.checksum()
+
+
+class _ChecksumCapableBackend(BaseSftpBackend):
+    """Fake backend that DOES implement native checksums -- proves
+    `SftpPath.checksum()` delegates to `backend.checksum()` and returns its
+    value unchanged, and that any non-`NotImplementedError` failure from
+    the backend is translated to `NotImplementedError` (SftpPath's
+    contract: any reason a genuine digest can't be produced must look the
+    same to a caller like `PathSyncer`)."""
+
+    def __init__(self, digests=None, error=None):
+        self._client = _RegularFileSftpClient()
+        self.digests = digests or {}
+        self.error = error
+        self.calls = []
+
+    def client(self, source):
+        return self._client
+
+    def checksum(self, path, algorithm):
+        self.calls.append((path.path, algorithm))
+        if self.error is not None:
+            raise self.error
+        return self.digests[algorithm]
+
+    def supported_checksums(self, path):
+        return frozenset(self.digests)
+
+
+class _RegularFileSftpClient(_FakeSftpClient):
+    """`_FakeSftpClient` whose default `stat()` (`object()`) and
+    `listdir_attr()` (always `["a", "b"]` regardless of path) make any path
+    look like a non-empty directory -- fine for the chmod/rename-focused
+    tests above, but wrong for checksum tests, where `PathSyncer` needs to
+    see a genuine regular file (`is_file() == True`) or it recurses forever
+    trying to walk a "directory" that always reports the same two fake
+    children. `st_mode=S_IFREG` here matches what a real SFTP `stat()` on
+    an actual file returns.
+    """
+
+    def stat(self, path):
+        import stat as stat_module
+
+        from pathlib_next.utils.stat import FileStat
+
+        return FileStat(st_mode=stat_module.S_IFREG | 0o644, st_size=len(b"x"))
+
+    def lstat(self, path):
+        return self.stat(path)
+
+
+def test_sftppath_checksum_delegates_to_backend():
+    backend = _ChecksumCapableBackend(digests={"md5": "deadbeef"})
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    assert p.checksum() == "deadbeef"
+    assert p.checksum("md5") == "deadbeef"
+    assert backend.calls == [("/a.txt", "md5"), ("/a.txt", "md5")]
+
+
+def test_sftppath_checksum_wraps_non_notimplemented_backend_errors():
+    # A backend raising something other than NotImplementedError (a
+    # transport error, a KeyError for an unadvertised algorithm, ...) must
+    # still surface as NotImplementedError to the caller -- SftpPath's
+    # whole contract is "raise if a genuine digest can't be produced",
+    # regardless of why.
+    backend = _ChecksumCapableBackend(error=OSError("connection reset"))
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(NotImplementedError):
+        p.checksum()
+
+
+def test_sftppath_checksum_preserves_explicit_notimplementederror():
+    backend = _ChecksumCapableBackend(error=NotImplementedError("no md5 here"))
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(NotImplementedError, match="no md5 here"):
+        p.checksum()
+
+
+def test_sftppath_supported_checksums_empty_when_backend_lacks_support():
+    # _FakeBackend (module-level fixture): no checksum()/supported_checksums()
+    # override -- inherits BaseSftpBackend's empty-frozenset default. Models
+    # AsyncsshSftpBackend's real shape (no client-library support at all).
+    p = _sftp("sftp://host/a.txt")
+    assert p.supported_checksums() == frozenset()
+
+
+def test_sftppath_supported_checksums_reflects_backend_advertisement():
+    backend = _ChecksumCapableBackend(digests={"md5": "deadbeef"})
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    assert p.supported_checksums() == frozenset({"md5"})
+
+
+# --- native checksum: paramiko SftpBackend wire-level implementation ------
+# SftpBackend.checksum() speaks the OpenSSH check-file@openssh.com
+# extension directly via paramiko's low-level _request()/CMD_EXTENDED --
+# these tests fake that primitive to prove the request is built correctly
+# (handle, algorithm, int64 offset/length, quick_check) and the reply is
+# parsed/validated correctly, without needing a real OpenSSH server. The
+# real SFTP test server used elsewhere in this suite is asyncssh's own
+# SFTPServer (tests/conftest.py::sftp_server), which has NO
+# check-file@openssh.com support at all -- so a real-server round trip can
+# only ever exercise the fallback branch, never a true native-hash
+# request/response. This file fakes the paramiko wire primitive instead,
+# which is the only way to exercise the native branch at all without a
+# real OpenSSH server.
+
+
+def test_paramiko_checksum_sends_correct_extended_request(monkeypatch):
+    import paramiko.sftp as paramiko_sftp
+
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    calls = []
+
+    class _FakeHandleFile:
+        def __init__(self):
+            self.handle = b"handle-bytes"
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _FakeParamikoClient:
+        def __init__(self):
+            self.opened = _FakeHandleFile()
+
+        def open(self, path, mode, buffering=-1):
+            calls.append(("open", path, mode))
+            return self.opened
+
+        def _request(self, cmd, *args):
+            calls.append(("_request", cmd, args))
+            import paramiko.message as message
+
+            msg = message.Message()
+            msg.add_string("md5")
+            msg.add_string(bytes.fromhex("deadbeef"))
+            msg.rewind()
+            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    fake_client = _FakeParamikoClient()
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: fake_client
+    )
+
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    result = backend.checksum(p, "md5")
+
+    assert result == "deadbeef"
+    assert fake_client.opened.closed is True
+    assert calls[0] == ("open", "/a.txt", "r")
+    _, cmd, args = calls[1]
+    assert cmd == paramiko_sftp.CMD_EXTENDED
+    assert args[0] == "check-file@openssh.com"
+    assert args[1] == b"handle-bytes"
+    assert args[2] == "md5"
+    assert int(args[3]) == 0 and int(args[4]) == 0  # offset, length
+    assert args[5] == 0  # quick_check
+
+
+def test_paramiko_checksum_closes_handle_even_when_request_raises(monkeypatch):
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    class _FakeHandleFile:
+        def __init__(self):
+            self.handle = b"h"
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _FakeParamikoClient:
+        def __init__(self):
+            self.opened = _FakeHandleFile()
+
+        def open(self, path, mode, buffering=-1):
+            return self.opened
+
+        def _request(self, cmd, *args):
+            raise OSError("SSH_FX_OP_UNSUPPORTED")
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    fake_client = _FakeParamikoClient()
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: fake_client
+    )
+
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(OSError):
+        backend.checksum(p, "md5")
+    assert fake_client.opened.closed is True
+
+    # SftpPath.checksum() (not backend.checksum() directly) is what
+    # translates this into NotImplementedError for callers/PathSyncer.
+    p2 = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(NotImplementedError):
+        p2.checksum()
+
+
+def test_paramiko_checksum_rejects_mismatched_reply_algorithm(monkeypatch):
+    import paramiko.sftp as paramiko_sftp
+
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    class _FakeHandleFile:
+        handle = b"h"
+
+        def close(self):
+            pass
+
+    class _FakeParamikoClient:
+        def open(self, path, mode, buffering=-1):
+            return _FakeHandleFile()
+
+        def _request(self, cmd, *args):
+            import paramiko.message as message
+
+            msg = message.Message()
+            # Server echoes back a different algorithm than requested --
+            # must not be trusted.
+            msg.add_string("sha256")
+            msg.add_string(b"\x00")
+            msg.rewind()
+            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: _FakeParamikoClient()
+    )
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(NotImplementedError):
+        backend.checksum(p, "md5")
+
+
+def test_paramiko_checksum_rejects_non_extended_reply(monkeypatch):
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    class _FakeHandleFile:
+        handle = b"h"
+
+        def close(self):
+            pass
+
+    class _FakeParamikoClient:
+        def open(self, path, mode, buffering=-1):
+            return _FakeHandleFile()
+
+        def _request(self, cmd, *args):
+            import paramiko.message as message
+
+            # A CMD_STATUS-shaped success-ish reply that isn't actually
+            # CMD_EXTENDED_REPLY must still be rejected.
+            return 999, message.Message()
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: _FakeParamikoClient()
+    )
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(NotImplementedError):
+        backend.checksum(p, "md5")
+
+
+# --- paramiko SftpBackend.supported_checksums(): real per-connection probe -
+
+
+def test_paramiko_supported_checksums_reflects_working_server(monkeypatch):
+    import paramiko.sftp as paramiko_sftp
+
+    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    class _FakeHandleFile:
+        handle = b"h"
+
+        def close(self):
+            pass
+
+    class _FakeParamikoClient:
+        def open(self, path, mode, buffering=-1):
+            return _FakeHandleFile()
+
+        def _request(self, cmd, *args):
+            import paramiko.message as message
+
+            msg = message.Message()
+            msg.add_string("md5")
+            msg.add_string(bytes.fromhex("deadbeef"))
+            msg.rewind()
+            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    fake_client = _FakeParamikoClient()
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: fake_client
+    )
+    # Fresh probe cache -- avoid cross-test pollution from other tests that
+    # exercise the same real SftpBackend.checksum()/supported_checksums().
+    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    supported = backend.supported_checksums(p)
+
+    assert supported == frozenset(paramiko_module._CHECK_FILE_ALGORITHMS)
+
+
+def test_paramiko_supported_checksums_empty_when_server_lacks_extension(monkeypatch):
+    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    class _FakeHandleFile:
+        handle = b"h"
+
+        def close(self):
+            pass
+
+    class _FakeParamikoClient:
+        def open(self, path, mode, buffering=-1):
+            return _FakeHandleFile()
+
+        def _request(self, cmd, *args):
+            raise OSError("SSH_FX_OP_UNSUPPORTED")
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: _FakeParamikoClient()
+    )
+    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    assert backend.supported_checksums(p) == frozenset()
+
+
+def test_paramiko_supported_checksums_caches_per_connection(monkeypatch):
+    import paramiko.sftp as paramiko_sftp
+
+    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    class _FakeHandleFile:
+        handle = b"h"
+
+        def close(self):
+            pass
+
+    class _FakeParamikoClient:
+        def __init__(self):
+            self.request_calls = 0
+
+        def open(self, path, mode, buffering=-1):
+            return _FakeHandleFile()
+
+        def _request(self, cmd, *args):
+            self.request_calls += 1
+            import paramiko.message as message
+
+            msg = message.Message()
+            msg.add_string("md5")
+            msg.add_string(b"\x00")
+            msg.rewind()
+            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    fake_client = _FakeParamikoClient()
+    monkeypatch.setattr(
+        _RealSftpBackend, "client", lambda self, source: fake_client
+    )
+    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    backend.supported_checksums(p)
+    backend.supported_checksums(p)
+    backend.supported_checksums(p)
+
+    # Only the FIRST call actually probed the server -- subsequent calls
+    # for the same connection are served from the cache.
+    assert fake_client.request_calls == 1
+
+
+# --- PathSyncer + SFTP: native path used, and fallback still works --------
+
+
+def test_pathsyncer_uses_sftp_native_checksum_no_open_when_supported():
+    from pathlib_next.utils.sync import PathSyncer, SyncEvent
+
+    class _RecordingChecksumBackend(_ChecksumCapableBackend):
+        def __init__(self, digests):
+            super().__init__(digests=digests)
+            self.open_paths = []
+
+        def client(self, source):
+            client = super().client(source)
+            real_open = client.open
+
+            def _tracking_open(path, mode, buffering):
+                self.open_paths.append(path)
+                return real_open(path, mode, buffering)
+
+            client.open = _tracking_open
+            return client
+
+    source_backend = _RecordingChecksumBackend({"md5": "same-hash"})
+    target_backend = _RecordingChecksumBackend({"md5": "same-hash"})
+    source = _sftp("sftp://host/a.txt", backend=source_backend)
+    target = _sftp("sftp://host/a.txt", backend=target_backend)
+
+    syncer = PathSyncer()
+    events = []
+    syncer._hook = lambda s, t, e, dry: events.append(e)
+    syncer.sync(source, target)
+
+    assert SyncEvent.Copy not in events
+    assert source_backend.calls == [("/a.txt", "md5")]
+    assert target_backend.calls == [("/a.txt", "md5")]
+    # The whole point of the feature: neither side's file content was
+    # opened/streamed just to decide the sync verdict.
+    assert source_backend.open_paths == []
+    assert target_backend.open_paths == []
+
+
+def test_pathsyncer_sftp_falls_back_to_streaming_when_backend_unsupported():
+    from pathlib_next.utils.sync import PathSyncer
+
+    # _FakeBackend (module-level fixture) has no checksum() override --
+    # models a real server without check-file@openssh.com support (or the
+    # asyncssh backend). PathSyncer must still reach a correct verdict via
+    # the streaming fallback, not silently report "in sync".
+    source_backend = _FakeBackend()
+    target_backend = _FakeBackend()
+
+    class _OpenableSftpClient(_FakeSftpClient):
+        def __init__(self, content: bytes):
+            super().__init__()
+            self._content = content
+
+        def stat(self, path):
+            from pathlib_next.utils.stat import FileStat
+
+            return FileStat(is_dir=False)
+
+        def open(self, path, mode, buffering):
+            import io
+
+            return io.BytesIO(self._content)
+
+    source_backend._client = _OpenableSftpClient(b"identical-content")
+    target_backend._client = _OpenableSftpClient(b"identical-content")
+
+    source = _sftp("sftp://host/a.txt", backend=source_backend)
+    target = _sftp("sftp://host/a.txt", backend=target_backend)
+
+    syncer = PathSyncer()
+    events = []
+    syncer._hook = lambda s, t, e, dry: events.append(e)
+    syncer.sync(source, target)
+
+    from pathlib_next.utils.sync import SyncEvent
+
+    assert SyncEvent.Copy not in events
+

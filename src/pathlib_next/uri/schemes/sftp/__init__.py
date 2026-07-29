@@ -28,8 +28,40 @@ class BaseSftpBackend(object):
     #: has no core hard-link operation at all.
     supports_hardlink = False
 
+    def supported_checksums(self, path: "SftpPath") -> "_ty.FrozenSet[str]":
+        """Advisory set of algorithm names `checksum()` can currently
+        produce against `path`'s server connection (see
+        `protocols.checksum.NativeChecksum.supported_checksums`). Empty
+        here (the default): no client-library support for any
+        native-hashing extension at all -- true for `AsyncsshSftpBackend`,
+        which inherits this. `SftpBackend` (paramiko) overrides this with a
+        real per-connection probe against `path`, since neither paramiko
+        nor asyncssh expose the server's advertised SFTP extension list
+        (paramiko's version-negotiation code reads and discards it -- see
+        `_paramiko.py::SftpBackend.supported_checksums`). Takes a `path`
+        argument (unlike a bare capability flag) because the only reliable
+        way to know is to actually try the extension against a real file.
+        """
+        return frozenset()
+
     @_utils.notimplemented
     def client(self, source: Source): ...
+
+    @_utils.notimplemented
+    def checksum(self, path: "SftpPath", algorithm: str) -> str:
+        """Backend-native digest for `path`'s content, e.g. via the
+        OpenSSH `check-file@openssh.com` SFTP protocol extension. Raises
+        `NotImplementedError` (the base/default here) when the backend has
+        no such capability at all, and MUST also raise it -- not return a
+        value -- when the server doesn't advertise `algorithm` specifically
+        (see `protocols/checksum.py::NativeChecksum.checksum` for why this
+        is a hard contract, not a style choice). Only `SftpBackend`
+        (paramiko) implements this today; `AsyncsshSftpBackend` has no
+        equivalent client-library support to build it on (see
+        `_asyncssh.py`), so it inherits this default and always falls back
+        to streaming.
+        """
+        ...
 
 
 # The default-config sentinel is paramiko-free (lives in `_sshconfig`) so
@@ -154,7 +186,12 @@ class SftpPath(UriPath):
     """`sftp:` scheme: full read/write access, auto-selecting between a
     paramiko (sync) and an asyncssh (async, bridged) backend -- see
     "backend selection" above. Requires the `sftp` extra (paramiko) or
-    `sftp-async` extra (asyncssh)."""
+    `sftp-async` extra (asyncssh). Also implements
+    `protocols.checksum.NativeChecksum` (`checksum()`, delegating to
+    `self.backend.checksum()`) -- native on the paramiko backend via the
+    OpenSSH `check-file@openssh.com` extension, `NotImplementedError`
+    (falls back to streaming) on asyncssh or a server without that
+    extension."""
 
     __SCHEMES = ("sftp",)
     __slots__ = ("_ssh_config",)
@@ -249,6 +286,38 @@ class SftpPath(UriPath):
         if not self.backend.supports_lchmod:
             raise NotImplementedError("chmod(follow_symlinks=False)")
         return self._sftpclient.chmod(self.path, mode, follow_symlinks=False)
+
+    def supported_checksums(self) -> "_ty.FrozenSet[str]":
+        """`protocols.checksum.NativeChecksum` implementation: delegates to
+        `self.backend.supported_checksums(self)`. Empty on the asyncssh
+        backend (no client-library support); a real per-connection probe
+        on the paramiko backend (see
+        `_paramiko.py::SftpBackend.supported_checksums`), so this can be
+        empty even on the paramiko backend if the connected server doesn't
+        actually implement `check-file@openssh.com`.
+        """
+        return self.backend.supported_checksums(self)
+
+    def checksum(self, algorithm: str = "md5") -> str:
+        """`protocols.checksum.NativeChecksum` implementation: delegates to
+        `self.backend.checksum()` (the OpenSSH `check-file@openssh.com`
+        SFTP extension on the paramiko backend; unimplemented on asyncssh
+        -- see `BaseSftpBackend.checksum`). Any failure that isn't already
+        `NotImplementedError` (a server that doesn't advertise the
+        extension, an unsupported algorithm, a transport-level error) is
+        also translated to `NotImplementedError`: this method's whole
+        contract is "raise if a genuine digest can't be produced", and a
+        caller (e.g. `PathSyncer`) must be able to fall back to streaming
+        on ANY such failure, not just the backend's own explicit signal.
+        """
+        try:
+            return self.backend.checksum(self, algorithm)
+        except NotImplementedError:
+            raise
+        except Exception as error:
+            raise NotImplementedError(
+                f"native checksum unavailable: {error}"
+            ) from error
 
     def unlink(self, missing_ok=False):
         if missing_ok and not self.exists():

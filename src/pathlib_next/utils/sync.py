@@ -7,9 +7,130 @@ import typing as _ty
 from .. import utils as _utils
 from ..path import Path
 from ..utils.stat import FileStat
-from .checksum import md5 as _md5
+from . import checksum as _checksum
 
 _logger = _logging.getLogger("pathlib_next.sync")
+
+#: Sentinel identifying `PathSyncer`'s own default checksum policy (native
+#: digest preferred, streaming fallback) so `sync()` can special-case it --
+#: a caller-supplied `checksum` callable is always invoked exactly as
+#: before (single path in, value out, compared with `==`). See
+#: `_default_checksums_match()`.
+_DEFAULT_ALGORITHM = "md5"
+
+
+def _default_checksum(entry: "PathAndStat") -> str:
+    # Kept for backward compatibility: `PathSyncer().checksum` must still
+    # be a plain `Callable[[PathAndStat], Any]`, e.g. for callers that read
+    # `.checksum` directly rather than going through `sync()`. `sync()`
+    # itself never calls this for the default policy -- it calls
+    # `_default_checksums_match()` instead, which can coordinate the
+    # native-vs-streaming decision across BOTH sides at once (a single-path
+    # function like this one structurally cannot).
+    native = _checksum.native(entry.path, _DEFAULT_ALGORITHM)
+    if native is not None:
+        return native
+    return _checksum.stream(entry.path, _DEFAULT_ALGORITHM)
+
+
+def _shared_native_algorithm(source: Path, target: Path) -> "str | None":
+    """Pick an algorithm both sides advertise via
+    `NativeChecksum.supported_checksums()` (see `protocols/checksum.py`),
+    preferring `_DEFAULT_ALGORITHM` ("md5") when both sides support it --
+    matches `PathSyncer`'s pre-existing default algorithm, so the common
+    case (both sides only ever supported md5) picks the same algorithm as
+    before this helper existed. Returns `None` if either side has no
+    `supported_checksums` at all (a `NativeChecksum` implementation isn't
+    required to override the advisory method -- the base default already
+    returns `frozenset()`, indistinguishable here from "doesn't implement
+    the protocol"), or if the two sides' advertised sets don't overlap.
+    """
+    source_supported = getattr(source, "supported_checksums", None)
+    target_supported = getattr(target, "supported_checksums", None)
+    if source_supported is None or target_supported is None:
+        return None
+    shared = source_supported() & target_supported()
+    if not shared:
+        return None
+    if _DEFAULT_ALGORITHM in shared:
+        return _DEFAULT_ALGORITHM
+    return next(iter(shared))
+
+
+def _default_checksums_match(source: "PathAndStat", target: "PathAndStat") -> bool:
+    """`PathSyncer`'s default in-sync check: prefer each side's
+    `NativeChecksum.checksum()` (no network transfer needed just to
+    *decide* whether a copy is needed), but only trust a native digest from
+    one side if the OTHER side can also produce a digest under the exact
+    same algorithm -- native or streamed. Mixing "native digest from A" with
+    "streamed digest from B" would only be numerically safe if both are
+    guaranteed true content hashes under the same algorithm; the protocol
+    contract for `NativeChecksum.checksum()` already guarantees that
+    (`NotImplementedError` on any doubt, e.g. S3 multipart ETags), so this
+    conservative both-native-or-both-streamed policy is a deliberate
+    simplicity choice, not a soundness requirement -- see
+    `protocols/checksum.py`.
+
+    Algorithm selection: try `supported_checksums()` intersection first
+    (`_shared_native_algorithm`) -- avoids a doomed native attempt when the
+    two sides' capabilities don't overlap on `_DEFAULT_ALGORITHM`. Falls
+    back to trying `_DEFAULT_ALGORITHM` directly (the pre-`supported_checksums`
+    behavior) when either side doesn't implement the advisory method at
+    all, since a `NativeChecksum` implementation is never required to
+    override it.
+    """
+    algorithm = _shared_native_algorithm(source.path, target.path) or _DEFAULT_ALGORITHM
+    source_native = _checksum.native(source.path, algorithm)
+    target_native = _checksum.native(target.path, algorithm)
+    if source_native is not None and target_native is not None:
+        return source_native == target_native
+    return _checksum.stream(source.path, _DEFAULT_ALGORITHM) == _checksum.stream(
+        target.path, _DEFAULT_ALGORITHM
+    )
+
+
+def _is_local(path) -> bool:
+    """`quick_check`'s locality test. `Uri.is_local()` (`uri/__init__.py`)
+    exists only on `Uri`/`UriPath` -- a plain `LocalPath` or `MemPath` has
+    no such method at all. Both of those ARE effectively local for this
+    purpose (a real local filesystem, or an in-memory structure with no
+    network cost either way), so "no `is_local()` method" is treated as
+    local -- the safe default, since it only preserves the pre-`quick_check`
+    always-checksum behavior rather than skipping a comparison it shouldn't.
+
+    `Uri.is_local()` does a real (`lru_cache`d) DNS lookup
+    (`Source.is_local()`, see `uri/source.py`) -- a hostname that doesn't
+    resolve at all (unreachable, fake/test host, transient DNS hiccup)
+    raises `socket.gaierror`, not just returns `False`. Treated the same
+    as "local" here for the same safe-default reason: quick_check simply
+    doesn't kick in, falling through to a real checksum comparison exactly
+    like pre-`quick_check` behavior, rather than letting an unrelated DNS
+    failure crash the sync outright.
+    """
+    is_local = getattr(path, "is_local", None)
+    if is_local is None:
+        return True
+    try:
+        return is_local()
+    except OSError:
+        return True
+
+
+def _quick_check_in_sync(source: "PathAndStat", target: "PathAndStat") -> bool:
+    """The rsync-style "quick check" pre-check: True only when BOTH
+    `st_size` and `st_mtime` already match between the two cached stats --
+    metadata `PathAndStat` already carries from listing, no extra round
+    trip. Never used to conclude "out of sync" (a caller must fall through
+    to a real checksum comparison on any mismatch) -- see `PathSyncer`'s
+    class docstring for why.
+    """
+    source_stat, target_stat = source.stat, target.stat
+    if source_stat is None or target_stat is None:
+        return False
+    return (
+        source_stat.st_size == target_stat.st_size
+        and source_stat.st_mtime == target_stat.st_mtime
+    )
 
 
 class SyncEvent(_enum.Enum):
@@ -99,6 +220,35 @@ class PathSyncer(object):
     `Path` implementations (e.g. `MemPath` -> `LocalPath`, or between two
     `UriPath` schemes) -- see `sync()`.
 
+    The default `checksum` policy prefers each side's backend-native
+    digest (`protocols.checksum.NativeChecksum.checksum()`, e.g.
+    `SftpPath`'s `check-file@openssh.com` support) over streaming the file
+    through `open("rb")`, but only when BOTH sides can produce a digest
+    under the same algorithm -- native or streamed. If either side can't
+    (missing the protocol, or it raises `NotImplementedError` for the
+    requested algorithm), both sides fall back to streaming rather than
+    comparing a native digest to a streamed one. A custom `checksum`
+    callable disables this native-preferring behavior entirely (it is
+    called exactly as before, once per side, compared with `==`).
+
+    `quick_check=True` (the default) adds a cheap metadata-only
+    pre-check -- the classic rsync "quick check" heuristic -- for any pair
+    where at least one side is non-local (`Uri.is_local()`; a side without
+    an `is_local()` method at all, e.g. plain `LocalPath`/`MemPath`, is
+    treated as local): if `st_size` AND `st_mtime` already match (from the
+    listing/stat metadata `PathAndStat` already carries -- no extra round
+    trip), the pair is treated as in sync WITHOUT calling `checksum` at
+    all, native or streamed. A mismatch on either falls through to a real
+    checksum comparison rather than being treated as "changed" -- mtime can
+    be unreliable across backends/clock skew, so a false "needs copy" from
+    a mismatch is merely wasteful, while a false "in sync" would be a
+    correctness regression. Local-to-local pairs always skip this
+    pre-check (unchanged pre-existing behavior -- local reads are already
+    cheap, and this project's `copy(preserve_metadata=True)` doesn't
+    guarantee mtime propagation on every path, see `docs/divergences.md`).
+    Set `quick_check=False` to disable the pre-check entirely and always
+    checksum, matching pre-`quick_check` behavior for non-local pairs too.
+
     `follow_symlinks` (default `True`) controls whether a symlink source is
     resolved during traversal (content synced as if it weren't a link) or
     reported as a symlink (`is_symlink()` true). When it's `False` and a
@@ -121,6 +271,7 @@ class PathSyncer(object):
         "follow_symlinks",
         "symlink_mode",
         "ignore_error",
+        "quick_check",
     )
     EVENT_LOG_FORMAT = "[%s] Source:%s Target:%s DryRun:%s"
 
@@ -133,9 +284,17 @@ class PathSyncer(object):
         symlink_mode: '_ty.Literal["preserve", "reject"]' = "preserve",
         hook: _ty.Callable[[PathAndStat, PathAndStat, SyncEvent, bool], None] = None,
         ignore_error: _OnPathSyncerError | bool = False,
+        quick_check: bool = True,
     ) -> None:
+        # `None` (the default) resolves to `_default_checksum` -- a sentinel
+        # `sync()` recognizes (via `is`) to route through
+        # `_default_checksums_match()` instead of two independent calls, so
+        # the native-vs-streaming decision can be coordinated across BOTH
+        # sides at once. A caller-supplied callable is stored and used
+        # as-is (`checksum(target) == checksum(source)`, unchanged from
+        # before this feature).
         if checksum is None:
-            checksum = lambda entry: _md5(entry.path)
+            checksum = _default_checksum
         self.checksum = checksum
         self.remove_missing = remove_missing
         self._hook = hook
@@ -148,6 +307,7 @@ class PathSyncer(object):
         self.ignore_error = _ty.cast(
             _OnPathSyncerError, _utils.as_error_handler(ignore_error)
         )
+        self.quick_check = quick_check
 
     def log(self, msg: str, *args: object):
         # Overridable hook: subclasses/instances may reassign `log` (or
@@ -320,7 +480,27 @@ class PathSyncer(object):
         elif source.is_file():
             synced = False
             if target.is_file():
-                if checksum(target) == checksum(source):
+                # quick_check: cheap metadata-only pre-check for non-local
+                # pairs (see class docstring) -- a match skips checksumming
+                # entirely; a mismatch always falls through to a real
+                # checksum comparison, never concludes "changed" on its
+                # own.
+                quick_matched = (
+                    self.quick_check
+                    and (not _is_local(source.path) or not _is_local(target.path))
+                    and _quick_check_in_sync(source, target)
+                )
+                if quick_matched:
+                    matches = True
+                elif checksum is _default_checksum:
+                    # Route through the paired native-vs-streaming policy
+                    # (see class docstring) instead of two independent
+                    # single-path calls -- only this branch can coordinate
+                    # "both native or both streamed" across both sides.
+                    matches = _default_checksums_match(source, target)
+                else:
+                    matches = checksum(target) == checksum(source)
+                if matches:
                     synced = True
             if not synced:
 
