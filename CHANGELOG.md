@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Optional backend-native checksum protocol**
+  (`pathlib_next.protocols.checksum.NativeChecksum`,
+  `checksum(algorithm="md5") -> str`). A `Path` subclass may implement it to
+  compute a file digest server-side instead of streaming the content
+  through `open("rb")` -- implemented on `SftpPath` against the OpenSSH
+  `check-file@openssh.com` SFTP protocol extension (paramiko backend only;
+  the asyncssh backend has no equivalent client-library support and
+  correctly falls back). Not part of the base `Path`/`Pathname` ABC -- a
+  plain `Path` has no `.checksum` attribute at all. Implementations MUST
+  raise `NotImplementedError` (never return a value) when they can't
+  produce a genuine digest under the requested algorithm -- this is what
+  keeps two checksums from ever being compared under a mismatched
+  algorithm, or trusting something hash-shaped but not a real content hash
+  (e.g. S3's ETag for a multipart upload, deliberately not implemented here
+  for exactly that reason -- see `docs/divergences.md`). Also adds a
+  companion `supported_checksums() -> frozenset[str]` advisory query
+  (default `frozenset()`, never raises); `SftpPath.supported_checksums()`
+  is a real per-connection probe against the server (paramiko exposes no
+  cheaper way to know), cached per connection.
+- **`PathSyncer`'s default checksum policy now prefers native digests on
+  both sides when available**, falling back to streaming
+  (`utils.checksum.md5`/the new generic `utils.checksum.stream`) when
+  either side can't produce one under the same algorithm -- never a
+  native-vs-streamed comparison under a mismatched algorithm. A
+  caller-supplied `checksum` callable is unaffected (invoked exactly as
+  before). New `utils.checksum.native(path, algorithm) -> str | None`
+  helper: tries the protocol, returns `None` (never raises) if unsupported.
+- **`PathSyncer(..., quick_check=True)`** (new constructor kwarg, default
+  `True`): for a sync pair where at least one side is non-local, a
+  metadata-only pre-check (`st_size` + `st_mtime`, already-cached, no extra
+  round trip) skips the checksum call entirely when both match; a mismatch
+  always falls through to a real checksum rather than being treated as
+  "changed" on its own. Local-to-local pairs never engage this pre-check.
+  `quick_check=False` restores always-checksum behavior for non-local pairs.
+
 ## [0.8.6] - 2026-07-26
 
 ### Fixed

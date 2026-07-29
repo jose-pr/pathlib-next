@@ -202,6 +202,30 @@ Legend: `p` = `paramiko`, `a` = `asyncssh`.
 - The broad SFTP benchmark is useful for backend comparison even when the
   operation itself is exposed synchronously, because backend internals still
   affect overall throughput.
+- **Native checksum protocol (this release): not benchmarked with a live
+  timing run.** The bytes-transferred claim for this feature is structural,
+  not something wall-clock benchmarking would usefully confirm: when
+  `PathSyncer`'s default policy can use both sides' native digest (e.g.
+  `SftpPath` against an OpenSSH server's `check-file@openssh.com`
+  extension), a file comparison transfers **zero content bytes** for a
+  match-or-mismatch verdict, versus the streaming fallback's full read on
+  *both* sides (`2 * file_size` for an unchanged file that still needs
+  comparing). This project's own SFTP test server (asyncssh's `SFTPServer`,
+  used by `tests/conftest.py::sftp_server`) has no `check-file@openssh.com`
+  support at all, so a live before/after run against it can only exercise
+  the streaming-fallback path, not the native one -- a real OpenSSH server
+  would be needed for genuine native-path timing, which is out of scope for
+  this environment's benchmark harness. `tests/test_sftp.py`'s
+  wire-level-fake tests (`test_paramiko_checksum_*`) are the correctness
+  proof for this release instead.
+- **`PathSyncer(quick_check=True)` (this release):** also structural, same
+  reasoning. For an unchanged non-local file with matching `st_size`/
+  `st_mtime`, the pre-check skips the checksum step (native or streaming)
+  entirely -- **zero content bytes AND zero extension round trips**, versus
+  even the native-checksum path's still-nonzero per-file request. Only
+  applies when metadata already agrees; any mismatch (including a
+  genuinely unchanged file whose mtime wasn't preserved by a prior copy)
+  still pays for a real checksum, same cost as before this release.
 
 ## Caveats
 

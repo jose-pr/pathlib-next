@@ -130,6 +130,27 @@ pathlib_next`.
   newline=None)`, `write_bytes(data)`, `write_text(data, encoding=None,
   errors=None, newline=None)`, `copy(target)` (streams this object's binary
   content into another `BinaryOpen`).
+- **`checksum.NativeChecksum`** — `Protocol`. `checksum(algorithm="md5") ->
+  str` (not implemented by default). Optional, backend-native file digest
+  (e.g. `SftpPath` against the OpenSSH `check-file@openssh.com` SFTP
+  extension) computed server-side instead of streaming content through
+  `open("rb")`. Not mixed into the base `Path`/`Pathname` ABC — a plain
+  `Path` has no `.checksum` attribute at all; a subclass opts in by mixing
+  this protocol in and implementing the method. MUST raise
+  `NotImplementedError` (never return a value) when it can't produce a
+  genuine digest under the requested `algorithm` — see
+  `docs/divergences.md` for why this is a hard contract, not a style
+  choice (the S3-ETag-for-multipart-uploads trap in particular).
+  `supported_checksums() -> frozenset[str]` (default: `frozenset()`) is a
+  companion *advisory* capability query — never raises, lets a caller pick
+  a shared algorithm across two paths (e.g. `source.supported_checksums()
+  & target.supported_checksums()`) without probing via trial-and-error.
+  Advisory only: `checksum()`'s own `NotImplementedError` remains the
+  authoritative per-call contract even if a caller skips this query.
+  `SftpPath.supported_checksums()` is a real per-connection probe (not a
+  static flag) — paramiko exposes no way to read the server's advertised
+  SFTP extension list, so the only reliable signal is an actual attempt,
+  cached per connection.
 
 ## URIs (`pathlib_next.uri`)
 
@@ -230,16 +251,34 @@ Subclass one of these with your own `root` fixture to verify a custom
   pathlib 3.13 `full_match()` semantics, `"**"` matches zero or more
   segments. **`glob.RECURSIVE`** = `"**"`.
 - **`sync.PathSyncer(checksum=None, /, remove_missing=False,
-  follow_symlinks=True, hook=None, ignore_error=False)`** — one-way
-  checksum-driven tree sync between any two `Path` implementations.
-  `checksum` defaults to `utils.checksum.md5`. `.sync(source, target, /,
-  dry_run=False, ignore_error=False)` copies/creates in `target` whatever
-  differs from `source`; `remove_missing=True` also removes `target`
-  entries absent from `source`. `hook`/`.log()`/subclassing `.log()` are the
-  progress/logging seams; `SyncEvent` enum names the events fired.
-  **`sync.PathAndStat`** — a `Path` + cached `stat()` (`None` if missing);
-  `is_*` attribute access delegates to the cached stat, returning a
-  false-returning callable when the path doesn't exist.
+  follow_symlinks=True, hook=None, ignore_error=False, quick_check=True)`**
+  — one-way checksum-driven tree sync between any two `Path`
+  implementations. `checksum=None` (the default) resolves to a policy that
+  prefers each side's `protocols.checksum.NativeChecksum.checksum()` (no
+  network transfer needed just to decide whether a copy is needed) over
+  streaming, but only trusts a native digest from one side if the OTHER
+  side can also produce a digest under the same algorithm (native or
+  streamed) — otherwise BOTH sides fall back to streaming
+  (`utils.checksum.md5`/`stream`), never a native-vs-streamed comparison
+  under a mismatched algorithm. A caller-supplied `checksum` callable
+  disables this entirely and is invoked exactly as before (once per side,
+  compared with `==`). `quick_check=True` (default) adds a metadata-only
+  pre-check (`st_size` + `st_mtime`, already cached, no extra round trip)
+  for any pair where at least one side is non-local
+  (`Uri.is_local()`/DNS-lookup-failure-safe; a side without `is_local()` at
+  all is treated as local) — both matching skips the checksum call
+  entirely; either differing always falls through to a real checksum
+  (never concludes "changed" from metadata alone). Local-to-local pairs
+  never engage this pre-check regardless of the flag's value.
+  `quick_check=False` disables the pre-check entirely.
+  `.sync(source, target, /, dry_run=False, ignore_error=False)`
+  copies/creates in `target` whatever differs from `source`;
+  `remove_missing=True` also removes `target` entries absent from
+  `source`. `hook`/`.log()`/subclassing `.log()` are the progress/logging
+  seams; `SyncEvent` enum names the events fired. **`sync.PathAndStat`** —
+  a `Path` + cached `stat()` (`None` if missing); `is_*` attribute access
+  delegates to the cached stat, returning a false-returning callable when
+  the path doesn't exist.
 - **`stat.FileStat(FileStatLike)`** — `FileStat(st_mode=None, st_size=0,
   st_mtime=0, is_dir=False)`, slotted, for backends without a real
   `os.stat_result` (`MemPath`, `HttpPath`, ...). `FileStat.from_stat(stat)`
@@ -250,7 +289,13 @@ Subclass one of these with your own `root` fixture to verify a custom
   st.is_dir` (no parens) is always truthy.
 - **`checksum.md5(path, chunk_size=65536) -> str`** /
   **`checksum.sha256(path, chunk_size=65536) -> str`** — streaming file
-  checksums over any `Path`.
+  checksums over any `Path`. **`checksum.stream(path, algorithm="md5",
+  chunk_size=65536) -> str`** — the generic (runtime `algorithm`) form of
+  the above, used by `PathSyncer`'s streaming fallback. **`checksum.native(
+  path, algorithm="md5") -> str | None`** — tries `path.checksum(algorithm)`
+  (`protocols.checksum.NativeChecksum`); returns `None` (never raises) if
+  `path` doesn't implement the protocol at all, or raises
+  `NotImplementedError` for `algorithm`.
 - **`archive.make_archive(src, format, target)`** (`format` is `"zip"` or
   `"tar"`) / **`archive.unpack_archive(archive, dest)`** (format
   auto-detected from `archive.name`, falling back to magic-byte sniffing) —
