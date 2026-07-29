@@ -20,7 +20,7 @@ dependencies = []
 uripath = "pathlib_next.tools.uripath:main"
 
 [project.optional-dependencies]
-uri = ["uritools"]
+uri = ["uritools", "netimps"]
 http = ["requests", "pathlib_next[uri]"]
 sftp = ["paramiko", "pathlib_next[uri]"]
 sftp-async = ["asyncssh<2.22; python_version<'3.10'", "asyncssh; python_version>='3.10'", "pathlib_next[uri]"]

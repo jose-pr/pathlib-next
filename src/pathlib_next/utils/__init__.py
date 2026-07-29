@@ -141,22 +141,5 @@ def as_error_handler(
     return lambda *args, **kwargs: result
 
 
-import ipaddress as _ip
-import socket as _socket
-
-
-@_functools.lru_cache(maxsize=1)
-def get_machine_ips():
-    ips: list[_ip.IPv4Address | _ip.IPv6Address] = list()
-    for item in _socket.getaddrinfo(_socket.gethostname(), None):
-        protocol, *_, (ip, *_) = item
-        if protocol == _socket.AddressFamily.AF_INET:
-            ips.append(_ip.ip_address(ip))
-        elif protocol == _socket.AddressFamily.AF_INET6:
-            ips.append(_ip.ip_address(ip))
-
-    return ips
-
-
 from .checksum import md5 as md5, sha256 as sha256
 from .archive import make_archive as make_archive, unpack_archive as unpack_archive

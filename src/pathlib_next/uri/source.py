@@ -5,9 +5,8 @@ import ipaddress as _ip
 import socket as _socket
 import typing as _ty
 
+import netimps as _netimps
 import uritools as _uritools
-
-from .. import utils as _utils
 
 _IPAddress = _ty.Union[_ip.IPv4Address, _ip.IPv6Address]
 
@@ -296,13 +295,33 @@ class Source(_ty.NamedTuple):
         Caches per unique Source (Source is an immutable value type), since
         this does a DNS lookup (socket.gethostbyname) -- never call it on a
         hot path uncached.
+
+        The hostname->address step still goes through `socket.gethostbyname`
+        (the OS resolver: hosts file, NSS, DNS -- not just DNS), matching
+        this method's pre-existing contract; only the "is this address MINE"
+        comparison uses `netimps.is_local_address()`, which enumerates real
+        network interfaces (`netimps.get_interfaces()`) instead of the
+        weaker `socket.getaddrinfo(socket.gethostname(), None)` this project
+        used before -- that approach misses addresses not tied to the
+        resolvable hostname (VMs, containers, VPN interfaces, additional
+        NICs on a multi-homed host). See
+        `.agents/findings/processed/2026-07-29_netimps_adoption_survey.md`.
+
+        `host` as a bare IP-literal `str` (e.g. a directly-constructed
+        `Source(..., host="::1", ...)`, bypassing `_decode_host()`'s usual
+        bracket-literal parsing) is handled without going through
+        `gethostbyname()` at all -- `gethostbyname()` is IPv4-only and
+        raises `socket.gaierror` on an IPv6 literal, which would otherwise
+        crash `is_local()` for a perfectly valid IPv6 host string.
         """
         host = self.host
         if not host or host == "localhost":
             return True
         if isinstance(host, str):
-            host = _ip.ip_address(_socket.gethostbyname(host))
-        return host.is_loopback or host in _utils.get_machine_ips()
+            host = _netimps.try_parse(host) or _ip.ip_address(
+                _socket.gethostbyname(host)
+            )
+        return _netimps.is_local_address(host)
 
 
 _NOSOURCE = Source(None, None, None, None)

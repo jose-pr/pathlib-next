@@ -4,6 +4,7 @@ import pathlib as _pathlib
 import threading as _thread
 import weakref as _weakref
 
+import netimps as _netimps
 import paramiko as _paramiko
 import paramiko.sftp as _paramiko_sftp
 
@@ -104,7 +105,7 @@ class SftpBackend(BaseSftpBackend):
         connect_ops = {
             **self.connect_opts,
             "hostname": config.get("hostname", str(source.host)),
-            "port": source.port or int(config.get("port", 22)),
+            "port": source.port or int(config.get("port", _netimps.get_default_port("sftp"))),
         }
         user, password = source.parsed_userinfo()
         if user:

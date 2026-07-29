@@ -7,7 +7,7 @@ import ftplib
 import pytest
 
 from pathlib_next.uri import Source, Uri
-from pathlib_next.uri.schemes.ftp import BaseFtpBackend, FtpPath
+from pathlib_next.uri.schemes.ftp import BaseFtpBackend, FtpBackend, FtpPath
 
 
 class _FakeFtpClient:
@@ -82,6 +82,59 @@ class _FakeBackend(BaseFtpBackend):
 
 def _ftp(path, backend=None):
     return FtpPath(path, backend=backend or _FakeBackend())
+
+
+# --- FtpBackend.client(): real connect() call, default port ---
+
+
+def test_ftpbackend_client_uses_netimps_default_port_when_source_has_none(
+    monkeypatch,
+):
+    # FtpBackend.client() used to hardcode 21 inline; now delegates to
+    # netimps.get_default_port("ftp"), which returns the same 21 -- assert
+    # the actual value ftplib.FTP.connect() receives, not just that it's
+    # unchanged by coincidence.
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, timeout=None):
+            pass
+
+        def connect(self, host, port):
+            calls.append((host, port))
+
+        def login(self, user, password):
+            pass
+
+        def set_pasv(self, value):
+            pass
+
+    monkeypatch.setattr(ftplib, "FTP", _FakeClient)
+    backend = FtpBackend()
+    backend.client(Source("ftp", None, "host", None), tls=False)
+    assert calls == [("host", 21)]
+
+
+def test_ftpbackend_client_source_port_overrides_default(monkeypatch):
+    calls = []
+
+    class _FakeClient:
+        def __init__(self, timeout=None):
+            pass
+
+        def connect(self, host, port):
+            calls.append((host, port))
+
+        def login(self, user, password):
+            pass
+
+        def set_pasv(self, value):
+            pass
+
+    monkeypatch.setattr(ftplib, "FTP", _FakeClient)
+    backend = FtpBackend()
+    backend.client(Source("ftp", None, "host", 2121), tls=False)
+    assert calls == [("host", 2121)]
 
 
 # --- connection caching ---
