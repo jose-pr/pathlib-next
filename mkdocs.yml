@@ -1,8 +1,8 @@
 site_name: pathlib_next
 site_description: Generic Path Protocol based pathlib
-site_url: https://jose-pr.github.io/pathlib_next/
-repo_url: https://github.com/jose-pr/pathlib_next
-repo_name: jose-pr/pathlib_next
+site_url: https://jose-pr.github.io/pathlib-next/
+repo_url: https://github.com/jose-pr/pathlib-next
+repo_name: jose-pr/pathlib-next
 edit_uri: edit/main/docs/
 
 theme:

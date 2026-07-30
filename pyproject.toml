@@ -3,7 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pathlib_next"
+# The DISTRIBUTION name, hyphenated to match what PyPI displays and what
+# `pip install pathlib-next` takes. PEP 503 normalises `_` to `-`, so this
+# was already published as `pathlib-next`; spelling it that way here just
+# stops the repo, the docs and the index from disagreeing.
+#
+# The IMPORT name stays `pathlib_next` (`packages` below, and every
+# `import pathlib_next`) -- a hyphen is not legal in a Python identifier.
+# Distribution name and import name differing is ordinary and intended.
+name = "pathlib-next"
 version = "0.9.0"
 authors = [{ name = "Jose A" }]
 description = "Generic Path Protocol based pathlib"
@@ -54,9 +62,9 @@ git = "pathlib_next.uri.schemes.git:GitPath"
 "git+gitlab" = "pathlib_next.uri.schemes.git:GitLabGitPath"
 
 [project.urls]
-Homepage = "https://github.com/jose-pr/pathlib_next/"
-Documentation = "https://jose-pr.github.io/pathlib_next/"
-Issues = "https://github.com/jose-pr/pathlib_next/issues"
+Homepage = "https://github.com/jose-pr/pathlib-next/"
+Documentation = "https://jose-pr.github.io/pathlib-next/"
+Issues = "https://github.com/jose-pr/pathlib-next/issues"
 
 
 # Ship the consumer-facing docs inside the installed package, so they are

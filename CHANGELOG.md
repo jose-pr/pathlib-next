@@ -710,17 +710,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib_next/compare/v0.8.6...HEAD
-[0.8.6]: https://github.com/jose-pr/pathlib_next/compare/v0.8.5...v0.8.6
-[0.8.5]: https://github.com/jose-pr/pathlib_next/compare/v0.8.4...v0.8.5
-[0.8.4]: https://github.com/jose-pr/pathlib_next/compare/v0.8.3...v0.8.4
-[0.8.3]: https://github.com/jose-pr/pathlib_next/compare/v0.8.2...v0.8.3
-[0.8.2]: https://github.com/jose-pr/pathlib_next/compare/v0.8.1...v0.8.2
-[0.8.1]: https://github.com/jose-pr/pathlib_next/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/jose-pr/pathlib_next/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/jose-pr/pathlib_next/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/jose-pr/pathlib_next/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/jose-pr/pathlib_next/compare/v0.4.1...v0.5.0
-[0.4.1]: https://github.com/jose-pr/pathlib_next/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.4.0
-[0.3.5]: https://github.com/jose-pr/pathlib_next/releases/tag/v0.3.5
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/jose-pr/pathlib-next/compare/v0.8.5...v0.8.6
+[0.8.5]: https://github.com/jose-pr/pathlib-next/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/jose-pr/pathlib-next/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/jose-pr/pathlib-next/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/jose-pr/pathlib-next/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/jose-pr/pathlib-next/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/jose-pr/pathlib-next/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/jose-pr/pathlib-next/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/jose-pr/pathlib-next/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/jose-pr/pathlib-next/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/jose-pr/pathlib-next/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/jose-pr/pathlib-next/releases/tag/v0.4.0
+[0.3.5]: https://github.com/jose-pr/pathlib-next/releases/tag/v0.3.5
