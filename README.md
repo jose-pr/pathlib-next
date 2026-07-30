@@ -1,10 +1,10 @@
 # pathlib_next
 
-[![Version](https://img.shields.io/pypi/v/pathlib_next.svg)](https://pypi.org/project/pathlib_next/)
-[![Python versions](https://img.shields.io/pypi/pyversions/pathlib_next.svg)](https://pypi.org/project/pathlib_next/)
+[![Version](https://img.shields.io/pypi/v/pathlib_next.svg)](https://pypi.org/project/pathlib-next/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pathlib_next.svg)](https://pypi.org/project/pathlib-next/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://jose-pr.github.io/pathlib_next/)
-[![CI](https://img.shields.io/github/actions/workflow/status/jose-pr/pathlib_next/test.yml)](https://github.com/jose-pr/pathlib_next/actions/workflows/test.yml)
+[![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://jose-pr.github.io/pathlib-next/)
+[![CI](https://img.shields.io/github/actions/workflow/status/jose-pr/pathlib_next/test.yml)](https://github.com/jose-pr/pathlib-next/actions/workflows/test.yml)
 
 A **robust, extensible pathlib-like base** for any resource addressable as a
 path or URI. Same method names, signatures, semantics, and exception types as
@@ -12,7 +12,7 @@ path or URI. Same method names, signatures, semantics, and exception types as
 against `Path`/`UriPath` and it works against your local disk, an in-memory
 tree, an HTTP index, or an SFTP server. Every intentional divergence from
 `pathlib`'s behavior is documented, not silent -- see
-[`docs/divergences.md`](https://jose-pr.github.io/pathlib_next/divergences/).
+[`docs/divergences.md`](https://jose-pr.github.io/pathlib-next/divergences/).
 
 ## Features
 
@@ -30,7 +30,7 @@ tree, an HTTP index, or an SFTP server. Every intentional divergence from
 
 Every scheme shares the same `glob()`, `walk()`, `copy()`/`move()`, `rm()`
 implementations -- see the full matrix and notes in
-[Schemes](https://jose-pr.github.io/pathlib_next/guides/schemes/).
+[Schemes](https://jose-pr.github.io/pathlib-next/guides/schemes/).
 
 - **Unified path interface** across local files, in-memory paths, archive
   members, and `file`/`data`/`ftp`/`http`/`dav`/`sftp`/`s3` URIs.
@@ -42,7 +42,7 @@ implementations -- see the full matrix and notes in
   authority components.
 - **Extensible two ways**: subclass `Path` directly for a custom
   non-URI resource, or subclass `UriPath` for a new URI scheme -- see
-  [Extending](https://jose-pr.github.io/pathlib_next/guides/extending/).
+  [Extending](https://jose-pr.github.io/pathlib-next/guides/extending/).
 
 ## Installation
 
@@ -128,13 +128,13 @@ print(member.read_text())
 Also built in: `data:` (RFC 2397 inline payloads), `ftp(s):` (stdlib
 `ftplib`), `dav(s):` (WebDAV, full read/write over HTTP), and `s3:`
 (`boto3`) -- one example per scheme in
-[Schemes](https://jose-pr.github.io/pathlib_next/guides/schemes/).
+[Schemes](https://jose-pr.github.io/pathlib-next/guides/schemes/).
 
 ## Extending
 
 Two first-class ways to add a new path-addressable resource -- both covered
 in depth, with worked examples, in
-[Extending](https://jose-pr.github.io/pathlib_next/guides/extending/):
+[Extending](https://jose-pr.github.io/pathlib-next/guides/extending/):
 
 - Subclass `Path` directly for a custom, non-URI resource (`MemPath` is the
   reference exemplar).
