@@ -1,0 +1,4 @@
+# Every file in this repo is LF, on every platform. A repo has ONE line
+# ending; a tool writing LF into a CRLF file leaves it MIXED, which defeats
+# diffs and hides real changes inside whitespace churn.
+* text=auto eol=lf
