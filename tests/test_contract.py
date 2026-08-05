@@ -5,6 +5,7 @@ wants third-party implementers (custom Path subclasses like MemPath, or
 UriPath schemes) to be able to run against their own implementation -- see
 `docs/guides/extending.md`.
 """
+
 import os
 import pytest
 
@@ -28,6 +29,7 @@ def populate_mempath_from_local(local_path, mem_path):
 
 def make_zip_from_local(local_dir, zip_path):
     import zipfile
+
     with zipfile.ZipFile(zip_path, "w") as zf:
         for root, dirs, files in os.walk(local_dir):
             for file in files:
@@ -37,12 +39,15 @@ def make_zip_from_local(local_dir, zip_path):
             for d in dirs:
                 full_path = os.path.join(root, d)
                 if not os.listdir(full_path):
-                    rel_path = os.path.relpath(full_path, local_dir).replace("\\", "/") + "/"
+                    rel_path = (
+                        os.path.relpath(full_path, local_dir).replace("\\", "/") + "/"
+                    )
                     zf.writestr(rel_path, "")
 
 
 def make_tar_from_local(local_dir, tar_path):
     import tarfile
+
     with tarfile.open(tar_path, "w") as tf:
         for root, dirs, files in os.walk(local_dir):
             for file in files:
@@ -79,6 +84,7 @@ class TestHttpContract(ReadPathContract):
     @pytest.fixture
     def root(self, http_server):
         from pathlib_next.uri.schemes.http import HttpPath
+
         return HttpPath(http_server)
 
 
@@ -130,6 +136,7 @@ class TestFtpContract(PathContract):
     @pytest.fixture
     def root(self, ftp_server):
         from pathlib_next.uri.schemes.ftp import FtpPath
+
         return FtpPath(ftp_server)
 
 
@@ -139,6 +146,7 @@ class TestDavContract(PathContract):
     def root(self, dav_server):
         pytest.importorskip("requests")
         from pathlib_next.uri.schemes.dav import DavPath
+
         return DavPath(dav_server)
 
 
@@ -149,6 +157,7 @@ class TestS3Contract(PathContract):
         pytest.importorskip("boto3")
         url, _endpoint = s3_server
         from pathlib_next.uri.schemes.s3 import S3Path
+
         return S3Path(url)
 
 

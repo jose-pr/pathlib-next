@@ -6,6 +6,7 @@ error translation (404/401/403/rate-limit), owner/repo/ref parsing, the
 GitHub Enterprise API-base split, and GitLab's dir-vs-file stat
 disambiguation.
 """
+
 import errno
 import http.server
 import json
@@ -83,8 +84,14 @@ def test_git_scheme_dispatches_by_public_host():
 
 
 def test_git_scheme_explicit_hosts_use_provider_api_bases():
-    assert UriPath("git+github://ghe.internal/acme/widgets")._api_base == "https://ghe.internal/api/v3"
-    assert UriPath("git+gitlab://gitlab.internal/acme/widgets")._api_base == "https://gitlab.internal/api/v4"
+    assert (
+        UriPath("git+github://ghe.internal/acme/widgets")._api_base
+        == "https://ghe.internal/api/v3"
+    )
+    assert (
+        UriPath("git+gitlab://gitlab.internal/acme/widgets")._api_base
+        == "https://gitlab.internal/api/v4"
+    )
 
 
 @pytest.mark.parametrize("uri", ["git://ghe.internal/acme/widgets", "git:"])

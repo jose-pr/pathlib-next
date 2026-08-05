@@ -4,7 +4,11 @@ import io as _io
 import urllib.parse as _urlparse
 
 from ...utils.stat import FileStat
-from ._gitrepo import RepoBackend, _RepoApiPath, _translate_repo_errors  # noqa: F401  (re-exported)
+from ._gitrepo import (
+    RepoBackend,
+    _RepoApiPath,
+    _translate_repo_errors,
+)  # noqa: F401  (re-exported)
 
 
 class GitLabPath(_RepoApiPath):
@@ -67,9 +71,7 @@ class GitLabPath(_RepoApiPath):
         key = ("gitlab_default_branch", self._api_base, self._project_id)
         if key in cache:
             return cache[key]
-        resp = self._request(
-            "GET", f"{self._api_base}/projects/{self._project_id}"
-        )
+        resp = self._request("GET", f"{self._api_base}/projects/{self._project_id}")
         branch = resp.json()["default_branch"]
         cache[key] = branch
         return branch

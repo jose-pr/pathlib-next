@@ -1,6 +1,7 @@
 """DavPath-specific regression coverage (generic contract behavior lives in
 test_contract.py::TestDavContract).
 """
+
 import pytest
 
 pytest.importorskip("requests")

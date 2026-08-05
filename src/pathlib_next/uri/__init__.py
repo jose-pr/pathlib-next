@@ -554,6 +554,7 @@ class UriPath(Uri, Path):
         the name matches the requested scheme.
         """
         import importlib.metadata as _metadata
+
         try:
             eps = _metadata.entry_points(group="pathlib_next.schemes")
         except TypeError:
@@ -595,6 +596,7 @@ class UriPath(Uri, Path):
         module_name = _BUILTIN_SCHEMES.get(scheme)
         if module_name:
             import importlib
+
             try:
                 importlib.import_module(module_name)
                 return True
@@ -697,7 +699,9 @@ class UriPath(Uri, Path):
                 stat = None
             yield name, stat
 
-    def _make_child_relpath(self, name: str, stat_hint: "FileStat" = None, **kwargs) -> _ty.Self:
+    def _make_child_relpath(
+        self, name: str, stat_hint: "FileStat" = None, **kwargs
+    ) -> _ty.Self:
         inst = super()._make_child_relpath(name, backend=self.backend, **kwargs)
         inst._stat_hint = stat_hint
         return inst

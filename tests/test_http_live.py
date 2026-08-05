@@ -6,6 +6,7 @@ matrix beyond 404/405/501, and `stat()`'s redirect/HEAD-fallback branches.
 `SimpleHTTPRequestHandler`) only ever emits `<ul><li>` listings, so none of
 this was previously exercised by anything but the fallback branch.
 """
+
 import pytest
 
 pytest.importorskip("requests")

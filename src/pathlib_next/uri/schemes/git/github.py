@@ -6,4 +6,3 @@ class GitHubGitPath(GitHubPath):
 
     __SCHEMES = ("git+github",)
     __slots__ = ()
-

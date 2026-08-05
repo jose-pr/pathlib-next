@@ -116,7 +116,11 @@ class AzPath(UriPath):
             props = blob_client.get_blob_properties()
             return FileStat(
                 st_size=props["size"],
-                st_mtime=int(props["last_modified"].timestamp()) if props.get("last_modified") else 0,
+                st_mtime=(
+                    int(props["last_modified"].timestamp())
+                    if props.get("last_modified")
+                    else 0
+                ),
                 is_dir=False,
             )
         except Exception:
@@ -280,7 +284,11 @@ class AzPath(UriPath):
     def rename(self, target: "AzPath | Uri | str"):
         if not isinstance(target, Uri):
             target = Uri(self.parent, target)
-        dest_key = self.with_segments(target).key if not isinstance(target, AzPath) else target.key
+        dest_key = (
+            self.with_segments(target).key
+            if not isinstance(target, AzPath)
+            else target.key
+        )
         source_blob_client = self._container.get_blob_client(self.key)
         source_url = source_blob_client.url
         dest_blob_client = self._container.get_blob_client(dest_key)
@@ -289,6 +297,7 @@ class AzPath(UriPath):
         # Poll until copy is complete
         while copy_props["copy_status"] == "pending":
             import time
+
             time.sleep(0.1)
             dest_blob_client = self._container.get_blob_client(dest_key)
             copy_props = dest_blob_client.get_blob_properties()

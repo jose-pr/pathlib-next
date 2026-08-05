@@ -11,7 +11,7 @@ def test_bool_false_when_all_empty():
 def test_bool_true_when_any_set():
     assert Source("http", None, None, None)
     assert Source(None, None, "host", None)
-    assert Source(None, None, None,80)
+    assert Source(None, None, None, 80)
 
 
 def test_parsed_userinfo_splits_user_password():
@@ -112,9 +112,7 @@ def test_is_local_false_for_nonresolving_hostname():
     # socket.gaierror for the same input -- callers like
     # utils.sync._is_local() that used to catch that exception and treat
     # it as "local" (safe-default fallback) now get a real answer instead.
-    assert not Source(
-        None, None, "this-host-does-not-exist.invalid", None
-    ).is_local()
+    assert not Source(None, None, "this-host-does-not-exist.invalid", None).is_local()
 
 
 def test_is_local_own_interface_address():

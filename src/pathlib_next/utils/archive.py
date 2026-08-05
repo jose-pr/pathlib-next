@@ -103,7 +103,11 @@ def unpack_archive(archive: Path, dest: Path) -> None:
             with zipfile.ZipFile(in_f) as zip_ref:
                 for member in zip_ref.infolist():
                     filename = member.filename
-                    parts = [p for p in filename.replace("\\", "/").split("/") if p and p != ".."]
+                    parts = [
+                        p
+                        for p in filename.replace("\\", "/").split("/")
+                        if p and p != ".."
+                    ]
                     if not parts:
                         continue
 
@@ -126,7 +130,11 @@ def unpack_archive(archive: Path, dest: Path) -> None:
             with tarfile.open(fileobj=in_f, mode="r") as tar_ref:
                 for member in tar_ref.getmembers():
                     filename = member.name
-                    parts = [p for p in filename.replace("\\", "/").split("/") if p and p != ".."]
+                    parts = [
+                        p
+                        for p in filename.replace("\\", "/").split("/")
+                        if p and p != ".."
+                    ]
                     if not parts:
                         continue
 

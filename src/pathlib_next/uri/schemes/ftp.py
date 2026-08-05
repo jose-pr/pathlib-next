@@ -37,7 +37,9 @@ class FtpBackend(BaseFtpBackend):
     def client(self, source: Source, tls: bool):
         cls = _ftplib.FTP_TLS if tls else _ftplib.FTP
         client = cls(timeout=self.timeout)
-        client.connect(str(source.host), source.port or _netimps.get_default_port("ftp"))
+        client.connect(
+            str(source.host), source.port or _netimps.get_default_port("ftp")
+        )
         user, password = source.parsed_userinfo()
         client.login(user or "anonymous", password or "")
         if tls:
@@ -46,7 +48,9 @@ class FtpBackend(BaseFtpBackend):
         return client
 
 
-def _create_ftpclient(backend: BaseFtpBackend, source: Source, tls: bool, thread_id: int):
+def _create_ftpclient(
+    backend: BaseFtpBackend, source: Source, tls: bool, thread_id: int
+):
     return backend.client(source, tls)
 
 
@@ -56,9 +60,7 @@ _CACHED_CLIENTS = _utils.LRU(_create_ftpclient, maxsize=128)
 def _parse_mlsd_time(value: str) -> int:
     # MLSD "modify" fact: YYYYMMDDHHMMSS[.sss], always UTC (RFC 3659).
     try:
-        return int(
-            _dt.datetime.strptime(value[:14], "%Y%m%d%H%M%S").timestamp()
-        )
+        return int(_dt.datetime.strptime(value[:14], "%Y%m%d%H%M%S").timestamp())
     except ValueError:
         return 0
 
@@ -179,7 +181,6 @@ class FtpPath(UriPath):
         if size is None:
             raise FileNotFoundError(self)
         return FileStat(st_size=size, is_dir=False)
-
 
     def _open(self, mode="r", buffering=-1):
         if "r" in mode:

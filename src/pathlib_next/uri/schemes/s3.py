@@ -175,7 +175,9 @@ class S3Path(UriPath):
 
     def rmdir(self):
         marker = f"{self.key}/"
-        resp = self._client.list_objects_v2(Bucket=self.bucket, Prefix=marker, MaxKeys=2)
+        resp = self._client.list_objects_v2(
+            Bucket=self.bucket, Prefix=marker, MaxKeys=2
+        )
         contents = resp.get("Contents", [])
         if any(obj["Key"] != marker for obj in contents):
             raise OSError(f"Directory not empty: {self}")

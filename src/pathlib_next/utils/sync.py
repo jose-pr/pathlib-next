@@ -466,8 +466,7 @@ class PathSyncer(object):
                     # "attribute doesn't exist at all" case is normalized
                     # here.
                     raise NotImplementedError(
-                        "symlink_to() not supported by "
-                        f"{type(target.path).__name__}"
+                        "symlink_to() not supported by " f"{type(target.path).__name__}"
                     )
                 symlink_to(raw_target)
 

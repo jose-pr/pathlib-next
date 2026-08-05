@@ -15,7 +15,9 @@ if _ty.TYPE_CHECKING:
 _DIGITS = "0123456789"
 
 
-def _split_authority(authority: "str | None") -> "tuple[str | None, str | None, int | None]":
+def _split_authority(
+    authority: "str | None",
+) -> "tuple[str | None, str | None, int | None]":
     """One-pass split of a raw URI authority into (userinfo, host, port) --
     RAW/undecoded strings, port as int-or-None. Ported directly from
     `uritools.SplitResult`'s `.userinfo`/`.host`/`.port` properties (each
@@ -281,7 +283,9 @@ class Source(_ty.NamedTuple):
                 schemesmap = UriPath._schemesmap()
             _cls = schemesmap.get(self.scheme, None)
             if _cls is None:
-                if UriPath._load_entry_point(self.scheme) or UriPath._load_builtin_scheme(self.scheme):
+                if UriPath._load_entry_point(
+                    self.scheme
+                ) or UriPath._load_builtin_scheme(self.scheme):
                     schemesmap = UriPath._schemesmap(reload=True)
                     _cls = schemesmap.get(self.scheme, None)
             return _cls if _cls else UriPath

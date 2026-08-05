@@ -104,9 +104,10 @@ class _ZipBackend(_ArchiveBackend):
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
-            with _zipfile.ZipFile(str(outer_path), "r") as src, _zipfile.ZipFile(
-                tmp_name, "w", _zipfile.ZIP_DEFLATED
-            ) as dst:
+            with (
+                _zipfile.ZipFile(str(outer_path), "r") as src,
+                _zipfile.ZipFile(tmp_name, "w", _zipfile.ZIP_DEFLATED) as dst,
+            ):
                 written = set()
                 for info in src.infolist():
                     new_name = _remap(info.filename)
@@ -115,7 +116,9 @@ class _ZipBackend(_ArchiveBackend):
                     data = overwrite.pop(new_name, None)
                     if data is None:
                         data = overwrite.pop(info.filename, None)
-                    dst.writestr(new_name, data if data is not None else src.read(info.filename))
+                    dst.writestr(
+                        new_name, data if data is not None else src.read(info.filename)
+                    )
                     written.add(new_name)
                 for name, data in overwrite.items():
                     if name not in written:
@@ -131,8 +134,12 @@ class _ZipBackend(_ArchiveBackend):
     def member_stat(self, path):
         with self._lock:
             info = self.handle.getinfo(path)
-            mtime = int(_time.mktime((*info.date_time, 0, 0, -1))) if info.date_time else 0
-            return FileStat(st_size=info.file_size, st_mtime=mtime, is_dir=path.endswith("/"))
+            mtime = (
+                int(_time.mktime((*info.date_time, 0, 0, -1))) if info.date_time else 0
+            )
+            return FileStat(
+                st_size=info.file_size, st_mtime=mtime, is_dir=path.endswith("/")
+            )
 
 
 class ZipUri(ArchiveUri):

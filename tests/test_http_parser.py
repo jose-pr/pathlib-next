@@ -6,6 +6,7 @@ only ever drives this parser's `all_links` fallback branch (the real
 `<ul><li>` listing), so these tests are what actually exercises the
 Apache/nginx-format code paths.
 """
+
 import time
 
 import pytest
@@ -42,7 +43,7 @@ def nginx_table(*rows, header="Name|Last modified|Size|Description"):
     head = "<tr>" + "".join(f"<th>{c}</th>" for c in cols) + "</tr>\n"
     parent = (
         '<tr><td><a href="/files/">Parent Directory</a></td>'
-        "<td>&nbsp;</td><td align=\"right\">-</td><td>&nbsp;</td></tr>\n"
+        '<td>&nbsp;</td><td align="right">-</td><td>&nbsp;</td></tr>\n'
     )
     body = "".join(rows)
     return (
@@ -80,7 +81,9 @@ _DATETIME_CASES = [
 ]
 
 
-@pytest.mark.parametrize("text,fmt", _DATETIME_CASES, ids=[c[1] for c in _DATETIME_CASES])
+@pytest.mark.parametrize(
+    "text,fmt", _DATETIME_CASES, ids=[c[1] for c in _DATETIME_CASES]
+)
 def test_pre_datetime_format_buckets(text, fmt):
     html = apache_pre(pre_row("a.txt", f"  {text}  1.0K"))
     entry = next(e for e in parse(html) if e.name == "a.txt")
@@ -90,6 +93,7 @@ def test_pre_datetime_format_buckets(text, fmt):
 
 
 # --- _RE_FILESIZE / _human2bytes ---
+
 
 def test_human2bytes_plain_int():
     assert _human2bytes("42") == 42
@@ -125,6 +129,7 @@ def test_pre_size_decimal_and_comma():
 
 
 # --- _process_table header classification ---
+
 
 def test_table_header_name_modified_size_description():
     html = nginx_table(
@@ -164,6 +169,7 @@ def test_table_row_skips_parent_directory():
 
 
 # --- _flush_pre_entry: Parent Directory / '..' / absolute-or-query href skip ---
+
 
 def test_pre_skips_parent_directory_variants():
     html = apache_pre(
@@ -212,6 +218,7 @@ def test_pre_directory_entry_has_trailing_slash():
 
 # --- close()'s all_links fallback (no <pre>/<table> at all) ---
 
+
 def test_all_links_fallback_branch():
     html = (
         "<html><body><ul>"
@@ -226,7 +233,9 @@ def test_all_links_fallback_branch():
     names = {e.name for e in listing}
     assert names == {"a.txt", "sub/"}
     # fallback branch carries no metadata
-    assert all(e.modified is None and e.size is None and e.description is None for e in listing)
+    assert all(
+        e.modified is None and e.size is None and e.description is None for e in listing
+    )
 
 
 def test_all_links_fallback_not_used_when_pre_present():
