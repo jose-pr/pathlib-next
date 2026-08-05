@@ -279,12 +279,36 @@ class SftpPath(UriPath):
                 raise FileExistsError(self) from error
             raise
 
-    def chmod(self, mode, *, follow_symlinks=True):
+    def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
+        mode = _utils.as_mode(mode)
         if follow_symlinks:
             return self._sftpclient.chmod(self.path, mode)
         if not self.backend.supports_lchmod:
             raise NotImplementedError("chmod(follow_symlinks=False)")
         return self._sftpclient.chmod(self.path, mode, follow_symlinks=False)
+
+    def _chown(
+        self,
+        uid: int | str | None,
+        gid: int | str | None,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        # SFTPv3 setstat carries uid/gid as a numeric pair only -- there is
+        # no name resolution on the wire, and no way to send just one of
+        # them: the protocol's UIDGID flag sets both. So a partial change
+        # has to read the current value for the field being left alone,
+        # which is why chown() canonicalizes None rather than making every
+        # backend invent its own sentinel.
+        if isinstance(uid, str) or isinstance(gid, str):
+            raise NotImplementedError("sftp chown() requires numeric uid/gid")
+        if not follow_symlinks:
+            raise NotImplementedError("chown(follow_symlinks=False)")
+        if uid is None or gid is None:
+            current = self.stat()
+            uid = current.st_uid if uid is None else uid
+            gid = current.st_gid if gid is None else gid
+        return self._sftpclient.chown(self.path, uid, gid)
 
     def supported_checksums(self) -> "_ty.FrozenSet[str]":
         """`protocols.checksum.NativeChecksum` implementation: delegates to
@@ -338,7 +362,9 @@ class SftpPath(UriPath):
             target = Uri(self.parent, target)
         return self._sftpclient.rename(self.path, target.path)
 
-    def _symlink_to(self, target: "SftpPath | Uri", target_is_directory=False):
+    def _symlink_to(
+        self, target: "SftpPath | Uri", target_is_directory: bool = False
+    ) -> None:
         # The backend primitive only -- `Path.symlink_to()` owns the
         # str->path normalization and the `force=` unlink-then-symlink
         # sequence, so this stays one wire call.

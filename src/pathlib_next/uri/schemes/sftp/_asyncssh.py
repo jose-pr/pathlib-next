@@ -275,8 +275,9 @@ async def _aopen(aclient: "_asyncssh.SFTPClient", path: str, mode: str):
 class _SyncSftpClient:
     """Sync wrapper around an asyncssh `SFTPClient`, exposing the same
     method names paramiko's `SFTPClient` uses (`stat`/`lstat`/
-    `listdir_attr`/`open`/`mkdir`/`chmod`/`remove`/`rmdir`/`rename`/
-    `symlink`/`readlink`/`link`) -- `SftpPath` calls `self._sftpclient.X()`
+    `listdir_attr`/`open`/`mkdir`/`chmod`/`chown`/`remove`/`rmdir`/
+    `rename`/`symlink`/`readlink`/`link`) -- `SftpPath` calls
+    `self._sftpclient.X()`
     directly with no per-backend branching, so matching that shape here is
     what makes everything above "just add one more mirrored method" rather
     than new plumbing in `SftpPath` itself."""
@@ -327,6 +328,16 @@ class _SyncSftpClient:
     @_reraise_sftp_errors
     def chmod(self, path: str, mode: int, *, follow_symlinks: bool = True) -> None:
         _run(self._aclient.chmod(path, mode, follow_symlinks=follow_symlinks))
+
+    @_reraise_sftp_errors
+    def chown(
+        self, path: str, uid: int, gid: int, *, follow_symlinks: bool = True
+    ) -> None:
+        # asyncssh takes uid/gid as keywords on setstat and sends them as
+        # SFTPv3's paired UIDGID attribute -- both values always go on the
+        # wire together, which is why SftpPath._chown() reads the current
+        # owner for whichever field the caller left as "unchanged".
+        _run(self._aclient.chown(path, uid, gid, follow_symlinks=follow_symlinks))
 
     @_reraise_sftp_errors
     def remove(self, path: str) -> None:

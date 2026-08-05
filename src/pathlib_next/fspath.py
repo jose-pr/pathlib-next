@@ -6,11 +6,13 @@ import os as _os
 import pathlib as _path
 import posixpath as _posixpath
 import re as _re
+import shutil as _shutil
 import sys as _sys
 import types as _types
 import typing as _ty
 
 from . import path as _proto
+from . import utils as _utils
 from .utils.stat import FileStat as _FileStat
 
 # pathlib.Path.stat()/chmod() only accept follow_symlinks= on 3.10+; below
@@ -148,7 +150,9 @@ class LocalPath(
         # available on every supported Python version.
         return _proto.Path.move(self, target, overwrite=overwrite)
 
-    def _symlink_to(self, target, target_is_directory: bool = False):
+    def _symlink_to(
+        self, target: _proto.Path | str, target_is_directory: bool = False
+    ) -> None:
         # `symlink_to` is in _OPERATION_NAMES, so the generic
         # `Path.symlink_to()` (which owns `force=`) is what resolves on
         # LocalPath -- it delegates the actual link creation here, and
@@ -168,13 +172,41 @@ class LocalPath(
             return super().stat(follow_symlinks=follow_symlinks)
         return super().stat() if follow_symlinks else super().lstat()
 
-    def chmod(self, mode, *, follow_symlinks=True):
+    def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # Same follow_symlinks= 3.10+ gap as stat() above; lchmod() is the
         # pre-existing equivalent (raises NotImplementedError itself on
         # platforms without os.lchmod, e.g. Windows).
+        mode = _utils.as_mode(mode)
         if _HAS_FOLLOW_SYMLINKS:
             return super().chmod(mode, follow_symlinks=follow_symlinks)
         return super().chmod(mode) if follow_symlinks else super().lchmod(mode)
+
+    def _chown(
+        self,
+        uid: int | str | None,
+        gid: int | str | None,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        # shutil.chown() is the stdlib spelling that accepts names as well
+        # as ids, and it takes None for "leave unchanged" -- the same
+        # canonical form Chmod.chown() already normalized to, so the pair
+        # passes straight through. os.chown's -1 sentinel never appears
+        # here.
+        if not follow_symlinks:
+            if not hasattr(_os, "lchown"):
+                raise NotImplementedError("chown(follow_symlinks=False)")
+            if isinstance(uid, str) or isinstance(gid, str):
+                # os.lchown takes numeric ids only; resolving a name would
+                # mean duplicating shutil's lookup, and guessing wrong here
+                # writes the wrong owner silently.
+                raise NotImplementedError(
+                    "chown(follow_symlinks=False) requires numeric uid/gid"
+                )
+            return _os.lchown(
+                self, -1 if uid is None else uid, -1 if gid is None else gid
+            )
+        return _shutil.chown(self, uid, gid)
 
     def glob(
         self,

@@ -191,3 +191,69 @@ def test_copy_recursive_ignore_error_callable_returning_false_still_suppresses()
 def test_rm_ignore_error_callable_true_suppresses():
     root = MemPath("/")
     (root / "nonexistent").rm(ignore_error=lambda err, path: True)
+
+
+# --- mode/owner normalization (2026-08-04 findings) -----------------------
+#
+# Both helpers live in utils because the value they normalize is accepted at
+# several entry points; centralizing them is what stops the semantics from
+# drifting between backends.
+
+
+def test_as_mode_parses_string_as_octal():
+    from pathlib_next import utils
+
+    # The whole point: "0755" is base 8, never base 10. int("0755") would be
+    # 755 == 0o1363, a different *and valid* mode -- so a wrong answer here
+    # sets plausible-but-unintended permissions and nothing raises.
+    assert utils.as_mode("0755") == 0o755
+    assert utils.as_mode("755") == 0o755
+    assert utils.as_mode("0o755") == 0o755
+    assert utils.as_mode(0o755) == 0o755
+    assert utils.as_mode("0644") != 644
+
+
+@pytest.mark.parametrize("bad", ["0899", "abc", "", "7 5", "-755"])
+def test_as_mode_rejects_non_octal(bad):
+    from pathlib_next import utils
+
+    with pytest.raises(ValueError):
+        utils.as_mode(bad)
+
+
+def test_as_owner_canonicalizes_unchanged_sentinels():
+    from pathlib_next import utils
+
+    # -1 (os.chown's spelling) and None both mean "leave unchanged".
+    assert utils.as_owner(None, None) == (None, None)
+    assert utils.as_owner(-1, -1) == (None, None)
+    assert utils.as_owner(-1, 1000) == (None, 1000)
+    # uid 0 is root, not "unset" -- a falsy check would drop it.
+    assert utils.as_owner(0, 0) == (0, 0)
+    # Names pass through for backends that can resolve them.
+    assert utils.as_owner("root", "wheel") == ("root", "wheel")
+
+
+def test_chown_with_no_changes_does_not_reach_the_backend():
+    called = []
+
+    class _P(MemPath):
+        __slots__ = ()
+
+        def _chown(self, uid, gid, *, follow_symlinks=True):
+            called.append((uid, gid))
+
+    p = _P("/x")
+    p.chown()
+    p.chown(-1, -1)
+    assert called == []
+    p.chown(gid=1000)
+    assert called == [(None, 1000)]
+
+
+def test_chown_is_not_implemented_by_default():
+    # A backend that hasn't implemented the primitive must say so rather
+    # than silently no-op, matching how the rest of the library treats
+    # unsupported operations.
+    with pytest.raises(NotImplementedError):
+        MemPath("/x").chown(1000, 1000)
