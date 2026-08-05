@@ -63,6 +63,17 @@ pathlib_next`.
     `ignore_error` (bool or predicate) controls whether an error during the
     walk is swallowed (predicate return `True`) or re-raised.
   - `rename(target)` — not implemented by default.
+  - `_symlink_to(target, target_is_directory=False)` (not implemented by
+    default) / `symlink_to(target, target_is_directory=False, *,
+    force=False)` — same primitive/wrapper split as `_mkdir`/`mkdir`: a
+    backend implements only `_symlink_to()` and receives an already
+    normalized path object (a `str` target is turned into one by the
+    wrapper, as `copy()`/`move()` do), then reads the raw target string the
+    way its transport needs (`Uri.path` on the wire, `os.fspath()`
+    locally). `force=` is this library's extension: `False` is
+    stdlib-exact, `True` unlinks an existing **non-directory** entry at the
+    link path first (never a directory) and is **not** atomic. Listed in
+    `_OPERATION_NAMES`, since no stdlib version accepts `force=`.
   - `copy(target, *, overwrite=False, follow_symlinks=True,
     preserve_metadata=True, recursive=False, ignore_error=None,
     progress=None)` — `follow_symlinks`/`preserve_metadata` names match
