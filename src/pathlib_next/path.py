@@ -688,7 +688,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         ...
 
     @_utils.notimplemented
-    def _symlink_to(self, target: "_ty.Self", target_is_directory: bool = False):
+    def _symlink_to(
+        self, target: "_ty.Self", target_is_directory: bool = False
+    ) -> None:
         """Create a symlink at this path pointing at `target`.
 
         The backend primitive behind `symlink_to()`, in the same shape as
@@ -710,7 +712,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         target_is_directory: bool = False,
         *,
         force: bool = False,
-    ):
+    ) -> None:
         """Make this path a symlink pointing to `target`.
 
         Signature-compatible with `pathlib.Path.symlink_to()`; `force` is a
