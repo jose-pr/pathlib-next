@@ -167,7 +167,9 @@ class _StatAdapter:
 
     __slots__ = ("_attrs", "filename")
 
-    def __init__(self, attrs: "_asyncssh.SFTPAttrs", filename: "str | bytes | None" = None):
+    def __init__(
+        self, attrs: "_asyncssh.SFTPAttrs", filename: "str | bytes | None" = None
+    ):
         self._attrs = attrs
         self.filename = filename
 
@@ -315,7 +317,11 @@ class _SyncSftpClient:
 
     @_reraise_sftp_errors
     def mkdir(self, path: str, mode: "int | None" = None) -> None:
-        attrs = _asyncssh.SFTPAttrs(permissions=mode) if mode is not None else _asyncssh.SFTPAttrs()
+        attrs = (
+            _asyncssh.SFTPAttrs(permissions=mode)
+            if mode is not None
+            else _asyncssh.SFTPAttrs()
+        )
         _run(self._aclient.mkdir(path, attrs))
 
     @_reraise_sftp_errors
@@ -399,7 +405,9 @@ class _ConnectionCache:
         self._lock = _thread.Lock()
         self.maxsize = maxsize
 
-    def get_or_create(self, key, factory: "_ty.Callable[[], _ConnectionEntry]") -> _ConnectionEntry:
+    def get_or_create(
+        self, key, factory: "_ty.Callable[[], _ConnectionEntry]"
+    ) -> _ConnectionEntry:
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None:
@@ -568,7 +576,12 @@ async def _concurrent_copy(
     async def read_dir(current):
         names = await sftp_call(lambda: aclient.readdir(current.path))
         return [
-            current / (name.filename.decode() if isinstance(name.filename, bytes) else name.filename)
+            current
+            / (
+                name.filename.decode()
+                if isinstance(name.filename, bytes)
+                else name.filename
+            )
             for name in names
             if name.filename not in (".", "..", b".", b"..")
         ]
@@ -706,7 +719,12 @@ async def _concurrent_rm(
     async def read_dir(current):
         names = await sftp_call(lambda: aclient.readdir(current.path))
         return [
-            current / (name.filename.decode() if isinstance(name.filename, bytes) else name.filename)
+            current
+            / (
+                name.filename.decode()
+                if isinstance(name.filename, bytes)
+                else name.filename
+            )
             for name in names
             if name.filename not in (".", "..", b".", b"..")
         ]
@@ -735,7 +753,10 @@ async def _concurrent_rm(
         try:
             stat = await stat_path(current)
             if stat.is_dir():
-                tasks = [_asyncio.create_task(rm_one(child)) for child in await read_dir(current)]
+                tasks = [
+                    _asyncio.create_task(rm_one(child))
+                    for child in await read_dir(current)
+                ]
                 if tasks:
                     if on_error is None:
                         await wait_fail_fast(tasks)

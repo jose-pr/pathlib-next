@@ -29,12 +29,17 @@ def _parse_response(elem) -> "tuple[str, bool, int, str]":
     prop = elem.find("D:propstat/D:prop", _NS)
     resourcetype = prop.find("D:resourcetype", _NS) if prop is not None else None
     is_dir = (
-        resourcetype is not None
-        and resourcetype.find("D:collection", _NS) is not None
+        resourcetype is not None and resourcetype.find("D:collection", _NS) is not None
     )
-    size_text = prop.findtext("D:getcontentlength", namespaces=_NS) if prop is not None else None
+    size_text = (
+        prop.findtext("D:getcontentlength", namespaces=_NS)
+        if prop is not None
+        else None
+    )
     size = int(size_text) if size_text else 0
-    lm = prop.findtext("D:getlastmodified", namespaces=_NS) if prop is not None else None
+    lm = (
+        prop.findtext("D:getlastmodified", namespaces=_NS) if prop is not None else None
+    )
     return _urlparse.unquote(href), is_dir, size, lm
 
 

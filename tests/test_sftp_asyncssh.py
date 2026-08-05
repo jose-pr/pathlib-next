@@ -5,6 +5,7 @@ end-to-end behavior (real read/write/mkdir/rename/... against a live
 server) is covered by TestSftpContract's "asyncssh" param in
 test_contract.py.
 """
+
 import stat
 from types import SimpleNamespace
 
@@ -14,7 +15,6 @@ asyncssh = pytest.importorskip("asyncssh")
 
 from pathlib_next.uri import Source
 from pathlib_next.uri.schemes.sftp import _asyncssh as backend_mod
-
 
 # --- error translation -------------------------------------------------
 
@@ -131,7 +131,9 @@ def test_filestat_from_stat_adapter_roundtrip():
 def _reset_backend_resolution(monkeypatch):
     # _resolve_default_backend_cls() caches its result module-globally --
     # isolate each test from that cache and from the real process env.
-    monkeypatch.delenv(sftp_pkg.__dict__.get("_ENV_VAR", "PATHLIB_NEXT_SFTP_BACKEND"), raising=False)
+    monkeypatch.delenv(
+        sftp_pkg.__dict__.get("_ENV_VAR", "PATHLIB_NEXT_SFTP_BACKEND"), raising=False
+    )
     yield
 
 
@@ -214,8 +216,7 @@ def test_sftp_scheme_imports_and_resolves_without_paramiko():
     import sys
     import textwrap
 
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import sys
         # Make `import paramiko` fail, simulating an asyncssh-only install.
         sys.modules["paramiko"] = None
@@ -226,8 +227,7 @@ def test_sftp_scheme_imports_and_resolves_without_paramiko():
         cls = pkg._resolve_default_backend_cls(reload=True)
         assert cls.__name__ == "AsyncsshSftpBackend", cls
         print("OK")
-        """
-    )
+        """)
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -298,7 +298,10 @@ def test_asyncssh_backend_max_concurrency_defaults_to_16():
     # DEFAULT_MAX_CONCURRENCY's rationale in _asyncssh.py.
     backend = backend_mod.AsyncsshSftpBackend()
     assert backend.max_concurrency == 16
-    assert backend.max_concurrency == backend_mod.AsyncsshSftpBackend.DEFAULT_MAX_CONCURRENCY
+    assert (
+        backend.max_concurrency
+        == backend_mod.AsyncsshSftpBackend.DEFAULT_MAX_CONCURRENCY
+    )
     assert "config" not in backend.connect_opts
 
 
@@ -551,7 +554,11 @@ def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
     )
     target = sftp_pkg.SftpPath("sftp://host/dst", backend=src.backend)
     monkeypatch.setattr(type(target), "exists", lambda self: False)
-    monkeypatch.setattr(type(target), "mkdir", lambda self, mode=0o777, parents=False, exist_ok=False: None)
+    monkeypatch.setattr(
+        type(target),
+        "mkdir",
+        lambda self, mode=0o777, parents=False, exist_ok=False: None,
+    )
 
     src.copy(target, recursive=True, overwrite=True)
 
@@ -565,7 +572,9 @@ def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
 
 def _sftp_attrs(is_dir):
     permissions = 0o40755 if is_dir else 0o100644
-    file_type = asyncssh.FILEXFER_TYPE_DIRECTORY if is_dir else asyncssh.FILEXFER_TYPE_REGULAR
+    file_type = (
+        asyncssh.FILEXFER_TYPE_DIRECTORY if is_dir else asyncssh.FILEXFER_TYPE_REGULAR
+    )
     return asyncssh.SFTPAttrs(type=file_type, permissions=permissions)
 
 
@@ -661,7 +670,12 @@ def test_concurrent_rm_uses_native_asyncssh_calls_and_respects_max_concurrency()
         )
     )
 
-    assert set(client.removed) == {"/root/a.txt", "/root/b.txt", "/root/c.txt", "/root/d.txt"}
+    assert set(client.removed) == {
+        "/root/a.txt",
+        "/root/b.txt",
+        "/root/c.txt",
+        "/root/d.txt",
+    }
     assert client.rmdirs == ["/root"]
     assert 1 < client.max_active <= 2
 
@@ -682,7 +696,8 @@ def test_concurrent_rm_ignore_error_receives_error_and_path():
             _FakeAsyncRmPath(client),
             max_concurrency=4,
             missing_ok=False,
-            on_error=lambda error, path: ignored.append((type(error), path.path)) or True,
+            on_error=lambda error, path: ignored.append((type(error), path.path))
+            or True,
         )
     )
 
@@ -770,4 +785,9 @@ def test_explicit_max_concurrency_overrides_default():
     assert backend.max_concurrency == 4
     # 0 is honored as given (the async helpers clamp to >=1 at use time via
     # `max(1, max_concurrency)`), not silently replaced by the default.
-    assert backend_mod.AsyncsshSftpBackend({"config": None}, max_concurrency=1).max_concurrency == 1
+    assert (
+        backend_mod.AsyncsshSftpBackend(
+            {"config": None}, max_concurrency=1
+        ).max_concurrency
+        == 1
+    )

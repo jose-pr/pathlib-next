@@ -140,4 +140,3 @@ def test_uripath_unimplemented_unlink():
     p = UriPath("custom://host/a")
     with pytest.raises(NotImplementedError):
         p.unlink()
-

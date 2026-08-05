@@ -34,8 +34,12 @@ def test_mempath_walk_top_down():
     results_mapped = [
         (clean_path(p), sorted(dirs), sorted(files)) for p, dirs, files in results
     ]
-    
-    assert ("/", ["empty_dir", "sub"], [".hidden.txt", "a.txt", "b.py"]) in results_mapped
+
+    assert (
+        "/",
+        ["empty_dir", "sub"],
+        [".hidden.txt", "a.txt", "b.py"],
+    ) in results_mapped
     assert ("/sub", ["nested"], ["c.py"]) in results_mapped
     assert ("/sub/nested", [], ["d.py"]) in results_mapped
     assert ("/empty_dir", [], []) in results_mapped
@@ -51,7 +55,11 @@ def test_mempath_walk_bottom_up():
         (clean_path(p), sorted(dirs), sorted(files)) for p, dirs, files in results
     ]
     assert len(results_mapped) == 4
-    assert results_mapped[-1] == ("/", ["empty_dir", "sub"], [".hidden.txt", "a.txt", "b.py"])
+    assert results_mapped[-1] == (
+        "/",
+        ["empty_dir", "sub"],
+        [".hidden.txt", "a.txt", "b.py"],
+    )
 
 
 def test_mempath_walk_pruning():
@@ -75,10 +83,12 @@ def test_mempath_walk_on_error():
     populate_mempath_tree(root)
 
     errors = []
+
     def on_error(err):
         errors.append(err)
 
     original_iterdir = MemPath.iterdir
+
     def mocked_iterdir(self):
         # Match "sub" or "/sub" or "//sub"
         if clean_path(self) == "/sub":
@@ -101,16 +111,24 @@ def test_localpath_walk_parity(tmp_path):
     (tmp_path / "sub" / "b.txt").write_text("b")
 
     path_local = LocalPath(tmp_path)
-    
+
     our_walk = list(path_local.walk(top_down=True))
     our_walk_mapped = [
-        (os.path.relpath(str(p), str(tmp_path)).replace("\\", "/"), sorted(dirs), sorted(files))
+        (
+            os.path.relpath(str(p), str(tmp_path)).replace("\\", "/"),
+            sorted(dirs),
+            sorted(files),
+        )
         for p, dirs, files in our_walk
     ]
 
     os_walk = list(os.walk(tmp_path))
     os_walk_mapped = [
-        (os.path.relpath(str(p), str(tmp_path)).replace("\\", "/"), sorted(dirs), sorted(files))
+        (
+            os.path.relpath(str(p), str(tmp_path)).replace("\\", "/"),
+            sorted(dirs),
+            sorted(files),
+        )
         for p, dirs, files in os_walk
     ]
 

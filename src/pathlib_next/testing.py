@@ -11,6 +11,7 @@ which is a test-only dependency. Import it explicitly:
         def root(self, tmp_path):
             return MyPath(tmp_path)
 """
+
 import pytest
 
 
@@ -22,7 +23,7 @@ class PurePathContract:
         assert p.name == "file.txt"
         assert p.suffix == ".txt"
         assert p.stem == "file"
-        
+
         # parent and parents
         assert p.parent.name == "dir"
         assert len(p.parents) >= 2
@@ -55,7 +56,7 @@ class ReadPathContract(PurePathContract):
     def test_exists_and_types(self, root):
         assert root.exists()
         assert root.is_dir()
-        
+
         a = root / "a.txt"
         assert a.exists()
         assert a.is_file()
@@ -94,7 +95,7 @@ class PathContract(ReadPathContract):
 
     Subclasses must provide a `root` fixture pointing to a writable directory
     pre-populated with the standard `fixture_tree` (see conftest.py).
-    
+
     Note: ftp/dav/s3 stay mock-unit-only because their hand-rolled fakes
     aren't faithful enough for a generic contract.
     """

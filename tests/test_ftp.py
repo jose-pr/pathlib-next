@@ -2,6 +2,7 @@
 listing/stat, the NLST/SIZE fallback path, upload-on-close writes, and
 rename/chmod/mkdir/unlink error translation.
 """
+
 import ftplib
 
 import pytest

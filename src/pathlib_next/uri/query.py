@@ -26,9 +26,7 @@ def _querylist(
     return sep.encode("ascii").join(terms)
 
 
-def _querydict(
-    mapping: _ty.Mapping[str, _ty.Any], sep: str, encoding: str
-) -> bytes:
+def _querydict(mapping: _ty.Mapping[str, _ty.Any], sep: str, encoding: str) -> bytes:
     items = []
     for key, value in mapping.items():
         if isinstance(value, (bytes, str)):

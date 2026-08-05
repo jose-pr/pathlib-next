@@ -6,7 +6,11 @@ import io as _io
 import urllib.parse as _urlparse
 
 from ...utils.stat import FileStat
-from ._gitrepo import RepoBackend, _RepoApiPath, _translate_repo_errors  # noqa: F401  (re-exported)
+from ._gitrepo import (
+    RepoBackend,
+    _RepoApiPath,
+    _translate_repo_errors,
+)  # noqa: F401  (re-exported)
 
 
 class GitHubPath(_RepoApiPath):
@@ -52,7 +56,10 @@ class GitHubPath(_RepoApiPath):
             resp = self.backend.request(
                 "GET", self._contents_url(), params=self._params(), headers=headers
             )
-            if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
+            if (
+                resp.status_code == 403
+                and resp.headers.get("X-RateLimit-Remaining") == "0"
+            ):
                 reset = resp.headers.get("X-RateLimit-Reset", "?")
                 raise OSError(
                     _errno.EAGAIN,

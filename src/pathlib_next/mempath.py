@@ -91,9 +91,7 @@ class MemPath(Path):
             # implementation-defined root) and doesn't collapse it, which
             # broke MemPath("/") (as_posix() == "/") into a bogus "//".
             posix = self.as_posix().lstrip("/")
-            self._normalized = (
-                _posix.normpath("/" + posix).removeprefix("/").split("/")
-            )
+            self._normalized = _posix.normpath("/" + posix).removeprefix("/").split("/")
         return self._normalized
 
     @property

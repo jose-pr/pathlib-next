@@ -1,7 +1,6 @@
 # Based on glob built-in on python modified to work with Uri/anything that implemetns fspath/iterdir that is similar to pathlib.Path
 from __future__ import annotations
 
-
 """Filename globbing utility."""
 
 import fnmatch as _fnmatch
@@ -28,9 +27,7 @@ def compile_pattern(pat: str, case_sensitive: bool):
     return _re.compile(_fnmatch.translate(pat), flags)
 
 
-def full_match(
-    segments: _ty.Sequence[str], pattern: str, case_sensitive: bool
-) -> bool:
+def full_match(segments: _ty.Sequence[str], pattern: str, case_sensitive: bool) -> bool:
     """Match `segments` against a glob pattern that may contain "**"
     components matching zero or more segments (pathlib 3.13's
     PurePath.full_match semantics)."""

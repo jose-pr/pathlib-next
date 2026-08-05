@@ -2,6 +2,7 @@
 (Java-style separator). Uses real `zipfile`/`tarfile` archives on disk
 (tmp_path) as the outer -- no mocking needed, these are stdlib and fast.
 """
+
 import base64
 import io
 import tarfile
@@ -10,8 +11,12 @@ import zipfile
 import pytest
 
 from pathlib_next.uri import UriPath
-from pathlib_next.uri.schemes.archive import ArchiveUri, TarUri, ZipUri, _split_archive_path
-
+from pathlib_next.uri.schemes.archive import (
+    ArchiveUri,
+    TarUri,
+    ZipUri,
+    _split_archive_path,
+)
 
 # --- URI splitting ---
 
@@ -50,7 +55,10 @@ def zip_archive(tmp_path):
 def tar_archive(tmp_path):
     path = tmp_path / "a.tar"
     with tarfile.open(path, "w") as tf:
-        for name, data in [("docs/readme.txt", b"hello tar"), ("top.txt", b"top level")]:
+        for name, data in [
+            ("docs/readme.txt", b"hello tar"),
+            ("top.txt", b"top level"),
+        ]:
             info = tarfile.TarInfo(name)
             info.size = len(data)
             tf.addfile(info, io.BytesIO(data))
@@ -352,7 +360,9 @@ def test_archive_detects_tar_by_extension(tar_archive):
     assert p.read_bytes() == b"top level"
 
 
-def test_archive_detects_zip_by_magic_bytes_when_extension_is_inconclusive(noext_zip_archive):
+def test_archive_detects_zip_by_magic_bytes_when_extension_is_inconclusive(
+    noext_zip_archive,
+):
     p = UriPath(_archive_uri(noext_zip_archive)) / "m.txt"
     assert p.read_text() == "magic sniffed"
 

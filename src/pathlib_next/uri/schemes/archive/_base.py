@@ -40,7 +40,9 @@ _registry: "_weakref.WeakValueDictionary[tuple[type, str], _ArchiveBackend]" = (
 )
 
 
-def _get_backend(backend_cls: "type[_ArchiveBackend]", outer: "UriPath") -> "_ArchiveBackend":
+def _get_backend(
+    backend_cls: "type[_ArchiveBackend]", outer: "UriPath"
+) -> "_ArchiveBackend":
     """Return the shared `_ArchiveBackend` for `outer`, creating one if this
     is the first live reference. Keyed by (backend class, outer URI string)
     so independently-constructed top-level `UriPath("zip:...")`/`"tar:..."`

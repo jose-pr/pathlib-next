@@ -2,6 +2,7 @@
 real `HttpBackend`, no real server. Covers PROPFIND-based stat/listdir and
 PUT/DELETE/MKCOL/MOVE.
 """
+
 import io
 
 import pytest
@@ -266,6 +267,7 @@ def test_rmdir_nonempty_raises_oserror():
     with pytest.raises(OSError) as excinfo:
         p.rmdir()
     import errno
+
     assert excinfo.value.errno == errno.ENOTEMPTY
     # must not have issued DELETE
     assert not any(call[0] == "DELETE" for call in session.calls)

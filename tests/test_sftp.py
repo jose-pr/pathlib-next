@@ -2,6 +2,7 @@
 Source->connect_opts mapping, client cache keying/invalidation, and the
 B12/B13 regressions (chmod follow_symlinks, rename target.path).
 """
+
 import os
 
 import pytest
@@ -172,9 +173,7 @@ def test_sftppath_explicit_ssh_config_disables_system_lookup(monkeypatch):
         __SCHEMES = ()
 
     inst = _PinnedSftpPath.__new__(_PinnedSftpPath)
-    inst._init(
-        Source("sftp", None, "host", None), "/", "", "", ssh_config=None
-    )
+    inst._init(Source("sftp", None, "host", None), "/", "", "", ssh_config=None)
     _ = inst.backend
     assert recorded["ssh_config"] is None
 
@@ -290,34 +289,31 @@ def test_str_drops_password_but_host_fspath_and_path_do_not():
 
 def test_sftp_backend_connect_and_client():
     import unittest.mock
+
     mock_ssh = unittest.mock.MagicMock()
     mock_transport = unittest.mock.MagicMock()
     mock_sftp = unittest.mock.MagicMock()
-    
+
     mock_ssh.get_transport.return_value = mock_transport
     mock_transport.open_sftp_client.return_value = mock_sftp
-    
+
     with unittest.mock.patch("paramiko.SSHClient", return_value=mock_ssh):
         backend = SftpBackend({"timeout": 10}, "policy")
         source = Source("sftp", "user:pass", "host", 2222)
-        
+
         # Test transport()
         transport = backend.transport(source)
         assert transport is mock_transport
         mock_ssh.set_missing_host_key_policy.assert_called_with("policy")
         mock_ssh.connect.assert_called_with(
-            timeout=10,
-            hostname="host",
-            port=2222,
-            username="user",
-            password="pass"
+            timeout=10, hostname="host", port=2222, username="user", password="pass"
         )
-        
+
         # Test client()
         client = backend.client(source)
         assert client is mock_sftp
         mock_transport.open_sftp_client.assert_called_once()
-        
+
         # Test transport raising if None
         mock_ssh.get_transport.return_value = None
         with pytest.raises(Exception):
@@ -341,16 +337,19 @@ def test_sftppath_operations():
         def stat(self, path):
             self.actions.append(("stat", path))
             from pathlib_next.utils.stat import FileStat
+
             return FileStat(is_dir=True)
 
         def lstat(self, path):
             self.actions.append(("lstat", path))
             from pathlib_next.utils.stat import FileStat
+
             return FileStat(is_dir=False)
 
         def open(self, path, mode, buffering):
             self.actions.append(("open", path, mode, buffering))
             import io
+
             return io.BytesIO(b"data")
 
         def mkdir(self, path, mode):
@@ -365,6 +364,7 @@ def test_sftppath_operations():
     class _OperationsFakeBackend(BaseSftpBackend):
         def __init__(self):
             self._client = _OperationsFakeSftpClient()
+
         def client(self, source):
             return self._client
 
@@ -625,9 +625,7 @@ def test_paramiko_checksum_sends_correct_extended_request(monkeypatch):
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
-    monkeypatch.setattr(
-        _RealSftpBackend, "client", lambda self, source: fake_client
-    )
+    monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: fake_client)
 
     p = _sftp("sftp://host/a.txt", backend=backend)
     result = backend.checksum(p, "md5")
@@ -667,9 +665,7 @@ def test_paramiko_checksum_closes_handle_even_when_request_raises(monkeypatch):
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
-    monkeypatch.setattr(
-        _RealSftpBackend, "client", lambda self, source: fake_client
-    )
+    monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: fake_client)
 
     p = _sftp("sftp://host/a.txt", backend=backend)
     with pytest.raises(OSError):
@@ -777,9 +773,7 @@ def test_paramiko_supported_checksums_reflects_working_server(monkeypatch):
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
-    monkeypatch.setattr(
-        _RealSftpBackend, "client", lambda self, source: fake_client
-    )
+    monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: fake_client)
     # Fresh probe cache -- avoid cross-test pollution from other tests that
     # exercise the same real SftpBackend.checksum()/supported_checksums().
     monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
@@ -848,9 +842,7 @@ def test_paramiko_supported_checksums_caches_per_connection(monkeypatch):
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
-    monkeypatch.setattr(
-        _RealSftpBackend, "client", lambda self, source: fake_client
-    )
+    monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: fake_client)
     monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
 
     p = _sftp("sftp://host/a.txt", backend=backend)
@@ -949,4 +941,3 @@ def test_pathsyncer_sftp_falls_back_to_streaming_when_backend_unsupported():
     from pathlib_next.utils.sync import SyncEvent
 
     assert SyncEvent.Copy not in events
-

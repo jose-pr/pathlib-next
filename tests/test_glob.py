@@ -4,6 +4,7 @@ for the glob-engine bugs found in Phases 2-4 (B7 wildcard detection, B18
 dironly, the ** auto-recursion parity gap) and coverage of the shared
 utils/glob.py engine via MemPath (a non-pathlib-backed consumer).
 """
+
 import pathlib
 
 import pytest

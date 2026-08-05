@@ -105,7 +105,8 @@ class SftpBackend(BaseSftpBackend):
         connect_ops = {
             **self.connect_opts,
             "hostname": config.get("hostname", str(source.host)),
-            "port": source.port or int(config.get("port", _netimps.get_default_port("sftp"))),
+            "port": source.port
+            or int(config.get("port", _netimps.get_default_port("sftp"))),
         }
         user, password = source.parsed_userinfo()
         if user:

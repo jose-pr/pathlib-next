@@ -104,7 +104,7 @@ class _CannedListingHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 rows.append(
                     f'<tr><td><a href="{href}">{displayname}</a></td>'
-                    f"<td>{mtime}</td><td align=\"right\">{size}</td>"
+                    f'<td>{mtime}</td><td align="right">{size}</td>'
                     f"<td>&nbsp;</td></tr>\n"
                 )
         body = "".join(rows)
@@ -251,7 +251,7 @@ class _WritableHandler(http.server.SimpleHTTPRequestHandler):
         p = pathlib.Path(self.translate_path(self.path))
 
         # Parse Content-Range: bytes start-end/*
-        match = re.match(r'bytes (\d+)-(\d+)/\*', content_range)
+        match = re.match(r"bytes (\d+)-(\d+)/\*", content_range)
         if not match:
             self.send_error(400, "Invalid Content-Range header")
             return
@@ -395,7 +395,7 @@ def dav_server(fixture_tree):
         "port": 0,
         "provider_mapping": {"/": str(fixture_tree)},
         "simple_dc": {"user_mapping": {"*": True}},
-        "logging": {"enable": False}
+        "logging": {"enable": False},
     }
     app = wsgidav.wsgidav_app.WsgiDAVApp(config)
     server = wsgi.Server(("127.0.0.1", 0), app)
@@ -481,7 +481,11 @@ def sftp_server(fixture_tree):
     # default -- avoids a benign-but-noisy Proactor pipe-transport __del__
     # warning (see _asyncssh.py's _new_loop() for the same fix applied to
     # the real backend's bridge loop); we don't need subprocess pipes here.
-    loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+    loop = (
+        asyncio.SelectorEventLoop()
+        if sys.platform == "win32"
+        else asyncio.new_event_loop()
+    )
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     server = asyncio.run_coroutine_threadsafe(_start(), loop).result()
@@ -852,7 +856,7 @@ def gcs_api_server(fixture_tree):
                 prefixes_set = set()
                 for key in sorted(objects.keys()):
                     if key.startswith(prefix):
-                        rest = key[len(prefix):]
+                        rest = key[len(prefix) :]
                         if delimiter:
                             parts = rest.split(delimiter, 1)
                             if len(parts) > 1:
@@ -868,10 +872,9 @@ def gcs_api_server(fixture_tree):
                 return
 
             # GET raw body: /storage/v1/b/{bucket}/o/{object}?alt=media
-            if (
-                split.path.startswith(f"/storage/v1/b/{bucket_name}/o/")
-                and qs.get("alt") == ["media"]
-            ):
+            if split.path.startswith(f"/storage/v1/b/{bucket_name}/o/") and qs.get(
+                "alt"
+            ) == ["media"]:
                 obj_name = urllib.parse.unquote(
                     split.path[len(f"/storage/v1/b/{bucket_name}/o/") :]
                 )
@@ -890,7 +893,9 @@ def gcs_api_server(fixture_tree):
             copy_prefix = f"/storage/v1/b/{bucket_name}/o/"
             copy_mid = f"/copyTo/b/{bucket_name}/o/"
             if copy_mid in split.path and split.path.startswith(copy_prefix):
-                source_name, _, dest_name = split.path[len(copy_prefix) :].partition(copy_mid)
+                source_name, _, dest_name = split.path[len(copy_prefix) :].partition(
+                    copy_mid
+                )
                 source_name = urllib.parse.unquote(source_name)
                 dest_name = urllib.parse.unquote(dest_name)
                 if source_name in objects:
@@ -973,10 +978,9 @@ def gcs_api_server(fixture_tree):
 def gs_server(gcs_api_server):
     """GCS test server that returns configured BaseGsBackend and a GsPath."""
     from pathlib_next.uri.schemes.gs import GsBackend, GsPath
+
     base_url, bucket_name = gcs_api_server
-    backend = GsBackend(
-        client_options={"api_endpoint": base_url}
-    )
+    backend = GsBackend(client_options={"api_endpoint": base_url})
     return GsPath(f"gs://{bucket_name}", backend=backend), backend
 
 
@@ -1022,9 +1026,11 @@ def az_api_server(fixture_tree):
             qs = urllib.parse.parse_qs(split.query)
 
             # LIST: /{account}/{container}?restype=container&comp=list
-            if (split.path == f"/{account}/{container}" and
-                qs.get("restype") == ["container"] and
-                qs.get("comp") == ["list"]):
+            if (
+                split.path == f"/{account}/{container}"
+                and qs.get("restype") == ["container"]
+                and qs.get("comp") == ["list"]
+            ):
                 prefix = qs.get("prefix", [""])[0]
                 delimiter = qs.get("delimiter", [None])[0]
 
@@ -1036,7 +1042,7 @@ def az_api_server(fixture_tree):
 
                 for key in sorted(objects.keys()):
                     if key.startswith(prefix):
-                        rest = key[len(prefix):]
+                        rest = key[len(prefix) :]
                         if delimiter:
                             parts = rest.split(delimiter, 1)
                             if len(parts) > 1:
@@ -1086,8 +1092,8 @@ def az_api_server(fixture_tree):
                 )
                 if blob_name in objects:
                     content = objects[blob_name]
-                    range_header = (
-                        self.headers.get("x-ms-range") or self.headers.get("Range")
+                    range_header = self.headers.get("x-ms-range") or self.headers.get(
+                        "Range"
                     )
                     start = 0
                     end = len(content) - 1
@@ -1163,7 +1169,9 @@ def az_api_server(fixture_tree):
             split = urllib.parse.urlsplit(self.path)
 
             if split.path.startswith(f"/{account}/{container}/"):
-                blob_name = urllib.parse.unquote(split.path[len(f"/{account}/{container}/"):])
+                blob_name = urllib.parse.unquote(
+                    split.path[len(f"/{account}/{container}/") :]
+                )
                 if blob_name in objects:
                     del objects[blob_name]
                     self.send_response(202)
@@ -1195,6 +1203,7 @@ def az_api_server(fixture_tree):
 def az_server(az_api_server):
     """Azure test server that returns configured BaseAzBackend and an AzPath."""
     from pathlib_next.uri.schemes.az import AzBackend, AzPath
+
     base_url, account, container = az_api_server
     conn_str = (
         f"DefaultEndpointsProtocol=http;AccountName={account};"

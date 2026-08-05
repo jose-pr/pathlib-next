@@ -15,6 +15,7 @@ def test_plugin_dynamic_loading():
     def mock_load():
         class DummyPluginPath(UriPath):
             __SCHEMES = ("dummy",)
+
         return DummyPluginPath
 
     mock_ep.load.side_effect = mock_load
@@ -59,6 +60,7 @@ def test_plugin_non_matching_scheme():
 # _load_entry_point edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestLoadEntryPoint:
     def test_returns_false_on_empty_group(self):
         with mock.patch("importlib.metadata.entry_points", return_value=[]):
@@ -85,8 +87,11 @@ class TestLoadEntryPoint:
 # _load_builtin_scheme
 # ---------------------------------------------------------------------------
 
+
 class TestLoadBuiltinScheme:
-    @pytest.mark.parametrize("scheme", ["file", "data", "zip", "tar", "ftp", "http", "https"])
+    @pytest.mark.parametrize(
+        "scheme", ["file", "data", "zip", "tar", "ftp", "http", "https"]
+    )
     def test_known_stdlib_schemes_return_true(self, scheme):
         """All stdlib-only schemes should always load successfully."""
         assert UriPath._load_builtin_scheme(scheme) is True
@@ -97,6 +102,7 @@ class TestLoadBuiltinScheme:
     def test_import_error_returns_false(self):
         """If the target module raises ImportError, _load_builtin_scheme returns False."""
         import sys
+
         with mock.patch("importlib.import_module", side_effect=ImportError("no dep")):
             result = UriPath._load_builtin_scheme("ftp")
         assert result is False
@@ -106,16 +112,19 @@ class TestLoadBuiltinScheme:
 # get_scheme_cls integration
 # ---------------------------------------------------------------------------
 
+
 class TestGetSchemeCls:
     def test_known_scheme_returns_subclass(self):
         from pathlib_next.uri.schemes.file import FileUri
         from pathlib_next.uri.source import Source
+
         source = Source("file", None, None, None)
         cls = source.get_scheme_cls()
         assert issubclass(cls, UriPath)
 
     def test_unknown_scheme_falls_back_to_uripath(self):
         from pathlib_next.uri.source import Source
+
         source = Source("__totally_unknown__", None, None, None)
         with mock.patch.object(UriPath, "_load_entry_point", return_value=False):
             with mock.patch.object(UriPath, "_load_builtin_scheme", return_value=False):

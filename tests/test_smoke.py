@@ -4,6 +4,7 @@ These are the snippets from README.md's Quick start and examples/example.py
 that don't touch the network. On Python 3.9 this file is expected to fail
 until the Python 3.9 compatibility work lands.
 """
+
 import pytest
 
 import pathlib_next
@@ -101,9 +102,11 @@ def test_example_glob_local(tmp_path):
 
 def test_optional_schemes_presence_or_absence():
     from pathlib_next.uri import schemes
+
     # Check http
     try:
         import requests  # noqa: F401
+
         assert hasattr(schemes, "HttpPath")
     except ImportError:
         assert not hasattr(schemes, "HttpPath")
@@ -123,6 +126,7 @@ def test_optional_schemes_presence_or_absence():
     # a lazy import inside S3Backend.client()), so that's what gates it.
     try:
         import botocore  # noqa: F401
+
         assert hasattr(schemes, "S3Path")
     except ImportError:
         assert not hasattr(schemes, "S3Path")
@@ -130,8 +134,7 @@ def test_optional_schemes_presence_or_absence():
     # Check webdav
     try:
         import requests  # noqa: F401
+
         assert hasattr(schemes, "DavPath")
     except ImportError:
         assert not hasattr(schemes, "DavPath")
-
-

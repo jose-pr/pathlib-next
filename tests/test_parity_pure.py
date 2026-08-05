@@ -2,6 +2,7 @@
 identical outputs. Using stdlib PurePosixPath as the oracle keeps this
 correct across Python versions without hand-maintaining expected values.
 """
+
 import pathlib
 
 import pytest
@@ -48,14 +49,12 @@ def test_as_posix(path):
 
 @pytest.mark.parametrize("path", PATHS)
 def test_is_absolute(path):
-    assert PosixPathname(path).is_absolute() == pathlib.PurePosixPath(
-        path
-    ).is_absolute()
+    assert (
+        PosixPathname(path).is_absolute() == pathlib.PurePosixPath(path).is_absolute()
+    )
 
 
-@pytest.mark.parametrize(
-    "path,name", [("a/b/c.txt", "d.py"), ("a/b/c", "d")]
-)
+@pytest.mark.parametrize("path,name", [("a/b/c.txt", "d.py"), ("a/b/c", "d")])
 def test_with_name(path, name):
     ours = PosixPathname(path).with_name(name)
     theirs = pathlib.PurePosixPath(path).with_name(name)
@@ -89,9 +88,10 @@ def test_is_relative_to_and_relative_to(path, other):
     theirs_other = pathlib.PurePosixPath(other)
     assert ours.is_relative_to(ours_other) == theirs.is_relative_to(theirs_other)
     if theirs.is_relative_to(theirs_other):
-        assert ours.relative_to(ours_other).as_posix() == theirs.relative_to(
-            theirs_other
-        ).as_posix()
+        assert (
+            ours.relative_to(ours_other).as_posix()
+            == theirs.relative_to(theirs_other).as_posix()
+        )
 
 
 @pytest.mark.parametrize("pattern", ["*.txt", "c*", "a/*/c.txt", "*"])

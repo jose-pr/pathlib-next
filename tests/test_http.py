@@ -2,6 +2,7 @@
 http_server fixture) serving fixture_tree's directory listing. Skipped
 entirely if the http extra isn't installed.
 """
+
 import pytest
 
 pytest.importorskip("requests")
@@ -67,6 +68,7 @@ def test_recursive_glob(http_server):
     names = {p.name for p in root.glob("**/*.py")}
     assert names == {"b.py", "c.py", "d.py"}
 
+
 def test_http_exception_translation(http_server):
     # Test standard exception translation on real HTTP errors.
     # 404 client error -> FileNotFoundError
@@ -96,6 +98,7 @@ def test_http_write_put_default(monkeypatch):
         return MockResponse()
 
     import requests
+
     monkeypatch.setattr(requests.Session, "request", mock_request)
 
     p = UriPath("http://example.com/file.txt")
@@ -121,6 +124,7 @@ def test_http_write_post_configured(monkeypatch):
         return MockResponse()
 
     import requests
+
     monkeypatch.setattr(requests.Session, "request", mock_request)
 
     # Configure session with POST as the write method
@@ -148,6 +152,7 @@ def test_http_unlink(monkeypatch):
         return MockResponse()
 
     import requests
+
     monkeypatch.setattr(requests.Session, "request", mock_request)
 
     p = UriPath("http://example.com/file.txt")
@@ -175,6 +180,7 @@ def test_http_rmdir_empty(monkeypatch):
         return MockResponse()
 
     import requests
+
     monkeypatch.setattr(requests.Session, "request", mock_request)
     monkeypatch.setattr(HttpPath, "_listdir", lambda self: [])
     monkeypatch.setattr(HttpPath, "is_dir", lambda self: True)
@@ -263,6 +269,7 @@ class _MockHttpResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             import requests
+
             raise requests.exceptions.HTTPError(response=self)
 
     def close(self):
@@ -317,6 +324,7 @@ def test_listdir_no_retry_when_already_trailing_slash(monkeypatch):
 
 
 # --- Append mode tests ---
+
 
 def test_http_append_rewrite_mode_nonexistent_file(http_writable_server):
     """Append to non-existent file in rewrite mode (default).
@@ -452,8 +460,6 @@ def test_http_append_default_is_rewrite(monkeypatch):
     import requests
 
     backend = HttpBackend(
-        session=requests.Session(),
-        requests_args={},
-        write_method="PUT"
+        session=requests.Session(), requests_args={}, write_method="PUT"
     )
     assert backend.append_mode == "rewrite"

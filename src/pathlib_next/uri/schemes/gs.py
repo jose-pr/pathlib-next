@@ -36,7 +36,9 @@ class GsBackend(BaseGsBackend):
 
             kwargs = dict(self.client_kwargs)
             # Handle api_endpoint: set env var for google-cloud-storage emulator support
-            if "client_options" in kwargs and isinstance(kwargs["client_options"], dict):
+            if "client_options" in kwargs and isinstance(
+                kwargs["client_options"], dict
+            ):
                 endpoint = kwargs["client_options"].get("api_endpoint")
                 if endpoint:
                     os.environ["STORAGE_EMULATOR_HOST"] = endpoint
@@ -221,7 +223,9 @@ class GsPath(UriPath):
         if not keys:
             marker = f"{self.key}/"
             try:
-                keys.extend(blob.name for blob in self._bucket.list_blobs(prefix=marker))
+                keys.extend(
+                    blob.name for blob in self._bucket.list_blobs(prefix=marker)
+                )
             except Exception as error:
                 if not on_error(error):
                     raise

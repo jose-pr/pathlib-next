@@ -6,4 +6,3 @@ class GitLabGitPath(GitLabPath):
 
     __SCHEMES = ("git+gitlab",)
     __slots__ = ()
-

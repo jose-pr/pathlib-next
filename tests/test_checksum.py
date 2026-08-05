@@ -30,9 +30,7 @@ class _NativeChecksumMemPath(MemPath, NativeChecksum):
     __slots__ = ()
 
     def _tracking(self):
-        store = self.backend.__dict__.setdefault(
-            "_native_checksum_test_state", {}
-        )
+        store = self.backend.__dict__.setdefault("_native_checksum_test_state", {})
         return store.setdefault(
             self.as_posix(), {"checksum_calls": [], "open_calls": [], "forced": None}
         )
@@ -57,7 +55,11 @@ class _NativeChecksumMemPath(MemPath, NativeChecksum):
         return state["forced"]
 
     def supported_checksums(self):
-        return frozenset({"md5"}) if self._tracking()["forced"] is not None else frozenset()
+        return (
+            frozenset({"md5"})
+            if self._tracking()["forced"] is not None
+            else frozenset()
+        )
 
     def _open(self, mode="r", buffering=-1):
         self._tracking()["open_calls"].append(mode)
@@ -479,9 +481,7 @@ def test_quick_check_does_not_apply_to_local_to_local_pairs(tmp_path):
     os.utime(dst_dir / "a.txt", (same_time, same_time))
 
     syncer = PathSyncer(spy_checksum)  # quick_check=True (default)
-    syncer.sync(
-        pathlib_next.LocalPath(src_dir), pathlib_next.LocalPath(dst_dir)
-    )
+    syncer.sync(pathlib_next.LocalPath(src_dir), pathlib_next.LocalPath(dst_dir))
 
     # The checksum callable WAS invoked despite matching size+mtime --
     # proves quick_check's skip-the-checksum-call behavior never engaged

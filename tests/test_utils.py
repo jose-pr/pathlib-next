@@ -66,8 +66,7 @@ def test_sizeof_fmt_always_returns_str():
 
 def test_notimplemented_decorator_message():
     @utils.notimplemented
-    def some_method():
-        ...
+    def some_method(): ...
 
     try:
         some_method()
@@ -105,21 +104,22 @@ def test_sizeof_fmt_large_units():
 
 def test_filestat_methods():
     from pathlib_next.utils.stat import FileStat
-    
+
     # test __init__, settime, setmode
     st = FileStat(is_dir=False, st_size=100, st_mtime=50)
     assert st.st_size == 100
     assert st.st_mtime == 50
     assert st.is_file()
     assert not st.is_dir()
-    
+
     st.settime(123)
     assert st.st_atime == 123
     assert st.st_mtime == 123
     assert st.st_ctime == 123
-    
+
     st.setmode(0o755, isdir=False)
     import stat
+
     assert stat.S_ISREG(st.st_mode)
     assert (st.st_mode & 0o777) == 0o755
 
@@ -131,10 +131,10 @@ def test_filestat_methods():
     assert st["st_size"] == 100
     items_dict = dict(st.items())
     assert items_dict["st_size"] == 100
-    
+
     rep = repr(st)
     assert "FileStat" in rep
-    
+
     s = str(st)
     assert "st_size=100" in s
 
@@ -142,12 +142,14 @@ def test_filestat_methods():
     class FakePathWithFileStat:
         def stat(self, follow_symlinks=True):
             return st
+
     assert FileStat.from_path(FakePathWithFileStat()) is st
-    
+
     # from_path with missing raises None
     class FakePath:
         def stat(self, follow_symlinks=True):
             raise FileNotFoundError()
+
     assert FileStat.from_path(FakePath()) is None
 
     # from_path with normal stat object
@@ -156,9 +158,11 @@ def test_filestat_methods():
             self.st_mode = 0o100644
             self.st_size = 50
             self.st_mtime = 10
+
     class FakePathWithStat:
         def stat(self, follow_symlinks=True):
             return FakeStat()
+
     st_from = FileStat.from_path(FakePathWithStat())
     assert st_from.st_size == 50
     assert st_from.st_mtime == 10
@@ -171,11 +175,13 @@ def test_stat_protocol_helpers():
     class StubStatPath(Stat):
         def __init__(self, mode):
             self.mode = mode
+
         def stat(self, *, follow_symlinks=True):
             class FakeStat:
                 st_mode = self.mode
                 st_size = 0
                 st_mtime = 0
+
             return FakeStat()
 
     # Block device
@@ -210,6 +216,7 @@ def test_stat_protocol_helpers():
     class ErrStatPath(Stat):
         def stat(self, *, follow_symlinks=True):
             raise PermissionError("Access denied")
+
     p_err = ErrStatPath()
     assert not p_err.exists()
     assert not p_err.is_dir()
@@ -293,8 +300,6 @@ def test_detect_format_does_not_peek_when_extension_is_conclusive():
     assert _detect_format("a.tar", _boom) == "tar"
 
 
-
-
 @pytest.mark.skipif(
     sys.version_info >= (3, 10),
     reason="the ParamSpec fallback is only reachable on 3.9 (3.10+ has typing.ParamSpec)",
@@ -315,8 +320,7 @@ def test_paramspec_fallback_importable_without_typing_extensions():
     #
     # Runs in a subprocess with `typing_extensions` blocked so the fallback is
     # exercised for real rather than mocked.
-    probe = textwrap.dedent(
-        """
+    probe = textwrap.dedent("""
         import builtins
 
         _real_import = builtins.__import__
@@ -338,14 +342,13 @@ def test_paramspec_fallback_importable_without_typing_extensions():
         lru.invalidate(21)
         assert lru(21) == 42
         print("FALLBACK_OK")
-        """
-    )
+        """)
     result = subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True,
         text=True,
         cwd=pathlib.Path(utils.__file__).parents[3],
     )
-    assert "FALLBACK_OK" in result.stdout, (
-        f"fallback import failed:\nstdout={result.stdout}\nstderr={result.stderr}"
-    )
+    assert (
+        "FALLBACK_OK" in result.stdout
+    ), f"fallback import failed:\nstdout={result.stdout}\nstderr={result.stderr}"

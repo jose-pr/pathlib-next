@@ -3,6 +3,7 @@ with `pathlib.PurePosixPath` on the operations that are supposed to behave
 identically (see `docs/divergences.md` for the ones that deliberately
 don't -- those are out of scope here, not asserted against).
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -13,7 +14,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pathlib_next.uri import Uri
-from pathlib_next.uri.source import Source, _compose_uri, _decode_host, _remove_dot_segments, _split_authority
+from pathlib_next.uri.source import (
+    Source,
+    _compose_uri,
+    _decode_host,
+    _remove_dot_segments,
+    _split_authority,
+)
 
 # A "safe" path segment: letters/digits/-/_ only, never empty, never "."
 # or ".." -- keeps every property below unambiguous without wading into
@@ -104,7 +111,9 @@ def test_relative_to_matches_pure_posix_path(common, tail):
     base_str = _posix(common)
 
     u_child, u_base = Uri(child_str), Uri(base_str)
-    pp_child, pp_base = pathlib.PurePosixPath(child_str), pathlib.PurePosixPath(base_str)
+    pp_child, pp_base = pathlib.PurePosixPath(child_str), pathlib.PurePosixPath(
+        base_str
+    )
 
     u_rel = u_child.relative_to(u_base)
     pp_rel = pp_child.relative_to(pp_base)
@@ -139,7 +148,9 @@ def test_relative_to_unrelated_raises_on_both(a, b):
 def test_match_trailing_segment_wildcard_matches_pure_posix_path(segs):
     path_str = _posix(segs)
     pattern = "*" + segs[-1][1:] if len(segs[-1]) > 1 else "*"
-    assert Uri(path_str).match(pattern) == pathlib.PurePosixPath(path_str).match(pattern)
+    assert Uri(path_str).match(pattern) == pathlib.PurePosixPath(path_str).match(
+        pattern
+    )
 
 
 @given(segs=nonempty_segments_list)
@@ -261,7 +272,15 @@ def test_uri_parse_uri_matches_oracle_components(uri):
     how they're wired together is still caught."""
     try:
         source, path, query, fragment = Uri._parse_uri(uri)
-        fast = (source.scheme, source.userinfo, source.host, source.port, path, str(query), fragment)
+        fast = (
+            source.scheme,
+            source.userinfo,
+            source.host,
+            source.port,
+            path,
+            str(query),
+            fragment,
+        )
     except Exception as e:
         fast = ("EXC", type(e).__name__)
     try:
@@ -285,10 +304,14 @@ _compose_host_st = st.one_of(
 )
 _compose_port_st = st.one_of(st.none(), st.integers(min_value=0, max_value=99999))
 _compose_query_st = st.one_of(
-    st.none(), st.just(""), st.text(alphabet="abcXYZ012=&%20+!$&'()*+,;=:@/?~", max_size=20)
+    st.none(),
+    st.just(""),
+    st.text(alphabet="abcXYZ012=&%20+!$&'()*+,;=:@/?~", max_size=20),
 )
 _compose_frag_st = st.one_of(
-    st.none(), st.just(""), st.text(alphabet="abcXYZ012%20-_!$&'()*+,;=:@/?~", max_size=15)
+    st.none(),
+    st.just(""),
+    st.text(alphabet="abcXYZ012%20-_!$&'()*+,;=:@/?~", max_size=15),
 )
 
 
@@ -322,14 +345,18 @@ def test_uri_format_parsed_parts_matches_uricompose(
 ):
     source = Source(scheme, userinfo, host, port)
     try:
-        fast = Uri._format_parsed_parts(source, path, query, fragment, sanitize=sanitize)
+        fast = Uri._format_parsed_parts(
+            source, path, query, fragment, sanitize=sanitize
+        )
     except Exception as e:
         fast = ("EXC", type(e).__name__)
     try:
         oracle = _oracle_format_parsed_parts(source, path, query, fragment, sanitize)
     except Exception as e:
         oracle = ("EXC", type(e).__name__)
-    assert fast == oracle, f"source={source!r} path={path!r} query={query!r} fragment={fragment!r} sanitize={sanitize}"
+    assert (
+        fast == oracle
+    ), f"source={source!r} path={path!r} query={query!r} fragment={fragment!r} sanitize={sanitize}"
 
 
 @given(
@@ -348,19 +375,30 @@ def test_uri_format_parsed_parts_matches_uricompose(
     fragment=_compose_frag_st,
 )
 @settings(max_examples=300)
-def test_compose_uri_matches_uricompose_direct(scheme, userinfo, host, port, path, query, fragment):
+def test_compose_uri_matches_uricompose_direct(
+    scheme, userinfo, host, port, path, query, fragment
+):
     """`_compose_uri` used directly (not via the truthy-filtering
     `_format_parsed_parts` wrapper) -- this is DavPath._wire_uri()'s call
     shape: None-checked, not truthy-filtered."""
     try:
-        fast = _compose_uri(scheme, userinfo, host, port, path, query or None, fragment or None)
+        fast = _compose_uri(
+            scheme, userinfo, host, port, path, query or None, fragment or None
+        )
     except Exception as e:
         fast = ("EXC", type(e).__name__)
     try:
         oracle = uritools.uricompose(
-            scheme=scheme, userinfo=userinfo, host=host, port=port,
-            path=path, query=query or None, fragment=fragment or None,
+            scheme=scheme,
+            userinfo=userinfo,
+            host=host,
+            port=port,
+            path=path,
+            query=query or None,
+            fragment=fragment or None,
         )
     except Exception as e:
         oracle = ("EXC", type(e).__name__)
-    assert fast == oracle, f"scheme={scheme!r} userinfo={userinfo!r} host={host!r} port={port!r}"
+    assert (
+        fast == oracle
+    ), f"scheme={scheme!r} userinfo={userinfo!r} host={host!r} port={port!r}"

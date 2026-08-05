@@ -1,4 +1,5 @@
 """`data:` scheme (RFC 2397): read-only, no server/backend involved."""
+
 import pytest
 
 from pathlib_next.uri import UriPath

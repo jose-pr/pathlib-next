@@ -28,7 +28,9 @@ class _TarBackend(_ArchiveBackend):
 
     def member_stat(self, path):
         info = self.handle.getmember(path)
-        return FileStat(st_size=info.size, st_mtime=int(info.mtime), is_dir=info.isdir())
+        return FileStat(
+            st_size=info.size, st_mtime=int(info.mtime), is_dir=info.isdir()
+        )
 
 
 class TarUri(ArchiveUri):
