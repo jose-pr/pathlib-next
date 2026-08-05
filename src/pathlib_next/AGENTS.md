@@ -141,7 +141,20 @@ pathlib_next`.
   properties. `exists()`/the `is_*` methods swallow `OSError`/`ValueError`
   from `stat()` and report `False` rather than propagating (pathlib parity).
 - **`fs.Chmod`** — `Protocol`. `chmod(mode, *, follow_symlinks=True)` (not
-  implemented by default); derives `lchmod(mode)`.
+  implemented by default); derives `lchmod(mode)`. `mode` may be a `str`,
+  parsed as **octal** (`"0755"` == `"755"` == `0o755`); a non-octal digit
+  raises `ValueError`. Each backend overrides `chmod()` directly (each has
+  real per-scheme logic), so all of them normalize through
+  `utils.as_mode()` — the shared helper is what keeps the base from
+  drifting between them.
+  Also `chown(uid=None, gid=None, *, follow_symlinks=True)` over a
+  `_chown(uid, gid, *, follow_symlinks=True)` backend primitive (not
+  implemented by default). Extension: `pathlib` has `owner()`/`group()`
+  readers but no writer. `None` leaves a field unchanged and `-1` is an
+  alias for it; an `int` is an id, a `str` is a name. `chown()` normalizes
+  via `utils.as_owner()` and short-circuits when nothing would change, so
+  `_chown()` always receives a canonical pair and only converts to its own
+  wire spelling (`-1` for `os.chown`, an omitted attr for SFTP).
 - **`io.BinaryOpen`** — `Protocol`. `_open(mode="r", buffering=-1) ->
   io.IOBase` (not implemented by default; must yield a **binary** stream).
   Derives `open(mode="r", buffering=-1, encoding=None, errors=None,
