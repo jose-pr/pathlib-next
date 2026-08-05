@@ -232,12 +232,13 @@ class FtpPath(UriPath):
             target = Uri(self.parent, target)
         self._ftpclient.rename(self.path, target.path)
 
-    def chmod(self, mode, *, follow_symlinks=True):
+    def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # SITE CHMOD is a non-standard FTP extension; pyftpdlib and many real
         # servers do not support it.  Convert any server rejection (error_perm)
         # to NotImplementedError so that path.py's copy() silently skips it.
         if not follow_symlinks:
             raise NotImplementedError("chmod(follow_symlinks=False)")
+        mode = _utils.as_mode(mode)
         try:
             self._ftpclient.voidcmd(f"SITE CHMOD {mode:o} {self.path}")
         except _ftplib.error_perm:
