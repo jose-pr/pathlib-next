@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-08-04
+
+### Added
+- **`symlink_to(..., force=True)`** — replace an existing entry at the link
+  path instead of failing. SFTP has no atomic "replace symlink", so every
+  consumer was re-implementing the unlink-then-symlink dance. Implemented at
+  the `Path` layer over a new `_symlink_to()` backend primitive (the same
+  wrapper/primitive split as `_mkdir`/`mkdir`), so all backends inherit it.
+  Removes a **non-directory** entry only, and is documented as non-atomic.
+- **`chown(uid=None, gid=None)`** over a new `_chown()` backend primitive.
+  `chown` was the one POSIX permission attribute `stat()` could read but
+  nothing could write back. `None` means "leave unchanged"; the normalization
+  lives on `Path` so each backend receives an already-canonical pair rather
+  than re-deriving the mapping (`os.chown` wants `-1`, SFTP omits the field).
+- **`chmod()` accepts a string octal mode** (`"0755"`), normalized with an
+  explicit base-8 parse. A mode string outside `[0-7]` raises rather than
+  being coerced — `int("0755")` in *decimal* is a different mode, which is
+  exactly the wrong-but-plausible failure this guards.
+
+### Changed
+- Adopted `black`, pinned to the 3.9 floor; `src/` and `tests/` reformatted.
+
 ## [0.9.0] - 2026-07-29
 
 ### Added
@@ -710,7 +732,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/jose-pr/pathlib-next/compare/v0.9.0...v0.9.1
 [0.8.6]: https://github.com/jose-pr/pathlib-next/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/jose-pr/pathlib-next/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/jose-pr/pathlib-next/compare/v0.8.3...v0.8.4
