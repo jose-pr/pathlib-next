@@ -315,9 +315,16 @@ def test_sftp_backend_connect_and_client():
         transport = backend.transport(source)
         assert transport is mock_transport
         mock_ssh.set_missing_host_key_policy.assert_called_with("policy")
-        mock_ssh.connect.assert_called_with(
-            timeout=10, hostname="host", port=2222, username="user", password="pass"
-        )
+        # Assert the arguments this test is ABOUT, not the whole call: the
+        # backend also merges the developer's real ~/.ssh/config, so a machine
+        # with an `identityfile` entry adds `key_filename=` and an exact-call
+        # assertion fails there while passing on a key-less CI runner.
+        connect_kwargs = mock_ssh.connect.call_args.kwargs
+        assert connect_kwargs["timeout"] == 10
+        assert connect_kwargs["hostname"] == "host"
+        assert connect_kwargs["port"] == 2222
+        assert connect_kwargs["username"] == "user"
+        assert connect_kwargs["password"] == "pass"
 
         # Test client()
         client = backend.client(source)
