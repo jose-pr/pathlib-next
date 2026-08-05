@@ -1,5 +1,6 @@
 import collections
 import functools as _functools
+import operator as _operator
 import time as _time
 import typing as _ty
 from email.utils import parsedate as _parsedate
@@ -139,6 +140,76 @@ def as_error_handler(
         ignore_error = default
     result = bool(ignore_error)
     return lambda *args, **kwargs: result
+
+
+def as_mode(mode: _ty.Union[int, str]) -> int:
+    """Normalize a permission `mode` to an int, parsing `str` as **octal**.
+
+    `chmod("0755")` is the spelling everyone actually writes a mode in --
+    `chmod(1)`, Ansible, Dockerfiles, every shell script -- and stdlib
+    refuses it (`TypeError: 'str' object cannot be interpreted as an
+    integer`). This library accepts it, which makes the base explicit and
+    non-negotiable rather than leaving it to each call site.
+
+    **Why base 8 is mandatory here, and never a plain `int()`:** `"0755"`
+    parsed as decimal is 755, which is `0o1363` -- a different *and valid*
+    mode. Nothing would raise; the file would just end up with permissions
+    nobody intended. That is exactly why stdlib declines strings, so the
+    only safe way to accept them is to parse them one way, in one place.
+
+    Accepts an optional `0o`/`0O` prefix. Anything outside `[0-7]` raises
+    `ValueError` rather than being coerced -- a mode is not a number that
+    happens to be written in octal, it is octal.
+
+    An `int` passes through untouched (including `0o755`, which *is* an
+    int by the time it gets here -- the literal is resolved by the parser,
+    so `chmod(0o755)` and `chmod("0755")` agree).
+    """
+    if isinstance(mode, str):
+        text = mode.strip()
+        if text[:2].lower() == "0o":
+            text = text[2:]
+        if not text or any(character not in "01234567" for character in text):
+            raise ValueError(f"invalid octal mode: {mode!r}")
+        return int(text, 8)
+    return _operator.index(mode)
+
+
+#: Canonical "leave this ownership field unchanged" sentinel for `chown()`.
+#: `None` is the API-level spelling; `-1` is accepted too because that is
+#: `os.chown`'s own sentinel and callers coming from it reach for it.
+UNCHANGED = None
+
+
+def as_owner(
+    uid: _ty.Union[int, str, None], gid: _ty.Union[int, str, None]
+) -> "_ty.Tuple[_ty.Optional[int], _ty.Optional[int]]":
+    """Normalize a `chown()` uid/gid pair to canonical `int | None`.
+
+    `None` means "leave unchanged". `-1` is accepted as an alias for it,
+    since that is how `os.chown` spells the same thing and callers arriving
+    from the stdlib reach for it out of habit.
+
+    The point of centralizing this is that **every backend spells
+    "unchanged" differently** -- `os.chown` wants `-1`, SFTP `setstat` wants
+    the field omitted from the attrs entirely, and other middlewares want
+    `None`. If each scheme translated the caller's input itself, that is
+    three chances for the semantics to disagree. Normalizing once on `Path`
+    means a backend's `_chown()` receives an already-canonical pair and only
+    has to convert to its own wire spelling.
+
+    A `str` is passed through as a *name* (`shutil.chown` accepts user and
+    group names, and it is useful not to force a caller to resolve them) --
+    backends that cannot resolve names should say so rather than guess.
+    """
+
+    def _one(value):
+        if value is None or isinstance(value, str):
+            return value
+        value = _operator.index(value)
+        return None if value == -1 else value
+
+    return _one(uid), _one(gid)
 
 
 from .checksum import md5 as md5, sha256 as sha256

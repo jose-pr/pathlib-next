@@ -49,10 +49,22 @@ class FileUri(UriPath):
     def mkdir(self, mode=511, parents=False, exist_ok=False):
         return self.filepath.mkdir(mode, parents, exist_ok)
 
-    def chmod(self, mode, *, follow_symlinks=True):
+    def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # LocalPath.chmod() itself shims the 3.10+-only follow_symlinks=
-        # kwarg for pathlib.Path (see fspath.py), so just delegate.
+        # kwarg for pathlib.Path (see fspath.py) and normalizes a string
+        # octal mode, so just delegate.
         return self.filepath.chmod(mode, follow_symlinks=follow_symlinks)
+
+    def _chown(
+        self,
+        uid: int | str | None,
+        gid: int | str | None,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        # Delegate to LocalPath's primitive; chown() has already
+        # canonicalized the pair, so pass it through untouched.
+        return self.filepath._chown(uid, gid, follow_symlinks=follow_symlinks)
 
     def unlink(self, missing_ok=False):
         return self.filepath.unlink(missing_ok)

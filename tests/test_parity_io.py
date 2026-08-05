@@ -446,3 +446,52 @@ def test_symlink_to_relative_target_stays_relative(tmp_path):
     # silently absolutize a relative target.
     _symlink_or_skip(link, "target.txt")
     assert link.readlink().as_posix() == "target.txt"
+
+
+# --- chmod string octal / chown (2026-08-04 findings) ---------------------
+
+
+def test_local_chmod_accepts_string_octal_mode(tmp_path):
+    import stat as _stat
+
+    root = pathlib_next.LocalPath(tmp_path)
+    f = root / "f.txt"
+    f.write_text("x")
+
+    f.chmod("0644")
+    string_mode = _stat.S_IMODE(f.stat().st_mode)
+    f.chmod(0o644)
+    assert _stat.S_IMODE(f.stat().st_mode) == string_mode
+
+    with pytest.raises(ValueError):
+        f.chmod("0899")
+
+
+@pytest.mark.skipif(not hasattr(os, "chown"), reason="POSIX-only (os.chown)")
+def test_local_chown_leaves_unspecified_field_alone(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    f = root / "f.txt"
+    f.write_text("x")
+    before = f.stat()
+
+    # Chowning to the values it already has is the one call guaranteed to be
+    # permitted as an unprivileged user, and it still exercises the whole
+    # normalize -> _chown -> shutil.chown path.
+    f.chown(uid=before.st_uid)
+    after = f.stat()
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+    f.chown(gid=before.st_gid)
+    after = f.stat()
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+def test_local_chown_no_op_needs_no_privileges(tmp_path):
+    # Both fields "unchanged" short-circuits before touching the backend, so
+    # this must work everywhere -- including Windows, which has no os.chown.
+    root = pathlib_next.LocalPath(tmp_path)
+    f = root / "f.txt"
+    f.write_text("x")
+    f.chown()
+    f.chown(-1, -1)
+    assert f.read_text() == "x"

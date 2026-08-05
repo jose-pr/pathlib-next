@@ -19,11 +19,13 @@ class _FakeSock:
 
 
 class _FakeAttr:
-    def __init__(self, filename, st_mode=0):
+    def __init__(self, filename, st_mode=0, st_uid=0, st_gid=0):
         self.filename = filename
         self.st_mode = st_mode
         self.st_size = 0
         self.st_mtime = 0
+        self.st_uid = st_uid
+        self.st_gid = st_gid
 
 
 class _FakeSftpClient:
@@ -31,12 +33,20 @@ class _FakeSftpClient:
         self.sock = _FakeSock(True)
         self.rename_calls = []
         self.chmod_calls = []
+        self.chown_calls = []
+        # Owner reported by stat(), so a partial chown() (one field left
+        # "unchanged") has something to read back for the other field.
+        self.stat_uid = 501
+        self.stat_gid = 20
 
     def rename(self, path, target):
         self.rename_calls.append((path, target))
 
     def chmod(self, path, mode):
         self.chmod_calls.append((path, mode))
+
+    def chown(self, path, uid, gid):
+        self.chown_calls.append((path, uid, gid))
 
     def listdir(self, path):
         return ["a", "b"]
@@ -45,7 +55,7 @@ class _FakeSftpClient:
         return [_FakeAttr("a"), _FakeAttr("b")]
 
     def stat(self, path):
-        return object()
+        return _FakeAttr(path, st_uid=self.stat_uid, st_gid=self.stat_gid)
 
     def lstat(self, path):
         return self.stat(path)
@@ -941,3 +951,93 @@ def test_pathsyncer_sftp_falls_back_to_streaming_when_backend_unsupported():
     from pathlib_next.utils.sync import SyncEvent
 
     assert SyncEvent.Copy not in events
+
+
+# --- chown: sentinel normalization (2026-08-04 finding) -------------------
+#
+# SFTPv3's setstat sends uid/gid as a *paired* attribute, so there is no way
+# to set only one. SftpPath._chown() therefore reads the current owner for
+# whichever field the caller left as "unchanged" -- these pin that, since a
+# backend that silently sent 0 (or -1) instead would chown to root.
+
+
+def test_chown_sets_both_fields():
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    p.chown(1000, 1000)
+    assert backend._client.chown_calls == [("/a.txt", 1000, 1000)]
+
+
+def test_chown_uid_only_reads_current_gid():
+    backend = _FakeBackend()
+    backend._client.stat_uid, backend._client.stat_gid = 501, 20
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    p.chown(uid=1000)
+    # gid must come from stat(), not a 0/-1 guess.
+    assert backend._client.chown_calls == [("/a.txt", 1000, 20)]
+
+
+def test_chown_gid_only_reads_current_uid():
+    backend = _FakeBackend()
+    backend._client.stat_uid, backend._client.stat_gid = 501, 20
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    p.chown(gid=1000)
+    assert backend._client.chown_calls == [("/a.txt", 501, 1000)]
+
+
+def test_chown_minus_one_is_the_unchanged_sentinel():
+    backend = _FakeBackend()
+    backend._client.stat_uid, backend._client.stat_gid = 501, 20
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    # -1 is os.chown's spelling of "leave alone"; it must mean the same
+    # thing here rather than reaching the wire as a literal -1.
+    p.chown(-1, 1000)
+    assert backend._client.chown_calls == [("/a.txt", 501, 1000)]
+
+
+def test_chown_all_unchanged_is_a_no_op():
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    p.chown()
+    p.chown(-1, -1)
+    assert backend._client.chown_calls == []
+
+
+def test_chown_uid_zero_is_not_treated_as_unset():
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    # uid 0 is root -- a falsy check instead of an `is None` check would
+    # silently drop this and leave the file's owner untouched.
+    p.chown(0, 0)
+    assert backend._client.chown_calls == [("/a.txt", 0, 0)]
+
+
+def test_chown_names_not_supported_over_sftp():
+    p = _sftp("sftp://host/a.txt")
+    with pytest.raises(NotImplementedError):
+        p.chown("root", "wheel")
+
+
+def test_chown_follow_symlinks_false_raises_notimplemented():
+    p = _sftp("sftp://host/a.txt")
+    with pytest.raises(NotImplementedError):
+        p.chown(1000, 1000, follow_symlinks=False)
+
+
+# --- chmod: string octal mode (2026-08-04 finding) ------------------------
+
+
+def test_chmod_accepts_string_octal_mode():
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    p.chmod("0644")
+    p.chmod("644")
+    # Both spellings must reach the wire as the same int the octal literal
+    # means -- decimal 644 (0o1204) would be a different, valid mode.
+    assert backend._client.chmod_calls == [("/a.txt", 0o644), ("/a.txt", 0o644)]
+
+
+def test_chmod_rejects_non_octal_digits():
+    p = _sftp("sftp://host/a.txt")
+    with pytest.raises(ValueError):
+        p.chmod("0899")
