@@ -288,7 +288,10 @@ PurePathLike = _ty.Union[str, Pathname]
 #     and `read_text`/`write_text`'s `newline=` is 3.13+ in CPython, and
 #     `rglob`'s `include_hidden=`/`recursive=`/`dironly=` extensions never
 #     existed there, so on the 3.9 floor the stdlib implementation rejects
-#     keywords this library's protocols promise.
+#     keywords this library's protocols promise. `symlink_to`'s `force=`
+#     is the same shape: no stdlib version has ever accepted it, so
+#     without this guard `LocalPath().symlink_to(t, force=True)` raises
+#     TypeError while every other backend honors it.
 #
 # `glob`/`walk`/`_scandir` are deliberately absent: `LocalPath` overrides
 # them itself (with local-specific behavior that must be kept), so they are
@@ -300,6 +303,7 @@ _OPERATION_NAMES = (
     "rglob",
     "read_text",
     "write_text",
+    "symlink_to",
 )
 
 
@@ -682,6 +686,66 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
     def rename(self, target: "_ty.Self | str"):
         """Rename this file or directory to the given target."""
         ...
+
+    @_utils.notimplemented
+    def _symlink_to(self, target: "_ty.Self", target_is_directory: bool = False):
+        """Create a symlink at this path pointing at `target`.
+
+        The backend primitive behind `symlink_to()`, in the same shape as
+        `_mkdir`/`_open`: implement only this, and the generic conveniences
+        (`force=`) come for free. `target` has already been normalized to a
+        path object of this class by `symlink_to()` -- accepting `str` and
+        turning it into a path is the wrapper's job, not the primitive's.
+
+        Implementations take the raw target string from the path object the
+        way their own backend needs it (`Uri.path` for wire protocols,
+        `os.fspath()`/`as_posix()` locally); it never carries a scheme or
+        host prefix, and a relative target stays relative.
+        """
+        ...
+
+    def symlink_to(
+        self,
+        target: "_ty.Self | str",
+        target_is_directory: bool = False,
+        *,
+        force: bool = False,
+    ):
+        """Make this path a symlink pointing to `target`.
+
+        Signature-compatible with `pathlib.Path.symlink_to()`; `force` is a
+        pathlib_next extension (see `docs/divergences.md`).
+
+        With `force=True`, an existing entry at *this* path is removed
+        first. No filesystem or transport offers an atomic "replace a
+        symlink" operation, so this is an unlink-then-symlink sequence and
+        is therefore **not** atomic: between the two steps the path does not
+        exist, and a concurrent writer can win the race. It is a
+        convenience, not a locking primitive.
+
+        Only a non-directory entry is removed -- an existing *directory* at
+        the link path is left alone and the underlying `FileExistsError`
+        (or the backend's equivalent) propagates. Silently deleting a
+        directory tree is never what `force=` on a symlink call is asking
+        for.
+        """
+        # Normalize a str target to a path object, so the primitive only
+        # ever handles one type -- same `type(self)(target)` form as
+        # copy()/move() use for their destination, for consistency.
+        if isinstance(target, str):
+            target = type(self)(target)
+        if force:
+            try:
+                self.unlink(missing_ok=True)
+            except (IsADirectoryError, PermissionError, OSError) as error:
+                # A directory at the link path (POSIX: IsADirectoryError;
+                # Windows and several remote backends: PermissionError or a
+                # plain OSError) is not something force= should remove.
+                # Let the symlink attempt below raise the error that
+                # actually describes the conflict.
+                if not self.is_dir():
+                    raise error
+        return self._symlink_to(target, target_is_directory)
 
     def copy(
         self,

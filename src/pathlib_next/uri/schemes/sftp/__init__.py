@@ -68,7 +68,6 @@ class BaseSftpBackend(object):
 # importing this scheme never pulls paramiko in just to have the sentinel.
 from ._sshconfig import _DEFAULT_SSH_CONFIG
 
-
 # --- backend selection -----------------------------------------------------
 # Precedence, highest to lowest (each layer only consulted if the one above
 # doesn't apply): explicit `backend=` kwarg on construction (already how
@@ -339,15 +338,23 @@ class SftpPath(UriPath):
             target = Uri(self.parent, target)
         return self._sftpclient.rename(self.path, target.path)
 
-    def symlink_to(self, target: "SftpPath | Uri | str", target_is_directory=False):
+    def _symlink_to(self, target: "SftpPath | Uri", target_is_directory=False):
+        # The backend primitive only -- `Path.symlink_to()` owns the
+        # str->path normalization and the `force=` unlink-then-symlink
+        # sequence, so this stays one wire call.
+        #
+        # `.path`, not as_posix(): Uri.as_posix() prefixes "host:" for the
+        # sftp wire protocol, which only wants the raw path -- same reason
+        # rename() above uses it, and what keeps a relative target from
+        # becoming "host:real.txt".
+        #
         # target_is_directory is a Windows-local-filesystem-only hint
         # (pathlib.Path.symlink_to() signature parity) -- accepted and
         # ignored, same as every other non-local scheme. Core SFTPv3
         # operation on both backends, no capability gate needed. Both
         # libraries' symlink() already auto-correct for OpenSSH's
         # well-known swapped wire argument order internally.
-        target_path = target.path if isinstance(target, Uri) else str(target)
-        self._sftpclient.symlink(target_path, self.path)
+        self._sftpclient.symlink(target.path, self.path)
 
     def readlink(self) -> "SftpPath":
         # Returns the raw target string, unresolved -- relative targets
@@ -362,9 +369,7 @@ class SftpPath(UriPath):
 
     def hardlink_to(self, target: "SftpPath | Uri | str"):
         if not self.backend.supports_hardlink:
-            raise NotImplementedError(
-                "hardlink_to() requires the asyncssh backend"
-            )
+            raise NotImplementedError("hardlink_to() requires the asyncssh backend")
         target_path = target.path if isinstance(target, Uri) else str(target)
         self._sftpclient.link(target_path, self.path)
 
