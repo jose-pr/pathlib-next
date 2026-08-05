@@ -18,6 +18,10 @@ That bug has two opposite modes, and both are covered here:
   `read_text`/`write_text`'s `newline=` is 3.13+, and `rglob`'s
   `include_hidden=`/`recursive=`/`dironly=` extensions never existed in
   stdlib at all. On the 3.9 floor those keywords raise `TypeError`.
+  `symlink_to`'s `force=` is the same mode in its most permanent form: no
+  stdlib version has ever accepted it, so the guard is what keeps
+  `force=True` from raising `TypeError` on local-backed classes while
+  every remote backend honors it.
 
 The critical assertion style here is **which implementation ran**
 (`__module__`), not merely "it did not raise": a does-it-crash test passes
@@ -39,7 +43,15 @@ from pathlib_next.mempath import MemPath
 
 # Every operation whose implementation must come from pathlib_next no matter
 # where stdlib sits in a subclass's MRO.
-GUARDED = ("copy", "move", "exists", "rglob", "read_text", "write_text")
+GUARDED = (
+    "copy",
+    "move",
+    "exists",
+    "rglob",
+    "read_text",
+    "write_text",
+    "symlink_to",
+)
 
 
 def _impl_module(cls, name):

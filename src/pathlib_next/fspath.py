@@ -148,6 +148,18 @@ class LocalPath(
         # available on every supported Python version.
         return _proto.Path.move(self, target, overwrite=overwrite)
 
+    def _symlink_to(self, target, target_is_directory: bool = False):
+        # `symlink_to` is in _OPERATION_NAMES, so the generic
+        # `Path.symlink_to()` (which owns `force=`) is what resolves on
+        # LocalPath -- it delegates the actual link creation here, and
+        # stdlib's own implementation is reached explicitly via super().
+        # Unlike every remote scheme, target_is_directory is meaningful
+        # here: it is the Windows-only flag pathlib forwards to
+        # os.symlink(). stdlib accepts any os.PathLike, so the normalized
+        # path object goes straight through -- and a relative target stays
+        # relative, exactly as before.
+        return super().symlink_to(target, target_is_directory)
+
     def stat(self, *, follow_symlinks=True):
         # pathlib.Path.stat() (next in MRO via WindowsPath/PosixPath) only
         # accepts follow_symlinks= on 3.10+; below that, lstat() is the

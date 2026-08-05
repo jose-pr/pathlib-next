@@ -267,7 +267,9 @@ def test_copy_progress_hook_fires_on_path_copy(tmp_path):
     dst = root / "dst.bin"
 
     calls = []
-    src.copy(dst, progress=lambda path, copied, total: calls.append((path, copied, total)))
+    src.copy(
+        dst, progress=lambda path, copied, total: calls.append((path, copied, total))
+    )
 
     assert calls
     assert all(path == src for path, _, _ in calls)
@@ -335,3 +337,112 @@ def test_move_recursive_fallback(tmp_path):
     assert not src.exists()
     assert (dst / "f1.txt").read_text() == "1"
     assert (dst / "sub" / "f2.txt").read_text() == "2"
+
+
+# --- symlink_to(force=) ---------------------------------------------------
+#
+# `force=` is a pathlib_next extension (docs/divergences.md): stdlib's
+# symlink_to() raises FileExistsError when something is already at the link
+# path, and every consumer that wanted "replace it" re-implemented the same
+# unlink-then-symlink dance. Because no stdlib version accepts the keyword,
+# LocalPath only honors it via the `_OPERATION_NAMES` guard -- so these run
+# against LocalPath deliberately: they are the regression that the guard,
+# and the generic `symlink_to`/`_symlink_to` split, actually took effect on
+# the class where stdlib would otherwise win.
+
+
+def _symlink_or_skip(link, target):
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink unavailable: {error}")
+
+
+def test_symlink_to_without_force_matches_stdlib(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "target.txt").write_text("target")
+    link = root / "link"
+    _symlink_or_skip(link, root / "target.txt")
+
+    assert link.is_symlink()
+    assert link.read_text() == "target"
+
+    # Default is stdlib-exact: an existing entry is never removed.
+    with pytest.raises(FileExistsError):
+        link.symlink_to(root / "target.txt")
+
+
+def test_symlink_to_force_replaces_existing_symlink(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "a.txt").write_text("a")
+    (root / "b.txt").write_text("b")
+    link = root / "link"
+    _symlink_or_skip(link, root / "a.txt")
+    assert link.read_text() == "a"
+
+    link.symlink_to(root / "b.txt", force=True)
+    assert link.is_symlink()
+    assert link.read_text() == "b"
+
+
+def test_symlink_to_force_replaces_existing_regular_file(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "target.txt").write_text("target")
+    link = root / "link"
+    link.write_text("i am a real file")
+    assert not link.is_symlink()
+
+    link.symlink_to(root / "target.txt", force=True)
+    assert link.is_symlink()
+    assert link.read_text() == "target"
+
+
+def test_symlink_to_force_on_missing_path_is_plain_create(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "target.txt").write_text("target")
+    link = root / "link"
+
+    # force= must not require the path to exist -- unlink(missing_ok=True).
+    try:
+        link.symlink_to(root / "target.txt", force=True)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink unavailable: {error}")
+    assert link.is_symlink()
+    assert link.read_text() == "target"
+
+
+def test_symlink_to_force_refuses_to_remove_a_directory(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "target.txt").write_text("target")
+    link = root / "link"
+    link.mkdir()
+    (link / "keep.txt").write_text("keep")
+
+    # force= replaces an entry, it does not delete a tree. The directory
+    # and its contents must survive, and the call must still fail.
+    with pytest.raises(OSError):
+        link.symlink_to(root / "target.txt", force=True)
+    assert link.is_dir()
+    assert (link / "keep.txt").read_text() == "keep"
+
+
+def test_symlink_to_accepts_str_target(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "target.txt").write_text("target")
+    link = root / "link"
+
+    # A str target is normalized to a path object before reaching the
+    # backend primitive (same `type(self)(target)` form copy()/move() use).
+    _symlink_or_skip(link, str(root / "target.txt"))
+    assert link.read_text() == "target"
+
+
+def test_symlink_to_relative_target_stays_relative(tmp_path):
+    root = pathlib_next.LocalPath(tmp_path)
+    (root / "target.txt").write_text("target")
+    link = root / "link"
+
+    # readlink() reports the stored target as-is, so normalization must not
+    # silently absolutize a relative target.
+    _symlink_or_skip(link, "target.txt")
+    assert link.readlink().as_posix() == "target.txt"
