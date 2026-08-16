@@ -26,6 +26,17 @@ pathlib_next`.
   (abstract), `match(pattern, *, case_sensitive=None)`,
   `full_match(pattern, *, case_sensitive=None)`, `as_posix()`,
   `has_glob_pattern()`. `as_uri()` is abstract on `Pathname` itself.
+  - `__eq__`/`__hash__` are supplied by default, keyed on
+    `(type(self), tuple(self.segments))` — exact type, so a subclass never
+    compares equal to its base. Classes mixing in `pathlib.PurePath`
+    (`PosixPathname`, `WindowsPathname`, `LocalPath`) keep stdlib's
+    equality instead, since `PurePath` precedes `Pathname` in their MRO;
+    `Uri` defines its own over `as_uri()`. Override both together if your
+    subclass needs a different identity.
+  - `is_relative_to(other)` parses a `str` `other` standalone, via
+    `self.with_segments(other)` — the same rule as CPython's
+    `self.with_segments(other)`, and it preserves per-instance state such
+    as `MemPath`'s backend.
 - **`Path(Pathname, Chmod, Stat, BinaryOpen)`** — base class for I/O paths.
   `Path(*args)` (the bare class, not a subclass) always constructs a
   `LocalPath` (`fspath.py`) — the real local filesystem. Adds:
@@ -204,7 +215,10 @@ extra that depends on it).
   `suffix`, `stem`, `parent`. Methods: `as_uri(sanitize=False)` (sanitize
   strips password from userinfo before formatting), `with_source(source)`,
   `with_segments(*segments)`, `with_path(path)`, `with_query(query)`,
-  `with_fragment(fragment)`, `is_absolute()`, `is_relative_to(other)`,
+  `with_fragment(fragment)`, `is_absolute()`, `is_relative_to(other)`
+  (a `str` `other` is parsed standalone as `Uri(other)`, matching
+  `relative_to()`; an `other` with no authority is compatible with any
+  `self.source`, so `Uri("http://h/a/b").is_relative_to("/a")` is `True`),
   `relative_to(other, *, walk_up=False)`, `is_local()` (delegates to
   `Source.is_local()` — does a DNS lookup, cached per `Source`),
   `as_posix()` (`user@host:path` / `host:path` form when a source is

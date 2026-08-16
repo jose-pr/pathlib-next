@@ -432,7 +432,16 @@ class Uri(Pathname):
 
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
-        other = other if isinstance(other, Uri) else Uri(self, _ROOT, other)
+        # Uri(other), NOT Uri(self, _ROOT, other): anchoring a str `other`
+        # at self's root turned `Uri("a/b").is_relative_to("a")` into a
+        # comparison against "/a" and answered False, disagreeing with the
+        # object form of the same call. `relative_to()` below already
+        # parsed a str standalone; this matches it and CPython.
+        # The same-authority case still works: a standalone parse leaves
+        # `other.source` empty, which the guard below treats as compatible
+        # with any `self.source`, and the segment prefix compare is
+        # unaffected -- `Uri("http://h/a/b").is_relative_to("/a")` is True.
+        other = other if isinstance(other, Uri) else Uri(other)
         if not (
             (other.source == self.source)
             or not (bool(self.source) and bool(other.source))
@@ -717,6 +726,3 @@ class UriPath(Uri, Path):
     def iterdir(self) -> "_ty.Iterator[Self]":
         for name, stat in self._scandir():
             yield self._make_child_relpath(name, stat_hint=stat)
-
-
-_ROOT = Uri("/")

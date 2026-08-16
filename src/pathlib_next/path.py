@@ -187,8 +187,34 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def is_relative_to(self, other: _ty.Self | str):
         """Return True if the path is relative to another path or False."""
         cls = type(self)
-        other = other if isinstance(other, cls) else cls(self, other)
+        # with_segments(other), NOT cls(self, other): joining `other` under
+        # `self` first turned `MemPath("a/b").is_relative_to("a")` into a
+        # comparison against "a/b/a" and answered False, while the object
+        # form of the same call answered True. CPython parses `other`
+        # standalone (`self.with_segments(other)`) and so do we -- via
+        # with_segments rather than the bare constructor so per-instance
+        # state a subclass carries (MemPath's backend) survives.
+        other = other if isinstance(other, cls) else self.with_segments(other)
         return other == self or other in self.parents
+
+    def __eq__(self, other: object) -> bool:
+        """Compare by (exact type, segments).
+
+        The ABC previously defined no equality at all, so every pure
+        subclass that didn't hand-write one -- including `MemPath`, the
+        documented reference exemplar -- compared by identity. That made
+        `is_relative_to()` (which decides via `==`) silently return False
+        for every subclass, and broke paths as dict keys or set members.
+        `_BaseFSPathname`/`LocalPath` are unaffected: `pathlib.PurePath`
+        precedes `Pathname` in their MRO and keeps its own `__eq__`, as
+        does `Uri`, which defines one.
+        """
+        if type(self) is not type(other):
+            return NotImplemented
+        return tuple(self.segments) == tuple(other.segments)
+
+    def __hash__(self) -> int:
+        return hash((type(self), tuple(self.segments)))
 
     def __truediv__(self, key: _ty.Self | str) -> _ty.Self:
         try:

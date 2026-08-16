@@ -165,3 +165,125 @@ def test_root_drive_anchor_relative(cls):
     p = cls("a/b")
     assert p.root == ""
     assert p.anchor == ""
+
+
+# --- 2026-08-16: equality + is_relative_to str/object agreement ---
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+def test_equality_is_by_value_not_identity(cls):
+    # `Pathname` used to define no __eq__ at all, so any subclass that
+    # didn't hand-write one (MemPath, and every downstream Track A class)
+    # compared by identity.
+    assert cls("a/b") == cls("a/b")
+    assert cls("a/b") != cls("a/c")
+    assert cls("a/b") is not cls("a/b")
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+def test_hash_matches_equality(cls):
+    assert hash(cls("a/b")) == hash(cls("a/b"))
+    assert len({cls("a/b"), cls("a/b"), cls("a/c")}) == 2
+    assert {cls("a/b"): 1}[cls("a/b")] == 1
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+def test_equality_against_a_foreign_type_is_false_not_an_error(cls):
+    assert (cls("a/b") == object()) is False
+    assert (cls("a/b") != object()) is True
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+@pytest.mark.parametrize("path,other", [("a/b", "a"), ("a/b/c", "a/b"), ("a", "a")])
+def test_is_relative_to_str_and_object_agree_with_stdlib(cls, path, other):
+    expected = pathlib.PurePosixPath(path).is_relative_to(other)
+    assert expected is True  # sanity: the oracle really does say True
+    assert cls(path).is_relative_to(cls(other)) is expected
+    # The str form used to join `other` onto `self` instead of parsing it
+    # standalone, so it answered False where the object form answered True.
+    assert cls(path).is_relative_to(other) is expected
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+@pytest.mark.parametrize("path,other", [("a/b", "b"), ("a/b", "c"), ("ab/c", "a")])
+def test_is_relative_to_negative_str_and_object_agree_with_stdlib(cls, path, other):
+    expected = pathlib.PurePosixPath(path).is_relative_to(other)
+    assert expected is False
+    assert cls(path).is_relative_to(cls(other)) is expected
+    assert cls(path).is_relative_to(other) is expected
+
+
+def test_mempath_is_relative_to_str_keeps_the_backend():
+    # with_segments(), not type(self)(other): the bare constructor hands
+    # MemPath a fresh empty backend, which is the kind of per-instance
+    # state a generic normalization must not drop.
+    from pathlib_next.mempath import MemPathBackend
+
+    backend = MemPathBackend()
+    p = MemPath("a/b", backend=backend)
+    assert p.is_relative_to("a") is True
+    assert p.with_segments("a").backend is backend
+
+
+def test_generic_pathname_subclass_gets_working_equality():
+    """A minimal Track A subclass -- the shape `docs/guides/extending.md`
+    documents -- must get equality (and therefore is_relative_to) without
+    hand-writing __eq__."""
+    from pathlib_next.path import Pathname
+
+    class Toy(Pathname):
+        __slots__ = ("_segments",)
+
+        def __init__(self, *segments):
+            parts = []
+            for segment in segments:
+                if isinstance(segment, Pathname):
+                    parts.extend(segment.segments)
+                else:
+                    parts.append(segment)
+            self._segments = "/".join(parts).split("/")
+
+        @property
+        def segments(self):
+            return self._segments
+
+        @property
+        def parts(self):
+            return tuple(self._segments)
+
+        @property
+        def parent(self):
+            return self.with_segments(*self._segments[:-1])
+
+        def with_segments(self, *segments):
+            return type(self)(*segments)
+
+        def relative_to(self, other):
+            raise NotImplementedError()
+
+        def as_uri(self):
+            return "toy:" + self.as_posix()
+
+    assert Toy("a", "b") == Toy("a/b")
+    assert Toy("a/b") != Toy("a/c")
+    assert len({Toy("a/b"), Toy("a/b")}) == 1
+    assert Toy("a/b").is_relative_to(Toy("a")) is True
+    assert Toy("a/b").is_relative_to("a") is True
+    assert Toy("a/b").is_relative_to("c") is False
+
+
+def test_localpath_keeps_stdlib_equality_semantics():
+    """`pathlib.PurePath` precedes `Pathname` in the fspath MRO, so the new
+    default must NOT displace stdlib's (case-folding, cross-subclass)
+    equality there."""
+    from pathlib_next.fspath import LocalPath, _BaseFSPathname
+    from pathlib_next.path import Pathname
+
+    for cls in (LocalPath, PosixPathname):
+        names = [k.__name__ for k in cls.__mro__]
+        assert names.index("PurePath") < names.index("Pathname")
+        assert cls.__eq__ is not Pathname.__eq__
+        assert cls.__eq__ is pathlib.PurePath.__eq__
+
+    assert issubclass(PosixPathname, _BaseFSPathname)
+    assert LocalPath("a/b") == pathlib.Path("a/b")

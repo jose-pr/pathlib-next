@@ -31,6 +31,16 @@ as_uri()        # a URI string identifying this path (can be a custom scheme)
 relative_to(other)          # or raise NotImplementedError if not meaningful
 ```
 
+Equality is **not** on that list: `Pathname` supplies a default `__eq__`/
+`__hash__` keyed on `(type(self), tuple(self.segments))`, so your class is
+usable as a dict key or set member, and the equality-based helpers
+(`is_relative_to()`, `parents` membership) work, without you writing
+anything. Override both together if your type needs a different identity
+-- e.g. case-insensitive segments, or one that also distinguishes the
+backing store two otherwise-identical paths point at. (`LocalPath` and the
+`*Pathname` classes don't use this default: `pathlib.PurePath` precedes
+`Pathname` in their MRO and keeps its own equality.)
+
 Optional I/O, implement whichever your resource actually supports -- leave
 the rest as the inherited `@notimplemented` stubs (derived helpers either
 fall back, e.g. `move()` falls back to copy+unlink when `rename()` isn't

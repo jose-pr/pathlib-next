@@ -161,6 +161,21 @@ def test_is_relative_to_matches_pure_posix_path(segs):
     u, pp = Uri(path_str), pathlib.PurePosixPath(path_str)
     u_parent, pp_parent = Uri(parent_str), pathlib.PurePosixPath(parent_str)
     assert u.is_relative_to(u_parent) == pp.is_relative_to(pp_parent) == True
+    # The str form must agree with the object form: it used to anchor
+    # `other` at self's root (Uri(self, _ROOT, other)) and answer False for
+    # every *relative* self.
+    assert u.is_relative_to(parent_str) == pp.is_relative_to(parent_str) == True
+
+
+@given(segs=nonempty_segments_list)
+@settings(max_examples=200)
+def test_is_relative_to_str_matches_pure_posix_path_for_unrelated_other(segs):
+    # The negative direction of the same oracle: a str `other` that is not a
+    # prefix must answer False for both, relative and absolute self alike.
+    other_str = _posix(["zzz-unrelated"])
+    for path_str in (_posix(segs), "/" + _posix(segs)):
+        u, pp = Uri(path_str), pathlib.PurePosixPath(path_str)
+        assert u.is_relative_to(other_str) == pp.is_relative_to(other_str)
 
 
 # --- uritools oracle: one-pass parse/compose fast paths ---
