@@ -76,7 +76,7 @@ def glob(
     include_hidden = include_hidden or path.is_hidden()
     pattern = compile_pattern(path.name, case_sensitive) if path.name else ANY_PATTERN
 
-    name_is_pattern = WILDCARD_PATTERN.search(path.name) != None
+    name_is_pattern = WILDCARD_PATTERN.search(path.name) is not None
     wildcard_in_path = name_is_pattern or path.has_glob_pattern()
     parent = next(iter(path.parents), None)
 

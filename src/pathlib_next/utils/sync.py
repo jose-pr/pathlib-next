@@ -187,7 +187,7 @@ class PathAndStat(object):
         return self._stat
 
     def exists(self):
-        return self.stat != None
+        return self.stat is not None
 
     def refresh(self, follow_symlink: bool):
         self._stat = FileStat.from_path(self.path, follow_symlink=follow_symlink)

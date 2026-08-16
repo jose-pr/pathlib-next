@@ -58,7 +58,7 @@ class Stat(_ty.Protocol):
         """
         Whether this path exists.
         """
-        return self._st_mode(follow_symlinks=follow_symlinks) != None
+        return self._st_mode(follow_symlinks=follow_symlinks) is not None
 
     def is_dir(self):
         """

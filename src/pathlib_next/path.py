@@ -288,7 +288,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def has_glob_pattern(self):
         """Return True if any of the path segments contain glob wildcards."""
         for segment in self.segments:
-            if _glob.WILDCARD_PATTERN.search(segment) != None:
+            if _glob.WILDCARD_PATTERN.search(segment) is not None:
                 return True
         return False
 
@@ -880,8 +880,6 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if isinstance(target, str):
             target = type(self)(target)
         src = self
-        if src is None:
-            return
 
         if target.exists():
             if overwrite:
