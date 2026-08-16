@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`MemPath.open("w")` on an existing directory raised nothing and destroyed
+  the tree.** `_open()` assigned over whatever was already at the name, so
+  `MemPath("dir").write_text(...)` replaced a directory and everything under
+  it with a file — silently, in the class the docs present as the reference
+  exemplar for extending this library, and the class used as a mock
+  filesystem in tests. It now raises `IsADirectoryError`, as `pathlib` does.
+  The same guard covers the virtual root for every mode, which used to grow a
+  bogus `""` key in the backend on `"w"`/`"a"`.
+- **A `MemPath` routed *through* a file raised `TypeError`.**
+  `_parent_container()` walked ancestors with `path not in parent`, which on a
+  `bytearray` ancestor evaluates `"seg" not in bytearray`. That `TypeError`
+  sails past the `OSError` guard in `Stat._st_mode()`, so even
+  `MemPath("file.txt/sub").exists()` crashed instead of returning `False` —
+  a routine shape in glob/walk and in `mkdir(parents=True)`. It now raises
+  `NotADirectoryError` naming the offending ancestor.
+- **`Pathname` had no `__eq__`/`__hash__`, so subclasses compared by
+  identity.** Every pure subclass that didn't hand-write equality — including
+  `MemPath`, and any downstream class subclassing `Path` directly — was
+  unusable as a dict key or set member, and `is_relative_to()` (which decides
+  via `==` against freshly built parents) always returned `False` without
+  raising. There is now a default keyed on
+  `(type(self), tuple(self.segments))`. `LocalPath`, `PosixPathname` and
+  `WindowsPathname` are unaffected — `pathlib.PurePath` precedes `Pathname` in
+  their MRO and keeps its own equality — as is `Uri`, which defines one.
+- **`is_relative_to()` normalized a `str` argument by joining it onto
+  `self`.** `Pathname` used `cls(self, other)` and `Uri` used
+  `Uri(self, _ROOT, other)`, so `Uri("a/b").is_relative_to("a")` compared
+  against `"a/b/a"` / `"/a"` and answered `False` while
+  `Uri("a/b").is_relative_to(Uri("a"))` answered `True` — the str and object
+  forms of the same call disagreed. Both now parse `other` standalone, as
+  CPython does. The generic side uses `self.with_segments(other)` so a
+  subclass's per-instance state (`MemPath`'s backend) survives the
+  normalization. `Uri("http://h/a/b").is_relative_to("/a")` is still `True`.
+- **`LocalPath.chown()` leaked `AttributeError`/`LookupError` on Windows.**
+  `shutil.chown` exists there while `os.chown` does not, so an int id raised
+  `AttributeError` and a name raised a misleading `LookupError: no such user`
+  (with no `pwd` module, every name misses whether or not the user exists).
+  It now raises `NotImplementedError`, which `docs/divergences.md` already
+  promised and which every other unsupported capability here raises. The
+  all-unchanged no-op still succeeds.
+
 ## [0.9.1] - 2026-08-04
 
 ### Added
