@@ -306,9 +306,7 @@ class Source(_ty.NamedTuple):
         types and treating `host` as local if ANY resolved address is.
         `netimps.resolve()` gained OS-resolver-chain support in 0.2.0 --
         before that it was dnspython-only, which is why this method
-        originally kept `socket.gethostbyname()` for this step (see
-        `.agents/findings/processed/2026-07-29_netimps_adoption_survey.md`
-        and the companion finding filed against `netimps` itself). The
+        originally kept `socket.gethostbyname()` for this step. The
         "is this address MINE" comparison uses `netimps.is_local_address()`,
         which enumerates real network interfaces
         (`netimps.get_interfaces()`) instead of the weaker

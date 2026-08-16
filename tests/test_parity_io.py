@@ -248,8 +248,8 @@ def test_copy_progress_hook_monotonic_and_reaches_total(tmp_path):
 def test_copy_progress_hook_not_called_without_callback_and_no_behavior_change(
     tmp_path,
 ):
-    # No callback => identical behavior/content to plain shutil.copyfileobj
-    # (Phase 1's "no behavior change" requirement).
+    # No callback => identical behavior/content to plain shutil.copyfileobj:
+    # the hook must not cost anything when it is not used.
     root = pathlib_next.LocalPath(tmp_path)
     data = b"hello world" * 1000
     (root / "src.bin").write_bytes(data)
@@ -278,7 +278,7 @@ def test_copy_progress_hook_fires_on_path_copy(tmp_path):
 
 
 def test_copy_recursive_progress_hook_reports_per_file_identity(tmp_path):
-    # Phase 2: recursive copy must report per-file identity alongside byte
+    # A recursive copy must report per-file identity alongside byte
     # progress -- not just an anonymous byte stream.
     root = pathlib_next.LocalPath(tmp_path)
     src = root / "src"

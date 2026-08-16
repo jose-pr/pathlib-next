@@ -547,7 +547,7 @@ def test_sync_symlink_preserve_cross_backend_unsupported_target_raises(
     tmp_path,
 ):
     # SFTP source (supports symlink_to) -> MemPath target (does not):
-    # the documented Phase 1 behavior is NotImplementedError through
+    # the documented behavior is NotImplementedError surfaced through
     # ignore_error/hook(), not a silent skip or crash.
     backend = _FakeSymlinkBackend()
     source = _fake_sftp("sftp://host/link.txt", backend=backend)
