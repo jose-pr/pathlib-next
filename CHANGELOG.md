@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-16
+
 ### Fixed
 - **`MemPath.open("w")` on an existing directory raised nothing and destroyed
   the tree.** `_open()` assigned over whatever was already at the name, so
@@ -776,7 +778,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jose-pr/pathlib-next/compare/v0.9.0...v0.9.1
 [0.8.6]: https://github.com/jose-pr/pathlib-next/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/jose-pr/pathlib-next/compare/v0.8.4...v0.8.5
