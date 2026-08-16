@@ -165,7 +165,10 @@ pathlib_next`.
   alias for it; an `int` is an id, a `str` is a name. `chown()` normalizes
   via `utils.as_owner()` and short-circuits when nothing would change, so
   `_chown()` always receives a canonical pair and only converts to its own
-  wire spelling (`-1` for `os.chown`, an omitted attr for SFTP).
+  wire spelling (`-1` for `os.chown`, an omitted attr for SFTP). On a
+  platform without `os.chown` (Windows) `LocalPath.chown()` raises
+  `NotImplementedError` for any real change; the all-unchanged no-op still
+  succeeds because it never reaches the backend.
 - **`io.BinaryOpen`** — `Protocol`. `_open(mode="r", buffering=-1) ->
   io.IOBase` (not implemented by default; must yield a **binary** stream).
   Derives `open(mode="r", buffering=-1, encoding=None, errors=None,

@@ -495,3 +495,23 @@ def test_local_chown_no_op_needs_no_privileges(tmp_path):
     f.chown()
     f.chown(-1, -1)
     assert f.read_text() == "x"
+
+
+@pytest.mark.skipif(hasattr(os, "chown"), reason="platforms without os.chown only")
+@pytest.mark.parametrize("uid", [1000, "someuser"])
+def test_local_chown_unsupported_platform_raises_notimplementederror(tmp_path, uid):
+    # shutil.chown() exists on Windows while os.chown does not, so the
+    # mutation path used to leak AttributeError for an int id and a
+    # misleading "no such user" LookupError for a name (there is no pwd
+    # module, so every name misses). docs/divergences.md promises
+    # NotImplementedError, which is what every other unsupported capability
+    # in this library raises.
+    root = pathlib_next.LocalPath(tmp_path)
+    f = root / "f.txt"
+    f.write_text("x")
+    with pytest.raises(NotImplementedError):
+        f.chown(uid=uid)
+    with pytest.raises(NotImplementedError):
+        f.chown(gid=uid)
+    with pytest.raises(NotImplementedError):
+        f.chown(uid=uid, follow_symlinks=False)

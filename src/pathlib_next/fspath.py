@@ -193,6 +193,15 @@ class LocalPath(
         # canonical form Chmod.chown() already normalized to, so the pair
         # passes straight through. os.chown's -1 sentinel never appears
         # here.
+        if not hasattr(_os, "chown"):
+            # shutil.chown() *exists* on Windows while os.chown does not, so
+            # without this the int form leaked `AttributeError: module 'os'
+            # has no attribute 'chown'` and the name form leaked
+            # `LookupError: no such user` -- actively misleading, since
+            # there is no `pwd` module for shutil._get_uid to consult, so
+            # every name "misses" whether or not the user exists.
+            # docs/divergences.md promises NotImplementedError here.
+            raise NotImplementedError("chown()")
         if not follow_symlinks:
             if not hasattr(_os, "lchown"):
                 raise NotImplementedError("chown(follow_symlinks=False)")
