@@ -121,11 +121,19 @@ class MemPath(Path):
     def _parent_container(self) -> tuple[dict[str, bytearray], str]:
         parent = self.backend
         *ancestors, name = self.normalized
-        for path in ancestors:
+        for index, path in enumerate(ancestors):
             if path not in parent:
                 raise FileNotFoundError(self.parent)
-            else:
-                parent = parent[path]
+            parent = parent[path]
+            if not isinstance(parent, dict):
+                # An ancestor segment names a file. Without this the next
+                # iteration evaluates `"seg" not in bytearray` and raises
+                # TypeError, which sails past the OSError guards in
+                # stat()/exists()/is_dir() -- so even exists() crashed on a
+                # path merely routed through a file. NotADirectoryError is
+                # an OSError, which is what stdlib raises and what those
+                # guards already swallow.
+                raise NotADirectoryError(self.with_segments(*ancestors[: index + 1]))
 
         return parent, name
 
@@ -192,6 +200,11 @@ class MemPath(Path):
         # mode contract: "r"/"w" are required; "x"/"a" are supported here
         # as an extension. Anything else raises NotImplementedError.
         parent, name = self._parent_container()
+        if not name:
+            # An empty name is the virtual root, which stat() reports as a
+            # directory. Without this guard "w"/"a" created a bogus ""
+            # entry in the backend and "r" claimed FileNotFoundError.
+            raise IsADirectoryError(self)
         if mode == "r":
             if name not in parent:
                 raise FileNotFoundError(self)
@@ -200,6 +213,10 @@ class MemPath(Path):
                 raise IsADirectoryError(self)
             return io.BytesIO(content)
         elif mode == "w":
+            if isinstance(parent.get(name), dict):
+                # Truncating over a directory silently replaced the whole
+                # subtree with a file; stdlib raises IsADirectoryError.
+                raise IsADirectoryError(self)
             content = bytearray()
             parent[name] = content
             return MemBytesIO(content)

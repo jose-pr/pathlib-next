@@ -153,3 +153,84 @@ def test_rmdir_nonempty_raises():
     (root / "d" / "f.txt").write_text("x")
     with pytest.raises(FileExistsError):
         (root / "d").rmdir()
+
+
+# --- 2026-08-16: open("w") over a directory destroyed the whole subtree ---
+
+
+def test_open_w_on_directory_raises_and_keeps_the_tree():
+    backend = MemPathBackend()
+    root = MemPath("/", backend=backend)
+    (root / "dir").mkdir()
+    (root / "dir" / "child.txt").write_text("hi")
+
+    with pytest.raises(IsADirectoryError):
+        MemPath("dir", backend=backend).write_text("clobber")
+
+    # The whole point of the fix: the tree survives the refused write.
+    assert isinstance(backend["dir"], dict)
+    assert (root / "dir" / "child.txt").read_text() == "hi"
+
+
+def test_open_w_on_root_raises_instead_of_creating_an_empty_key():
+    backend = MemPathBackend()
+    with pytest.raises(IsADirectoryError):
+        MemPath("/", backend=backend).write_text("clobber")
+    assert backend == {}
+
+
+def test_open_a_on_root_raises_instead_of_creating_an_empty_key():
+    backend = MemPathBackend()
+    with pytest.raises(IsADirectoryError):
+        MemPath("/", backend=backend)._open("a")
+    assert backend == {}
+
+
+def test_open_w_still_truncates_an_existing_file():
+    # Guard against over-correcting: only directories are refused.
+    root = MemPath("/")
+    (root / "f.txt").write_text("original")
+    (root / "f.txt").write_text("new")
+    assert (root / "f.txt").read_text() == "new"
+
+
+# --- 2026-08-16: a path routed *through* a file raised TypeError ---
+
+
+def test_exists_through_a_file_segment_is_false():
+    backend = MemPathBackend()
+    MemPath("file.txt", backend=backend).write_text("x")
+    # Used to raise TypeError: a bytes-like object is required, not 'str'.
+    assert MemPath("file.txt/sub", backend=backend).exists() is False
+    assert MemPath("file.txt/sub/deeper", backend=backend).exists() is False
+    assert MemPath("file.txt/sub", backend=backend).is_dir() is False
+
+
+def test_stat_through_a_file_segment_raises_notadirectoryerror():
+    backend = MemPathBackend()
+    MemPath("file.txt", backend=backend).write_text("x")
+    with pytest.raises(NotADirectoryError):
+        MemPath("file.txt/sub", backend=backend).stat()
+
+
+def test_open_through_a_file_segment_raises_notadirectoryerror():
+    backend = MemPathBackend()
+    MemPath("file.txt", backend=backend).write_text("x")
+    with pytest.raises(NotADirectoryError):
+        MemPath("file.txt/sub", backend=backend).read_text()
+
+
+def test_mkdir_parents_under_a_file_raises_notadirectoryerror():
+    backend = MemPathBackend()
+    MemPath("file.txt", backend=backend).write_text("x")
+    with pytest.raises(NotADirectoryError):
+        MemPath("file.txt/sub", backend=backend).mkdir(parents=True)
+
+
+def test_notadirectoryerror_names_the_offending_ancestor():
+    backend = MemPathBackend()
+    MemPath("a", backend=backend).mkdir()
+    MemPath("a/f.txt", backend=backend).write_text("x")
+    with pytest.raises(NotADirectoryError) as excinfo:
+        MemPath("a/f.txt/sub", backend=backend).stat()
+    assert str(excinfo.value.args[0]) == "a/f.txt"
