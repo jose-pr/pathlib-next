@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-16
+
+### Fixed
+- **A `str` destination to `rename()`/`symlink_to()` was re-parsed as a URI,
+  so part of it was silently discarded.** Every scheme resolved the
+  destination by feeding it back through the URI parser
+  (`Uri(self.parent, target)` for `rename()`, `type(self)(target)` inside
+  `Path.symlink_to()`). That reads a **decoded filesystem path** as URI
+  syntax: everything from a `?` or `#` onward became a query/fragment and was
+  dropped, `%xx` was percent-decoded, and a relative destination whose first
+  segment ended in `:` was read as a *scheme*. Measured against a real SFTP
+  server (TrueNAS 26.0.0-BETA.1):
+
+  | call | file/link actually produced |
+  | --- | --- |
+  | `rename(".../rn?b.txt")` | `.../rn` |
+  | `rename(".../rn%20b.txt")` | `.../rn b.txt` |
+  | `symlink_to(".../cache?v=2")` | link points at `.../cache` |
+  | `rename("C:/Temp/x.txt")` | `/Temp/x.txt` (`C:` taken as a scheme) |
+
+  Nothing raised. When something already occupied the truncated name the call
+  instead failed with a bare `OSError: Failure`, so the symptom was either
+  silent misplacement or an unexplained error depending on what happened to
+  be there. Downstream, `pytruenas`'s documented
+  `client.path(x).symlink_to(y)` route created a wrong link, and
+  `PathSyncer`'s `symlink_mode="preserve"` (which hands `symlink_to()` the
+  raw target string `readlink()` returned) mirrored such a link to the wrong
+  place.
+
+  A `str` destination is now taken as an already-decoded path — `?`, `#`,
+  `%` and `:` are ordinary filename characters — via the new
+  `Uri._from_decoded_path()`, one implementation shared by
+  `Uri._rename_target()` (used by `SftpPath`, `FtpPath`, `DavPath`,
+  `S3Path`, `GsPath`, `AzPath` and `ArchiveUri`) and by
+  `UriPath._symlink_target()`, an override of a new `Path._symlink_target()`
+  hook. Relative destinations keep their existing meaning: a `rename()`
+  destination is a sibling, a `symlink_to()` target is stored verbatim and
+  stays relative. The string is **not** percent-encoded on the way in, so a
+  destination that legitimately contains a literal `%20` — or a path object
+  built by a consumer that already encoded it — is not encoded twice.
+  `readlink()`, `unlink()`, `rmdir()` and `hardlink_to()` never had this
+  defect. `copy()`/`move()` are deliberately unchanged: their `str`
+  destination is still parsed as a URI, which is what makes a cross-scheme
+  `copy("s3://bucket/key")` work. See `docs/divergences.md`.
+
 ## [0.9.2] - 2026-08-16
 
 ### Fixed
@@ -778,7 +823,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jose-pr/pathlib-next/compare/v0.9.0...v0.9.1
 [0.8.6]: https://github.com/jose-pr/pathlib-next/compare/v0.8.5...v0.8.6
