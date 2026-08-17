@@ -282,8 +282,7 @@ class AzPath(UriPath):
                     raise
 
     def rename(self, target: "AzPath | Uri | str"):
-        if not isinstance(target, Uri):
-            target = Uri(self.parent, target)
+        target = self._rename_target(target)
         dest_key = (
             self.with_segments(target).key
             if not isinstance(target, AzPath)

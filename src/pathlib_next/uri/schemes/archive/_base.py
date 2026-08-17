@@ -283,8 +283,7 @@ class ArchiveUri(UriPath):
         # A plain str target is a sibling rename (relative to self's
         # parent), matching sftp.py's/ftp.py's rename() semantics.
         self._require_writable()
-        if not isinstance(target, Uri):
-            target = Uri(self.parent, target)
+        target = self._rename_target(target)
         old_path = self.path
         new_path = target.path.lstrip("/")
         names = self._names()

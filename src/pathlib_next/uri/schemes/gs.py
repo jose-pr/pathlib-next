@@ -247,8 +247,7 @@ class GsPath(UriPath):
                     raise
 
     def rename(self, target: "GsPath | Uri | str"):
-        if not isinstance(target, Uri):
-            target = Uri(self.parent, target)
+        target = self._rename_target(target)
         dest_key = target.path.lstrip("/")
         source_blob = self._bucket.blob(self.key)
         self._bucket.copy_blob(source_blob, self._bucket, dest_key)

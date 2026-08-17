@@ -212,8 +212,7 @@ class DavPath(HttpPath):
                 raise
 
     def rename(self, target: "DavPath | Uri | str"):
-        if not isinstance(target, Uri):
-            target = Uri(self.parent, target)
+        target = self._rename_target(target)
         dest = self.with_path(target.path)._wire_uri()
         resp = self.backend.request(
             "MOVE", self._wire_uri(), headers={"Destination": dest, "Overwrite": "F"}

@@ -365,3 +365,17 @@ def test_chmod_follow_symlinks_false_raises_notimplemented():
     p = _ftp("ftp://host/a.txt", backend=backend)
     with pytest.raises(NotImplementedError):
         p.chmod(0o644, follow_symlinks=False)
+
+
+# --- destination arguments are decoded paths, not URI syntax (0.9.3) ------
+# Same defect as SftpPath's (`Uri(self.parent, target)` re-parsed the
+# destination as a URI); FtpPath's `.path` is likewise a filesystem path on
+# the server, so "?" / "#" / "%xx" in it are ordinary filename characters.
+
+
+@pytest.mark.parametrize("name", ["rn?b.txt", "rn#b.txt", "rn%20b.txt", "rn:b.txt"])
+def test_rename_str_destination_is_a_literal_path(name):
+    backend = _FakeBackend()
+    p = _ftp("ftp://host/mnt/a.txt", backend=backend)
+    p.rename(name)
+    assert backend._client.rename_calls == [("/mnt/a.txt", f"/mnt/{name}")]

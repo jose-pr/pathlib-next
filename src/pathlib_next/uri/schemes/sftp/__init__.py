@@ -357,9 +357,11 @@ class SftpPath(UriPath):
         # "host:" for the sftp wire protocol, which only wants the raw path.
         # A plain str target is resolved relative to self's *parent*
         # (sibling rename -- "rename this file to a new name in the same
-        # directory"), not to self itself (which would join it as a child).
-        if not isinstance(target, Uri):
-            target = Uri(self.parent, target)
+        # directory"), not to self itself (which would join it as a child)
+        # -- and is taken as a literal path rather than re-parsed as a URI,
+        # which used to truncate "rn?b.txt" to "rn" on the wire (see
+        # `Uri._rename_target`).
+        target = self._rename_target(target)
         return self._sftpclient.rename(self.path, target.path)
 
     def _symlink_to(

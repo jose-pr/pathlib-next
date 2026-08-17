@@ -228,8 +228,7 @@ class FtpPath(UriPath):
     def rename(self, target: "FtpPath | Uri | str"):
         # A plain str target is a sibling rename (relative to self's
         # parent), matching sftp.py's rename() semantics.
-        if not isinstance(target, Uri):
-            target = Uri(self.parent, target)
+        target = self._rename_target(target)
         self._ftpclient.rename(self.path, target.path)
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):

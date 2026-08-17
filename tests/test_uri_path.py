@@ -140,3 +140,61 @@ def test_uripath_unimplemented_unlink():
     p = UriPath("custom://host/a")
     with pytest.raises(NotImplementedError):
         p.unlink()
+
+
+# --- destination/target normalization (0.9.3) ----------------------------
+#
+# The single place every scheme's `rename()` and `symlink_to()` now converts
+# a `str` destination. Tested here, once, rather than per-scheme: a `str`
+# destination is an already-decoded PATH, so feeding it back through the URI
+# parser truncated it at "?"/"#", percent-decoded it, and read a leading
+# "C:" as a scheme -- silently, on the wire.
+
+_DECODED = ["rn?b.txt", "rn#b.txt", "rn b.txt", "rn%20b.txt", "rn%b.txt", "rn:b.txt"]
+
+
+@pytest.mark.parametrize("name", _DECODED)
+def test_rename_target_str_is_a_sibling_literal_path(name):
+    p = UriPath("customscheme://host/mnt/a.txt")
+    assert p._rename_target(name).path == f"/mnt/{name}"
+
+
+@pytest.mark.parametrize("name", _DECODED)
+def test_rename_target_absolute_str_is_a_literal_path(name):
+    p = UriPath("customscheme://host/mnt/a.txt")
+    assert p._rename_target(f"/other/{name}").path == f"/other/{name}"
+
+
+@pytest.mark.parametrize("name", _DECODED)
+def test_rename_target_uri_is_taken_as_given(name):
+    p = UriPath("customscheme://host/mnt/a.txt")
+    target = Uri("customscheme://host/mnt/x")._from_decoded_path(f"/mnt/{name}")
+    # An already-built path object must pass straight through: no second
+    # encode/decode round on top of whatever built it (consumers that
+    # percent-encode a decoded path and construct from the resulting URI
+    # would otherwise see a literal "%20" come back as a space).
+    assert p._rename_target(target).path == f"/mnt/{name}"
+
+
+@pytest.mark.parametrize("name", _DECODED)
+def test_symlink_target_str_is_literal_and_never_anchored(name):
+    p = UriPath("customscheme://host/mnt/link")
+    # Relative stays relative -- unlike rename(), a symlink target is
+    # stored verbatim (pathlib.Path.symlink_to() parity).
+    assert p._symlink_target(name).path == name
+    assert p._symlink_target(f"/mnt/{name}").path == f"/mnt/{name}"
+
+
+def test_symlink_target_keeps_dot_dot_relative():
+    p = UriPath("customscheme://host/mnt/sub/link")
+    assert p._symlink_target("../real.txt").path == "../real.txt"
+
+
+def test_from_decoded_path_keeps_backend_and_drops_query_fragment():
+    p = UriPath("customscheme://host/mnt/a.txt?q=1#f")
+    target = p._from_decoded_path("/mnt/b?c#d.txt")
+    assert target.path == "/mnt/b?c#d.txt"
+    # self's own query/fragment must not leak onto a destination.
+    assert not target.query
+    assert not target.fragment
+    assert target.backend is p.backend

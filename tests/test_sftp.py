@@ -34,6 +34,8 @@ class _FakeSftpClient:
         self.rename_calls = []
         self.chmod_calls = []
         self.chown_calls = []
+        self.symlink_calls = []
+        self.link_calls = []
         # Owner reported by stat(), so a partial chown() (one field left
         # "unchanged") has something to read back for the other field.
         self.stat_uid = 501
@@ -71,6 +73,12 @@ class _FakeSftpClient:
 
     def mkdir(self, path, mode):
         pass
+
+    def symlink(self, target, path):
+        self.symlink_calls.append((target, path))
+
+    def link(self, target, path):
+        self.link_calls.append((target, path))
 
 
 class _FakeBackend(BaseSftpBackend):
@@ -1048,3 +1056,124 @@ def test_chmod_rejects_non_octal_digits():
     p = _sftp("sftp://host/a.txt")
     with pytest.raises(ValueError):
         p.chmod("0899")
+
+
+# --- destination arguments are decoded paths, not URI syntax (0.9.3) ------
+#
+# `rename()`/`symlink_to()` used to run a `str` destination back through the
+# URI parser (`Uri(self.parent, target)` / `type(self)(target)`), so anything
+# from a "?" or "#" onward was discarded and "%xx" was decoded -- silently,
+# and against a real server (measured on TrueNAS 26.0.0-BETA.1):
+#     rename(".../rn?b.txt")      -> the file became ".../rn"
+#     symlink_to(".../cache?v=2") -> the link pointed at ".../cache"
+# Every assertion below is on the argument the BACKEND received, not on the
+# absence of an exception: the buggy code raised nothing at all.
+
+# ("filename", "the path the wire call must carry for /mnt/<filename>")
+_DEST_NAMES = [
+    "rn?b.txt",  # query delimiter
+    "rn#b.txt",  # fragment delimiter
+    "rn b.txt",  # space (already survived, guards the fix)
+    "rn%20b.txt",  # LITERAL percent-escape: must NOT become "rn b.txt"
+    "rn%b.txt",  # bare, un-decodable percent
+    "rn:b.txt",  # colon must stay readable (a "/C:/Temp" path depends on it)
+    "a+b&c=d.txt",  # other sub-delims
+]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_rename_str_destination_is_a_literal_path(name):
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/a.txt", backend=backend)
+    p.rename(name)
+    # Relative str == sibling rename, so it lands beside self.
+    assert backend._client.rename_calls == [("/mnt/a.txt", f"/mnt/{name}")]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_rename_absolute_str_destination_is_a_literal_path(name):
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/a.txt", backend=backend)
+    p.rename(f"/other/{name}")
+    assert backend._client.rename_calls == [("/mnt/a.txt", f"/other/{name}")]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_symlink_to_str_target_is_a_literal_path(name):
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/link", backend=backend)
+    p.symlink_to(f"/mnt/{name}")
+    assert backend._client.symlink_calls == [(f"/mnt/{name}", "/mnt/link")]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_symlink_to_relative_str_target_stays_relative_and_literal(name):
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/link", backend=backend)
+    p.symlink_to(name)
+    # Unlike rename()'s destination, a symlink target is stored verbatim --
+    # never anchored at self.parent (pathlib.Path.symlink_to() parity).
+    assert backend._client.symlink_calls == [(name, "/mnt/link")]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_hardlink_to_str_target_is_a_literal_path(name):
+    class _HardlinkBackend(_FakeBackend):
+        supports_hardlink = True
+
+    backend = _HardlinkBackend()
+    p = _sftp("sftp://host/mnt/link", backend=backend)
+    p.hardlink_to(f"/mnt/{name}")
+    assert backend._client.link_calls == [(f"/mnt/{name}", "/mnt/link")]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_rename_path_object_destination_is_not_double_decoded(name):
+    """A destination that is already a path OBJECT must reach the wire
+    exactly once-decoded.
+
+    This is the double-encoding guard: consumers (pytruenas 0.4.4/0.4.5)
+    percent-encode a decoded filesystem path and construct the path from
+    the resulting URI. The fix must not add a second encode/decode round
+    on top -- a literal "%20" in the name is the case that catches it.
+    """
+    import uritools
+
+    # RFC 3986 pchar + "/" -- ":" deliberately left unencoded so that a
+    # "/C:/Temp/..." path stays readable in the URI.
+    encoded = uritools.uriencode(f"/mnt/{name}", safe="/:@-._~!$&'()*+,;=").decode()
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/a.txt", backend=backend)
+    target = SftpPath(f"sftp://host{encoded}", backend=backend)
+    assert target.path == f"/mnt/{name}"
+    p.rename(target)
+    assert backend._client.rename_calls == [("/mnt/a.txt", f"/mnt/{name}")]
+
+
+@pytest.mark.parametrize("name", _DEST_NAMES)
+def test_symlink_to_path_object_target_is_not_double_decoded(name):
+    import uritools
+
+    encoded = uritools.uriencode(f"/mnt/{name}", safe="/:@-._~!$&'()*+,;=").decode()
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/link", backend=backend)
+    target = SftpPath(f"sftp://host{encoded}", backend=backend)
+    p.symlink_to(target)
+    assert backend._client.symlink_calls == [(f"/mnt/{name}", "/mnt/link")]
+
+
+def test_rename_str_destination_keeps_a_windows_style_drive_path():
+    # A relative destination whose first segment ends in ":" used to be
+    # read as a URI SCHEME: "C:/Temp/x.txt" parsed as scheme "c" with path
+    # "/Temp/x.txt", so the rename left the directory entirely.
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/a.txt", backend=backend)
+    p.rename("C:/Temp/x.txt")
+    assert backend._client.rename_calls == [("/mnt/a.txt", "/mnt/C:/Temp/x.txt")]
+
+
+def test_symlink_to_str_target_keeps_dot_dot_relative():
+    backend = _FakeBackend()
+    p = _sftp("sftp://host/mnt/sub/link", backend=backend)
+    p.symlink_to("../real.txt")
+    assert backend._client.symlink_calls == [("../real.txt", "/mnt/sub/link")]

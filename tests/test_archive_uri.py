@@ -402,3 +402,18 @@ def test_archive_scheme_tar_detected_write_raises_not_implemented(tar_archive):
     p = UriPath(_archive_uri(tar_archive)) / "new.txt"
     with pytest.raises(NotImplementedError):
         p.write_text("nope")
+
+
+# --- destination member names are decoded paths, not URI syntax (0.9.3) ---
+
+
+@pytest.mark.parametrize("name", ["re?named.txt", "re#named.txt", "re%20named.txt"])
+def test_zip_rename_str_destination_is_a_literal_member_name(zip_archive, name):
+    # Asserted against the archive's own namelist, not via `root / name`:
+    # `__truediv__` is a URI join and would re-interpret the "?" itself.
+    root = UriPath(_zip_uri(zip_archive))
+    (root / "top.txt").rename(name)
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert name in zf.namelist()
+        assert zf.read(name) == b"top level"
+        assert "top.txt" not in zf.namelist()

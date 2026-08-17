@@ -294,3 +294,17 @@ def test_rename_uses_copy_then_delete():
 def test_chmod_not_implemented():
     with pytest.raises(NotImplementedError):
         _s3("s3://bucket/a.txt").chmod(0o644)
+
+
+# --- destination keys are decoded paths, not URI syntax (0.9.3) ----------
+# "?" and "#" are legal S3 key characters; the old
+# `Uri(self.parent, target)` truncated the destination key at either one.
+
+
+@pytest.mark.parametrize("name", ["b?x.txt", "b#x.txt", "b%20x.txt"])
+def test_rename_str_destination_key_is_literal(name):
+    backend = _FakeBackend()
+    backend._client.objects["a.txt"] = b"content"
+    _s3("s3://bucket/a.txt", backend).rename(name)
+    assert backend._client.objects.get(name) == b"content"
+    assert "a.txt" not in backend._client.objects

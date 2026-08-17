@@ -73,15 +73,21 @@ pathlib_next`.
     equivalent. Removes a file or (with `recursive=True`) a directory tree;
     `ignore_error` (bool or predicate) controls whether an error during the
     walk is swallowed (predicate return `True`) or re-raised.
-  - `rename(target)` — not implemented by default.
+  - `rename(target)` — not implemented by default. On a `UriPath` a `str`
+    `target` is an already-**decoded path**, not URI syntax, and a relative
+    one is a sibling rename — see `Uri._rename_target()` under "URIs".
   - `_symlink_to(target, target_is_directory=False)` (not implemented by
     default) / `symlink_to(target, target_is_directory=False, *,
     force=False)` — same primitive/wrapper split as `_mkdir`/`mkdir`: a
     backend implements only `_symlink_to()` and receives an already
-    normalized path object (a `str` target is turned into one by the
-    wrapper, as `copy()`/`move()` do), then reads the raw target string the
+    normalized path object, then reads the raw target string the
     way its transport needs (`Uri.path` on the wire, `os.fspath()`
-    locally). `force=` is this library's extension: `False` is
+    locally). The `str`→path step is `_symlink_target(target)`, an
+    overridable hook: the default is `type(self)(target)`, and `UriPath`
+    overrides it so a link target is taken literally instead of being
+    re-parsed as a URI (a `?`/`#` in it is a filename character, not a
+    delimiter). A relative target is never anchored — it stays relative,
+    as in pathlib. `force=` is this library's extension: `False` is
     stdlib-exact, `True` unlinks an existing **non-directory** entry at the
     link path first (never a directory) and is **not** atomic. Listed in
     `_OPERATION_NAMES`, since no stdlib version accepts `force=`.
@@ -232,6 +238,18 @@ extra that depends on it).
   is the unambiguous accessor for "path on the URI's own host" — same
   `_host_filesystem_path` gate, but never falls back to local-path
   semantics. See `docs/divergences.md`.
+  Destination/target normalization (used by every scheme's `rename()` and
+  by `symlink_to()`): `_from_decoded_path(path)` builds a same-type URI
+  whose `.path` is `path` **verbatim** — an already-decoded path string,
+  not URI syntax, so `?`, `#`, `%` and `:` in it are ordinary filename
+  characters and only dot segments are normalized.
+  `_rename_target(target)` is what `rename()` calls: a `Uri` passes
+  through untouched, a `str` goes through `_from_decoded_path()` and, if
+  relative, is joined onto `self.parent` (sibling rename — a URI has no
+  cwd). `_symlink_target(target)` (overriding `Path`'s) is the same minus
+  the parent anchoring, so a relative link target stays relative.
+  `copy()`/`move()` deliberately still parse a `str` destination as a URI
+  — that is what makes a cross-scheme `copy("s3://bucket/key")` work.
 - **`UriPath(Uri, Path)`** — `Uri` + `Path` (I/O) + scheme dispatch.
   `UriPath(*uris, **options)` (the bare class) parses the URI and returns an
   instance of the concrete subclass registered for its scheme via

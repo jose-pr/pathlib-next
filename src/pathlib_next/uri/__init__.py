@@ -232,6 +232,50 @@ class Uri(Pathname):
         uri._init(source, path, query, fragment, **kwargs)
         return uri
 
+    def _from_decoded_path(self, path: str, /, **kwargs) -> "_ty.Self":
+        """Build a same-type URI whose `.path` is `path` verbatim.
+
+        `path` is an **already-decoded path string**, not URI syntax: `?`,
+        `#`, `%` and `:` are ordinary filename characters here. Only
+        path-level normalization (dot segments, exactly what `_parse_uri`
+        applies *after* decoding) is performed -- nothing is split off and
+        nothing is percent-decoded.
+
+        This is what a destination/target argument must go through.
+        Feeding such a string back into the URI parser (`Uri(path)`,
+        `type(self)(path)`) reads it as syntax: "a?b.txt" silently became
+        "a" plus a query, "a#b.txt" became "a" plus a fragment,
+        "a%20b.txt" became "a b.txt", and a relative "C:/Temp/x" became
+        scheme "c" plus "/Temp/x" -- so the wire call went to a different
+        file than the caller named, with no error. Percent-encoding the
+        string before parsing would fix the truncation but re-encode an
+        already-encoded name (a literal "%20" would come back as a space),
+        so the parse is bypassed instead of being fed encoded input.
+        """
+        return self._from_parsed_parts(
+            _NOSOURCE, _remove_dot_segments(path), None, None, **kwargs
+        )
+
+    def _rename_target(self, target: UriLike) -> "Uri":
+        """Normalize a `rename()`/`replace()` destination to a `Uri`.
+
+        A `str` is an already-decoded path (see `_from_decoded_path`), and
+        a relative one is resolved against `self.parent` -- the documented
+        sibling-rename semantics ("rename this to a new name in the same
+        directory"), not against `self` itself. A `Uri` (of any scheme
+        class) is taken as given; anything else keeps the pre-existing
+        `Uri(...)` conversion, which is already lossless for
+        `PurePath`/`os.PathLike` (they are percent-encoded on the way in
+        and decoded back out).
+        """
+        if isinstance(target, Uri):
+            return target
+        if isinstance(target, str):
+            target = self._from_decoded_path(target)
+        # target is a Uri by now, so this join re-uses `_load_parts`'
+        # existing right-to-left semantics without re-parsing anything.
+        return Uri(self.parent, target)
+
     @classmethod
     def _format_parsed_parts(
         cls,
@@ -690,6 +734,21 @@ class UriPath(Uri, Path):
             inst = cls.__new__(cls, backend=self._backend)
         inst._init(source, self.path, self.query, self.fragment)
         return inst
+
+    def _symlink_target(self, target: "UriLike") -> "_ty.Self":
+        """`Path._symlink_target()` for URI-backed paths: a `str` target is
+        an already-decoded path, never URI syntax (see
+        `Uri._from_decoded_path`).
+
+        The default `type(self)(target)` ran the link target back through
+        the URI parser, so `symlink_to("/mnt/cache?v=2")` created a link
+        pointing at `/mnt/cache`. Unlike `_rename_target()` this never
+        anchors at `self.parent`: a symlink target is stored as given, so
+        a relative one stays relative.
+        """
+        if isinstance(target, str):
+            return self._from_decoded_path(target)
+        return target
 
     @_utils.notimplemented
     def _listdir(self) -> "_ty.Iterator[str]": ...

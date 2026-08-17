@@ -732,6 +732,17 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         """
         ...
 
+    def _symlink_target(self, target: "_ty.Self | str") -> "_ty.Self":
+        """Normalize a `symlink_to()` target argument to a path object.
+
+        A `str` target is the **literal link target** -- whatever it says
+        is what gets stored, verbatim and unresolved, exactly as
+        `pathlib.Path.symlink_to()` does. Override this wherever
+        `type(self)(str)` would reinterpret the string instead of taking
+        it literally (`UriPath` does; see `UriPath._symlink_target`).
+        """
+        return type(self)(target) if isinstance(target, str) else target
+
     def symlink_to(
         self,
         target: "_ty.Self | str",
@@ -758,10 +769,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         for.
         """
         # Normalize a str target to a path object, so the primitive only
-        # ever handles one type -- same `type(self)(target)` form as
-        # copy()/move() use for their destination, for consistency.
-        if isinstance(target, str):
-            target = type(self)(target)
+        # ever handles one type. Routed through `_symlink_target()` rather
+        # than inlining `type(self)(target)`: for a URI-backed path that
+        # constructor re-parses the string as URI syntax, which silently
+        # truncated a link target at a "?"/"#" and percent-decoded it (see
+        # `UriPath._symlink_target`).
+        target = self._symlink_target(target)
         if force:
             try:
                 self.unlink(missing_ok=True)
