@@ -3,7 +3,9 @@ from __future__ import annotations
 import enum as _enum
 import errno as _errno
 import logging as _logging
+import os as _os
 import pathlib as _pathlib
+import stat as _stat
 import typing as _ty
 import uuid as _uuid
 
@@ -179,6 +181,57 @@ def _supports_symlinks(path: Path) -> bool:
     return _implements(path, "_symlink_to") or _implements(path, "symlink_to")
 
 
+def _link_text(path: Path) -> str:
+    """The raw, unresolved target string of the symlink at `path`. A Uri's
+    `.path` is the un-prefixed link text (`Uri.as_posix()` prepends "host:"
+    when the result carries a host, e.g. SftpPath's absolute targets); plain
+    stdlib Path has no `.path`, so `.as_posix()` is the only accessor there.
+    Both sides of a comparison must use this same extraction."""
+    link = path.readlink()
+    return link.path if hasattr(link, "path") else link.as_posix()
+
+
+def _is_windows_local(path: Path) -> bool:
+    return _os.name == "nt" and isinstance(path, _pathlib.Path)
+
+
+def _link_is_directory(path: Path) -> bool:
+    """Whether a symlink at `path` is (or should be recreated as) a
+    directory link. On Windows a local link records its own kind, dangling
+    or not, in its attributes; elsewhere the kind is what the link resolves
+    to (False when dangling), which only Windows targets act on."""
+    if _is_windows_local(path):
+        attributes = getattr(_os.lstat(path), "st_file_attributes", 0)
+        return bool(attributes & _stat.FILE_ATTRIBUTE_DIRECTORY)
+    try:
+        return bool(path.is_dir())
+    except (OSError, NotImplementedError):
+        return False
+
+
+def _same_link(source: Path, target: Path) -> bool:
+    """Whether the symlink `target` already matches the symlink `source`:
+    the same raw target string, and on a Windows target the same link kind
+    (a file link to a directory cannot be traversed). Any failure to read
+    either side means "not known to match", so the link is replaced."""
+    try:
+        if _link_text(source) != _link_text(target):
+            return False
+        if _is_windows_local(target):
+            return _link_is_directory(source) == _link_is_directory(target)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def _as_entry(entry) -> "PathAndStat":
+    # Hooks are declared to receive PathAndStat; a raw path that never got
+    # stat'd (its stat() is what failed) is reported with an unknown stat.
+    if isinstance(entry, PathAndStat):
+        return entry
+    return PathAndStat.from_stat(entry, None)
+
+
 def _temp_sibling(path: Path) -> Path:
     # Hidden and unique, in the same directory so a rename stays on one
     # filesystem/connection. A leftover from a crash is not in the source,
@@ -272,17 +325,26 @@ class SyncEvent(_enum.Enum):
     #: symlink (a FIFO, socket or device, or a stat with no file type): it is
     #: skipped and the target is left untouched.
     Skipped = _enum.auto()
+    #: `ignore_error` tolerated an error for this source/target pair. Fired
+    #: after the policy returned True; the failing event and the exception
+    #: are in the WARNING record logged on the `pathlib_next.sync` logger.
+    Error = _enum.auto()
 
 
 class PathAndStat(object):
     """A `Path` plus its cached `stat()` result (`None` if it doesn't
     exist). `is_*` attribute access (e.g. `.is_file()`) delegates to the
     cached stat, returning a false-returning callable if the path doesn't
-    exist; any other unknown attribute raises `AttributeError` as normal."""
+    exist; any other unknown attribute raises `AttributeError` as normal.
+
+    `follow_symlink` (in `__init__` and `refresh()`) defaults to `True`,
+    like `pathlib.Path.stat()` and `FileStat.from_path()`: a symlink is
+    described by what it points at. Pass `False` for the link itself
+    (`lstat()`); `PathSyncer` always passes its `follow_symlinks` setting."""
 
     __slots__ = ("_path", "_stat")
 
-    def __init__(self, path: Path, *, follow_symlink=None) -> None:
+    def __init__(self, path: Path, *, follow_symlink: bool = True) -> None:
         self._path = path
         self.refresh(follow_symlink)
 
@@ -310,7 +372,7 @@ class PathAndStat(object):
     def exists(self):
         return self.stat is not None
 
-    def refresh(self, follow_symlink: bool):
+    def refresh(self, follow_symlink: bool = True):
         self._stat = FileStat.from_path(self.path, follow_symlink=follow_symlink)
 
     def __getattr__(self, name: str):
@@ -388,7 +450,16 @@ class PathSyncer(object):
     through the same `ignore_error`/`hook()` machinery as every other
     branch -- decided before an existing target entry is touched. Replacing
     an existing entry creates the new link under a temporary sibling name
-    first, so a runtime refusal also leaves the entry in place.
+    first, so a runtime refusal also leaves the entry in place. A target
+    link that already has the same raw target string (and, on a Windows
+    target, the same file/directory link kind) is left alone. A directory
+    link is created as one (`target_is_directory`), which Windows requires.
+
+    `remove_missing=False` never deletes a non-empty target directory: when
+    the source entry became a file or a symlink, replacing that directory
+    raises `IsADirectoryError` through `ignore_error` (event
+    `SyncEvent.TypeMismatch`) and the directory is left untouched. With
+    `remove_missing=True`, or for an empty directory, it is replaced.
 
     A changed file is written to a temporary sibling and renamed over the
     existing target where the target backend implements `rename()`, so a
@@ -403,7 +474,13 @@ class PathSyncer(object):
     for a failing quick check or checksum). An error it declines propagates
     without being offered again by enclosing directories. A dry run takes
     the same decisions as a real run (a directory that would be created is
-    treated as empty) without changing anything.
+    treated as empty) without changing anything. Every error the policy
+    tolerates is logged at WARNING (with the traceback) on the
+    `pathlib_next.sync` logger and reported to `hook` as `SyncEvent.Error`.
+
+    `hook` receives `PathAndStat` entries for every event, and the `dry_run`
+    value of the call for every event, including the structural ones
+    (`SyncStart`, `CheckTargetChild(ren)`, `SyncChild(ren)`).
     """
 
     __slots__ = (
@@ -466,21 +543,79 @@ class PathSyncer(object):
         dry_run: bool,
         do: _ty.Callable[[], None] = None,
         ignore_error: _OnPathSyncerError = None,
+        *,
+        always_run: bool = False,
     ):
         # `ignore_error` lets sync() pass down a per-call policy override;
         # None keeps the instance-level policy (the only behavior before).
+        # `always_run` runs `do` during a dry run too (the traversal steps,
+        # which only read and recurse) while still reporting `dry_run`.
         if ignore_error is None:
             ignore_error = self.ignore_error
-        if not dry_run and do:
+        if do and (always_run or not dry_run):
             try:
                 do()
             except Exception as e:
-                if _offer_error(ignore_error, e, source, target, event):
+                if self._tolerate(ignore_error, e, source, target, event, dry_run):
                     return e
                 raise
         if self._hook:
             self._hook(source, target, event, dry_run)
         self.log(self.EVENT_LOG_FORMAT, event, source, target, dry_run)
+
+    def _tolerate(
+        self,
+        policy: _OnPathSyncerError,
+        error: Exception,
+        source,
+        target,
+        event: SyncEvent,
+        dry_run: bool,
+    ) -> bool:
+        """Offer `error` to `policy` once (see `_offer_error`). A tolerated
+        error is logged at WARNING and reported to the hook as
+        `SyncEvent.Error`, so `ignore_error=True` never loses it silently."""
+        if not _offer_error(policy, error, source, target, event):
+            return False
+        _logger.warning(
+            "[%s] ignored %s: %s Source:%s Target:%s",
+            event,
+            type(error).__name__,
+            error,
+            source,
+            target,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        if self._hook:
+            self._hook(_as_entry(source), _as_entry(target), SyncEvent.Error, dry_run)
+        self.log(self.EVENT_LOG_FORMAT, SyncEvent.Error, source, target, dry_run)
+        return True
+
+    def _keeps_directory(
+        self, source, target, dry_run: bool, policy: _OnPathSyncerError
+    ) -> bool:
+        """True when a non-directory source must not replace the target:
+        the target is a real, non-empty directory and `remove_missing` is
+        False. The refusal is an `IsADirectoryError` offered to `policy`
+        (raised if declined); the directory is never touched."""
+        if self.remove_missing or target.is_symlink() or not target.is_dir():
+            return False
+        try:
+            if next(iter(target.path.iterdir()), None) is None:
+                return False
+            raise IsADirectoryError(
+                _errno.EISDIR,
+                "refusing to replace a non-empty directory with a "
+                f"{'symlink' if source.is_symlink() else 'file'} "
+                "(remove_missing is False)",
+                str(target.path),
+            )
+        except Exception as error:
+            if self._tolerate(
+                policy, error, source, target, SyncEvent.TypeMismatch, dry_run
+            ):
+                return True
+            raise
 
     def _children(self, entry: PathAndStat) -> "list[PathAndStat]":
         children: "list[PathAndStat]" = []
@@ -581,8 +716,18 @@ class PathSyncer(object):
                 else target
             )
 
-        if self.hook(source, target, SyncEvent.SyncStart, False, start, _ignore_error):
-            return
+        # Stat first, then fire SyncStart: the hook is declared to receive
+        # PathAndStat entries, and the arguments of a combined call were
+        # evaluated before start() replaced the raw paths.
+        try:
+            start()
+        except Exception as error:
+            if self._tolerate(
+                _ignore_error, error, source, target, SyncEvent.SyncStart, dry_run
+            ):
+                return
+            raise
+        self.hook(source, target, SyncEvent.SyncStart, dry_run, None, _ignore_error)
 
         if root:
             error = None
@@ -598,8 +743,8 @@ class PathSyncer(object):
                     "source and target overlap"
                 )
             if error is not None:
-                if not _offer_error(
-                    _ignore_error, error, source, target, SyncEvent.SyncStart
+                if not self._tolerate(
+                    _ignore_error, error, source, target, SyncEvent.SyncStart, dry_run
                 ):
                     raise error
                 return
@@ -618,8 +763,8 @@ class PathSyncer(object):
         elif source.is_symlink():
             if self.symlink_mode == "reject":
                 error = NotImplementedError("symlink sync not implemented yet")
-                if not _offer_error(
-                    _ignore_error, error, source, target, SyncEvent.Symlink
+                if not self._tolerate(
+                    _ignore_error, error, source, target, SyncEvent.Symlink, dry_run
                 ):
                     raise error
                 return
@@ -631,25 +776,23 @@ class PathSyncer(object):
                     raise NotImplementedError(
                         "symlink_to() not supported by " f"{type(target.path).__name__}"
                     )
-                # Raw, unresolved target string. A Uri's `.path` is the
-                # un-prefixed link text (Uri.as_posix() prepends "host:" when
-                # the result carries a host, e.g. SftpPath's absolute
-                # targets); plain stdlib Path has no `.path`, so
-                # `.as_posix()` is the only accessor there. Never resolved
-                # against source's parent -- a relative target stays
-                # relative either way.
-                link = source.path.readlink()
-                raw_target = link.path if hasattr(link, "path") else link.as_posix()
+                # Raw, unresolved target string, never resolved against
+                # source's parent -- a relative target stays relative.
+                raw_target = _link_text(source.path)
+                # Windows cannot traverse a file-type link to a directory,
+                # and os.symlink only guesses the kind when the link target
+                # already exists at the destination.
+                is_directory = _link_is_directory(source.path)
 
                 if not target.exists() and not target.is_symlink():
-                    target.path.symlink_to(raw_target)
+                    target.path.symlink_to(raw_target, is_directory)
                     return
                 # Type mismatch or a stale link: create the new link under a
                 # temporary sibling first, so a runtime refusal (no symlink
                 # privilege on Windows, a server permission error) fails
                 # before the existing entry is removed.
                 temp = _temp_sibling(target.path)
-                temp.symlink_to(raw_target)
+                temp.symlink_to(raw_target, is_directory)
                 try:
                     if target.is_file() or target.is_symlink():
                         target.path.unlink()
@@ -658,7 +801,7 @@ class PathSyncer(object):
                     try:
                         temp.rename(target.path)
                     except NotImplementedError:
-                        target.path.symlink_to(raw_target)
+                        target.path.symlink_to(raw_target, is_directory)
                 finally:
                     try:
                         if FileStat.from_path(temp, follow_symlink=False):
@@ -666,15 +809,26 @@ class PathSyncer(object):
                     except Exception:
                         pass
 
-            if self.hook(
-                source,
-                target,
-                SyncEvent.Symlink,
-                dry_run,
-                create_symlink,
-                _ignore_error,
-            ):
-                return
+            # An identical link is left alone: recreating it gave it a new
+            # identity, left a window with no entry, and reported a change
+            # on every run.
+            if not (target.is_symlink() and _same_link(source.path, target.path)):
+                # A backend without symlinks fails in create_symlink() with
+                # NotImplementedError before touching anything; the
+                # directory guard only matters when a link could replace it.
+                if _supports_symlinks(target.path) and self._keeps_directory(
+                    source, target, dry_run, _ignore_error
+                ):
+                    return
+                if self.hook(
+                    source,
+                    target,
+                    SyncEvent.Symlink,
+                    dry_run,
+                    create_symlink,
+                    _ignore_error,
+                ):
+                    return
         elif source.is_file():
             synced = False
             if target.is_file():
@@ -705,11 +859,13 @@ class PathSyncer(object):
                 try:
                     synced = compare()
                 except Exception as error:
-                    if _offer_error(
-                        _ignore_error, error, source, target, SyncEvent.Compare
+                    if self._tolerate(
+                        _ignore_error, error, source, target, SyncEvent.Compare, dry_run
                     ):
                         return
                     raise
+            elif self._keeps_directory(source, target, dry_run, _ignore_error):
+                return
             if not synced:
 
                 def copy():
@@ -793,8 +949,8 @@ class PathSyncer(object):
                 error = ValueError(
                     f"refusing unsafe child name {name!r} under {target.path}"
                 )
-                if not _offer_error(
-                    _ignore_error, error, source_entry, target_entry, event
+                if not self._tolerate(
+                    _ignore_error, error, source_entry, target_entry, event, dry_run
                 ):
                     raise error
                 return True
@@ -837,18 +993,20 @@ class PathSyncer(object):
                             source,
                             target,
                             SyncEvent.CheckTargetChild,
-                            False,
+                            dry_run,
                             checkchild,
                             _ignore_error,
+                            always_run=True,
                         )
 
                 self.hook(
                     source,
                     target,
                     SyncEvent.CheckTargetChildren,
-                    False,
+                    dry_run,
                     checkchildren,
                     _ignore_error,
+                    always_run=True,
                 )
 
             def sync_children():
@@ -860,7 +1018,7 @@ class PathSyncer(object):
                         source,
                         target,
                         SyncEvent.SyncChild,
-                        False,
+                        dry_run,
                         # Propagate the resolved policy into the recursive
                         # call so a per-call override applies to the whole
                         # subtree, not just this level.
@@ -876,15 +1034,17 @@ class PathSyncer(object):
                             False,
                         ),
                         _ignore_error,
+                        always_run=True,
                     )
 
             self.hook(
                 source,
                 target,
                 SyncEvent.SyncChildren,
-                False,
+                dry_run,
                 sync_children,
                 _ignore_error,
+                always_run=True,
             )
         else:
             # Not a file, directory or symlink: a FIFO, socket or device (or

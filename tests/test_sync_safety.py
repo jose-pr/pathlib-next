@@ -470,9 +470,8 @@ def _events():
     events = []
 
     def hook(source, target, event, dry_run):
-        # SyncStart is reported with the raw paths the call received.
-        source = getattr(source, "path", source)
-        target = getattr(target, "path", target)
+        source = source.path
+        target = target.path
         events.append((event, str(source), str(target), dry_run))
 
     return events, hook

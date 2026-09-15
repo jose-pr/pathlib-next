@@ -381,14 +381,16 @@ def test_sync_symlink_preserve_replaces_file_target(tmp_path):
 
 def test_sync_symlink_preserve_replaces_dir_target(tmp_path):
     # Type mismatch: target exists as a directory where source is a
-    # symlink -- preserve mode removes the dir tree first.
+    # symlink -- preserve mode removes the dir tree first. A non-empty
+    # directory is only removed with remove_missing=True (without it the
+    # sync refuses; see tests/test_low_sync.py).
     source = _relative_symlink_source(tmp_path)
     target_path = tmp_path / "link_copy.txt"
     target_path.mkdir()
     (target_path / "nested.txt").write_text("stale nested content")
     target = pathlib_next.LocalPath(target_path)
 
-    _preserve_syncer().sync(source, target)
+    _preserve_syncer(remove_missing=True).sync(source, target)
 
     assert target.is_symlink()
     assert target.readlink().as_posix() == "real.txt"

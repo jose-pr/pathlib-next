@@ -481,3 +481,28 @@ def test_sync_sftp_to_sftp_without_native_checksum_still_detects_changes(remote)
 
     assert (local / "d" / "cfg.json").read_text() == '{"v": 2}'
     assert _names(local / "d") == ["cfg.json"]
+
+
+def test_sync_leaves_identical_remote_symlink_alone(remote, monkeypatch):
+    # sync-identical-symlink-recreated, through SftpPath's `.path` link text
+    # on both sides (absolute targets: this chrooted server cannot read a
+    # relative one back, see test_readlink_absolute_target_keeps_the_server).
+    root, local = remote
+    (local / "releases" / "42").mkdir(parents=True)
+    (local / "src").mkdir()
+    _symlink(str(local / "releases" / "42"), local / "src" / "current")
+    syncer = PathSyncer(_size, follow_symlinks=False)
+    syncer.sync(root / "src", root / "dst")
+    assert (root / "dst" / "current").readlink().path == "/releases/42"
+
+    created = []
+    monkeypatch.setattr(
+        SftpPath, "_symlink_to", lambda self, *args: created.append(self)
+    )
+    events = []
+    syncer._hook = lambda s, t, event, dry_run: events.append(event)
+    syncer.sync(root / "src", root / "dst")
+
+    assert created == []
+    assert SyncEvent.Symlink not in events
+    assert os.path.islink(local / "dst" / "current")
