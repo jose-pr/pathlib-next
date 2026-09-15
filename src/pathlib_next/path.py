@@ -829,8 +829,16 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         # arity -- arities differ per call site by design, see the helper.
         _onerror = _utils.as_error_handler(ignore_error)
 
+        # An error the handler declined, on its way out: each enclosing
+        # directory's `except` catches it again, and consulting the handler
+        # there reported one failure once per ancestor.
+        declined = []
+
         def _handle(error, path):
+            if any(error is seen for seen in declined):
+                raise error
             if not _onerror(error, path):
+                declined.append(error)
                 raise error
 
         def _scan_entries(path):

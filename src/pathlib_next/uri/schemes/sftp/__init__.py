@@ -46,6 +46,12 @@ class BaseSftpBackend(object):
     #: lchmod equivalent to call; asyncssh's `chmod()` takes
     #: `follow_symlinks` natively.
     supports_lchmod = False
+
+    def _wire_open_mode(self, mode: str) -> str:
+        """The mode string this backend's client `open()` needs for a
+        pathlib `_open()` mode (no "b"). Default: unchanged."""
+        return mode
+
     #: Whether `hardlink_to()` is supported. SFTPv3 (paramiko's ceiling)
     #: has no core hard-link operation at all.
     supports_hardlink = False
@@ -293,8 +299,58 @@ class SftpPath(UriPath):
         # listdir_attr() gets attrs (lstat-like -- symlinks are not
         # resolved) for every child in one round trip, instead of a plain
         # name list (listdir()) plus a separate stat()/lstat() per child.
-        for attr in self._sftpclient.listdir_attr(self.path):
+        try:
+            attrs = self._sftpclient.listdir_attr(self.path)
+        except OSError as error:
+            translated = self._directory_error(error)
+            if translated is None:
+                raise
+            raise translated from error
+        for attr in attrs:
             yield attr.filename, FileStat.from_stat(attr)
+
+    def _entry_stat(self):
+        """This entry's stat, or None if even that fails."""
+        try:
+            return FileStat.from_stat(self._sftpclient.stat(self.path))
+        except OSError:
+            return None
+
+    def _directory_error(self, error: OSError, *, check_empty=False):
+        """pathlib's exception for a failed directory operation (listing,
+        `rmdir()`), or None to keep `error`. SFTPv3 has no ENOTDIR or
+        ENOTEMPTY status: servers send "no such file" (OpenSSH maps ENOTDIR
+        to it) or a bare failure, so the entry itself is consulted -- on this
+        failure path only."""
+        stat = self._entry_stat()
+        if stat is None:
+            return None
+        if not stat.is_dir():
+            return NotADirectoryError(
+                _errno.ENOTDIR, _os.strerror(_errno.ENOTDIR), str(self)
+            )
+        if check_empty and error.errno is None:
+            try:
+                has_children = bool(self._sftpclient.listdir_attr(self.path))
+            except OSError:
+                return None
+            if has_children:
+                return OSError(
+                    _errno.ENOTEMPTY, _os.strerror(_errno.ENOTEMPTY), str(self)
+                )
+        return None
+
+    def _file_error(self, error: OSError):
+        """pathlib's exception for a file operation (open, unlink) that
+        failed on a directory, or None to keep `error`. SFTPv3 has no EISDIR
+        status either: OpenSSH-style servers send a bare failure. A status
+        with an errno (permission denied, no such file) is already right."""
+        if error.errno is not None:
+            return None
+        stat = self._entry_stat()
+        if stat is None or not stat.is_dir():
+            return None
+        return IsADirectoryError(_errno.EISDIR, _os.strerror(_errno.EISDIR), str(self))
 
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
@@ -310,7 +366,9 @@ class SftpPath(UriPath):
 
     def _open(self, mode="r", buffering=-1):
         try:
-            return self._sftpclient.open(self.path, mode, buffering)
+            return self._sftpclient.open(
+                self.path, self.backend._wire_open_mode(mode), buffering
+            )
         except OSError as error:
             # SFTPv3 has no dedicated "already exists" status code -- an
             # O_EXCL ("x" mode) failure comes back as a generic failure,
@@ -319,7 +377,10 @@ class SftpPath(UriPath):
             # backends against a real-world (v3) server.
             if "x" in mode and self.exists():
                 raise FileExistsError(self) from error
-            raise
+            translated = self._file_error(error)
+            if translated is None:
+                raise
+            raise translated from error
 
     def _mkdir(self, mode):
         try:
@@ -403,9 +464,20 @@ class SftpPath(UriPath):
         except FileNotFoundError:
             if not missing_ok:
                 raise
+        except OSError as error:
+            translated = self._file_error(error)
+            if translated is None:
+                raise
+            raise translated from error
 
     def rmdir(self):
-        return self._sftpclient.rmdir(self.path)
+        try:
+            return self._sftpclient.rmdir(self.path)
+        except OSError as error:
+            translated = self._directory_error(error, check_empty=True)
+            if translated is None:
+                raise
+            raise translated from error
 
     def rename(self, target: "SftpPath | Uri | str"):
         # base Path.rename is the notimplemented stub -- this was never
@@ -424,6 +496,11 @@ class SftpPath(UriPath):
         # plain SFTPv3 RENAME refuses to overwrite with a generic failure,
         # which is raised as FileExistsError when the target exists.
         target = self._rename_target(target)
+        self._rename_on_wire(target)
+        # pathlib returns the new path.
+        return self.with_path(target.path)
+
+    def _rename_on_wire(self, target: Uri) -> None:
         client = self._sftpclient
         posix_rename = getattr(client, "posix_rename", None)
         if posix_rename is not None and not _posix_rename_known_unsupported(client):

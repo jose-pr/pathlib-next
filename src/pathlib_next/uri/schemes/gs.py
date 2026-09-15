@@ -388,9 +388,11 @@ class GsPath(UriPath):
     def rename(self, target: "GsPath | Uri | str"):
         target = self._rename_target(target)
         dest_key = _object_key(target.path)
+        # pathlib returns the new path.
+        renamed = self.with_path(target.path)
         if dest_key == self.key:
             # Copying onto itself and then deleting the source loses the object.
-            return
+            return renamed
         source_blob = self._reload(self.key)
         if source_blob is None:
             # No object at the key: a prefix directory (stat() raises
@@ -402,3 +404,4 @@ class GsPath(UriPath):
         with _translate_errors(self):
             self._bucket.copy_blob(source_blob, self._bucket, dest_key)
             source_blob.delete()
+        return renamed

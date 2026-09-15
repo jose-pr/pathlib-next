@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno as _errno
 import io
 import posixpath as _posix
 import time as _time
@@ -209,7 +210,9 @@ class MemPath(Path):
         elif not isinstance(content, dict):
             raise NotADirectoryError(self)
         elif len(content) != 0:
-            raise FileExistsError(self)
+            # pathlib raises OSError(ENOTEMPTY); FileExistsError (EEXIST)
+            # carried no errno and matched no caller's ENOTEMPTY check.
+            raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         parent.pop(name)
 
     def unlink(self, missing_ok=False):

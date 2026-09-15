@@ -539,8 +539,10 @@ class S3Path(UriPath):
     def rename(self, target: "S3Path | Uri | str"):
         target = self._rename_target(target)
         dest_key = _object_key(target.path)
+        # pathlib returns the new path.
+        renamed = self.with_path(target.path)
         if dest_key == self.key:
-            return
+            return renamed
         client = self._client
         try:
             head = client.head_object(Bucket=self.bucket, Key=self.key)
@@ -576,3 +578,4 @@ class S3Path(UriPath):
             client.delete_object(Bucket=self.bucket, Key=self.key)
         except _S3_ERRORS as error:
             raise _oserror(error, self) from error
+        return renamed

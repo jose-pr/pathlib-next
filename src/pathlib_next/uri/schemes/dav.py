@@ -220,7 +220,14 @@ class DavPath(HttpPath):
             # encoded and must stay part of the name.
             href_path = _urlparse.unquote(_urlparse.urlsplit(href).path).rstrip("/")
             if not href_path or href_path == self_path:
-                continue  # the "." entry describing self, per RFC 4918
+                # The "." entry describing self, per RFC 4918. A Depth:1
+                # PROPFIND on a non-collection answers with only this entry,
+                # which read as an empty directory.
+                if not is_dir:
+                    raise NotADirectoryError(
+                        _errno.ENOTDIR, _os.strerror(_errno.ENOTDIR), str(self)
+                    )
+                continue
             name = href_path.rsplit("/", 1)[-1]
             # The href is untrusted: an entry such as `%2E%2E/` decodes to
             # "..", which let a recursive copy write outside its destination.
@@ -247,6 +254,20 @@ class DavPath(HttpPath):
                     # the body unread and the pooled connection held.
                     req.close()
                     raise
+            content_type = req.headers.get("Content-Type", "")
+            if content_type.split(";")[0].strip().lower() == "text/html":
+                # GET on a collection is server-defined (RFC 4918 9.4) and
+                # usually an HTML index, which was read back as content.
+                # Only an HTML answer pays the PROPFIND that tells them apart.
+                try:
+                    is_dir = self.stat().is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    req.close()
+                    raise IsADirectoryError(
+                        _errno.EISDIR, _os.strerror(_errno.EISDIR), str(self)
+                    )
             return _response_reader(self, req, buffering)
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
@@ -297,8 +318,12 @@ class DavPath(HttpPath):
         # "." entry describing itself, which _scandir() already filters
         # out -- so a *file* looks exactly like an empty directory to
         # _listdir() alone, and rmdir() on a file silently DELETEd it.
-        if not self.is_dir():
-            raise NotADirectoryError(self)
+        # stat(), not is_dir(): a missing path is FileNotFoundError, not
+        # NotADirectoryError.
+        if not self.stat().is_dir():
+            raise NotADirectoryError(
+                _errno.ENOTDIR, _os.strerror(_errno.ENOTDIR), str(self)
+            )
         for _ in self._listdir():
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         self._delete()
@@ -346,3 +371,5 @@ class DavPath(HttpPath):
                 412: lambda _self: FileExistsError(target),
             },
         )
+        # pathlib returns the new path.
+        return self.with_path(target.path)

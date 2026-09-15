@@ -407,7 +407,7 @@ class Uri(Pathname):
                 return path
             elif os.name == "nt":
                 # A named host is a UNC share even when it is this machine:
-                # "file://gungnir/share/x" is "//gungnir/share/x", never
+                # "file://fileserver/share/x" is "//fileserver/share/x", never
                 # "/share/x" on the current drive. No DNS lookup either.
                 return f"//{host}/{self.path.removeprefix('/')}"
             elif self.is_local():

@@ -504,8 +504,8 @@ class AzPath(UriPath):
         dest_key = dest.key
         if dest_key == self.key:
             # Copying a blob onto itself and then deleting the "source"
-            # deletes the only copy.
-            return
+            # deletes the only copy. pathlib returns the new path.
+            return dest
         if self._properties(self.key) is None:
             # No blob at the key: a prefix directory (stat() raises
             # FileNotFoundError when there is nothing at all). move() falls
@@ -529,3 +529,4 @@ class AzPath(UriPath):
             if _copy_status(copy_props) != "success":
                 raise OSError(f"Copy failed: {self} -> {target}")
             source_blob_client.delete_blob()
+        return dest

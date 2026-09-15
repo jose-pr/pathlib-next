@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno as _errno
 import io as _io
+import itertools as _itertools
 import urllib.parse as _urlparse
 
 from ...utils.stat import FileStat
@@ -173,7 +175,19 @@ class GitLabPath(_RepoApiPath):
         raise FileNotFoundError(self)
 
     def _scandir(self):
-        for entry in self._tree_entries(self.repo_path):
+        entries = self._tree_entries(self.repo_path)
+        try:
+            first = next(entries, None)
+        except FileNotFoundError:
+            # The tree endpoint 404s for a blob path as for a missing one.
+            if self.repo_path and self._get_file_meta(self.repo_path) is not None:
+                raise NotADirectoryError(
+                    _errno.ENOTDIR, "Not a directory", str(self)
+                ) from None
+            raise
+        if first is None:
+            return
+        for entry in _itertools.chain((first,), entries):
             is_dir = entry["type"] == "tree"
             yield entry["name"], (FileStat(is_dir=True) if is_dir else None)
 
@@ -187,7 +201,21 @@ class GitLabPath(_RepoApiPath):
         path = self.repo_path
         if not path:
             raise IsADirectoryError(self)
-        resp = self._request(
-            "GET", self._file_url(path, "/raw"), params={"ref": self._resolved_ref()}
-        )
+        try:
+            resp = self._request(
+                "GET",
+                self._file_url(path, "/raw"),
+                params={"ref": self._resolved_ref()},
+            )
+        except FileNotFoundError:
+            # The files endpoint 404s for a tree path as for a missing one.
+            try:
+                is_dir = self.stat().is_dir()
+            except FileNotFoundError:
+                is_dir = False
+            if is_dir:
+                raise IsADirectoryError(
+                    _errno.EISDIR, "Is a directory", str(self)
+                ) from None
+            raise
         return _io.BytesIO(resp.content)

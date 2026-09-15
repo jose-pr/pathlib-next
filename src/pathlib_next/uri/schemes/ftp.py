@@ -548,6 +548,8 @@ class FtpPath(UriPath):
             self._call("rename", self.path, target.path)
         except _ftplib.error_perm as error:
             raise self._translate(error) from error
+        # pathlib returns the new path.
+        return self.with_path(target.path)
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # SITE CHMOD is a non-standard FTP extension; pyftpdlib and many real

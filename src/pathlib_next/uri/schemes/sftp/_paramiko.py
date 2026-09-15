@@ -176,6 +176,15 @@ class SftpBackend(BaseSftpBackend):
     #: Default connect/banner/auth/channel-open timeout, in seconds.
     DEFAULT_TIMEOUT = 30.0
 
+    def _wire_open_mode(self, mode: str) -> str:
+        # paramiko derives SFTP_FLAG_WRITE (and the file object's
+        # writability) from "w"/"a"/"+" only, so a bare "x" created a file
+        # that could not be written. "w" adds CREATE|TRUNC, which EXCL makes
+        # moot: the file must not exist yet.
+        if "x" in mode and "w" not in mode:
+            return "w" + mode
+        return mode
+
     def __init__(
         self,
         connect_opts=None,
