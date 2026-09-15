@@ -10,34 +10,36 @@ Run directly:
     export WEBDAV_EXAMPLE_PASSWORD=pass     # optional
     python examples/webdav_roundtrip.py
 """
+
 import os
 import sys
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from pathlib_next.uri import UriPath
 
 
-def webdav_roundtrip(remote_uri: str):
-    root = UriPath(remote_uri)
-    print(f"Connecting to WebDAV: {remote_uri}")
-    
+def webdav_roundtrip(root: UriPath):
+    # str() of a URI path drops the password, so printing it is safe.
+    print(f"Connecting to WebDAV: {root}")
+
     # 1. Create a directory
     test_dir = root / "pathlib_next_test"
     print(f"Creating directory: {test_dir}")
     test_dir.mkdir(exist_ok=True)
-    
+
     # 2. Write a file
     test_file = test_dir / "test.txt"
     print(f"Writing file: {test_file}")
     test_file.write_text("Hello from WebDAV!")
-    
+
     # 3. List the directory contents
     print("Listing directory:")
     for child in test_dir.iterdir():
         print(f"  - {child.name} (size: {child.stat().st_size} bytes)")
-        
+
     # 4. Read the file back
     print("Reading file content:", test_file.read_text())
-    
+
     # 5. Clean up
     print("Cleaning up (recursive delete)...")
     test_dir.rm(recursive=True)
@@ -56,17 +58,25 @@ if __name__ == "__main__":
 
     user = os.environ.get("WEBDAV_EXAMPLE_USER")
     password = os.environ.get("WEBDAV_EXAMPLE_PASSWORD")
-    
-    # If the URL already contains credentials or we want to insert them:
-    # We can parse the URL and inject userinfo if provided.
-    from urllib.parse import urlsplit, urlunsplit
+
+    # Inject the credentials unless the URL already carries some.
+    # Percent-encode both parts: a raw "/", "#", "?" or "@" in a password
+    # would otherwise change where the URI's host and path begin.
     parts = urlsplit(url)
-    userinfo = f"{user}:{password}" if user and password else (user if user else "")
-    if userinfo and not parts.username:
+    if user and "@" not in parts.netloc:
+        userinfo = quote(user, safe="")
+        if password:
+            userinfo += ":" + quote(password, safe="")
         netloc = f"{userinfo}@{parts.netloc}"
-        url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        url = urlunsplit(
+            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+        )
+    root = UriPath(url)
 
     try:
-        webdav_roundtrip(url)
+        webdav_roundtrip(root)
     except Exception as error:
-        print(f"Could not connect to WebDAV at {url} ({error}); skipping.", file=sys.stderr)
+        print(
+            f"Could not connect to WebDAV at {root} ({error}); skipping.",
+            file=sys.stderr,
+        )

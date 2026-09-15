@@ -5,6 +5,7 @@ Run directly:
 
     python examples/data_and_archive.py
 """
+
 import tarfile
 import tempfile
 import zipfile
@@ -39,21 +40,21 @@ def zip_archive_example(tmpdir_path: Path):
     # Format: zip:file:///<absolute_path>!/<inner_path>
     zip_root_uri = f"zip:{zip_file.as_uri()}!/"
     zip_root = UriPath(zip_root_uri)
-    
+
     print("ZIP listing:", sorted(p.name for p in zip_root.iterdir()))
-    
+
     # Read inner file
     hello_file = zip_root / "hello.txt"
     print("hello.txt inside ZIP:", hello_file.read_text())
 
     nested_file = zip_root / "sub" / "nested.txt"
     print("sub/nested.txt inside ZIP:", nested_file.read_text())
-    
+
     # Appending a new file to ZIP via the unified path API
     # Writing only works when the archive is a local file URI
     new_member = zip_root / "new_file.txt"
     new_member.write_text("Dynamically written to ZIP!")
-    
+
     # Verify the write by list and read
     print("ZIP listing after write:", sorted(p.name for p in zip_root.iterdir()))
     print("new_file.txt content:", new_member.read_text())
@@ -80,7 +81,7 @@ def tar_archive_example(tmpdir_path: Path):
     tar_root = UriPath(tar_root_uri)
 
     print("TAR listing:", sorted(p.name for p in tar_root.iterdir()))
-    
+
     readme = tar_root / "readme.txt"
     print("readme.txt inside TAR:", readme.read_text())
 

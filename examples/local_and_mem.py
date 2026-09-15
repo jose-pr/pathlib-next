@@ -3,6 +3,7 @@ self-contained (no network, no external services). Run directly:
 
     python examples/local_and_mem.py
 """
+
 import tempfile
 
 from pathlib_next import Path, glob

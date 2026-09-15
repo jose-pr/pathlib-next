@@ -15,6 +15,7 @@ Run directly:
     export GITLAB_TOKEN=...                # optional
     python examples/gitlab_listing.py
 """
+
 import os
 import sys
 
@@ -51,4 +52,7 @@ if __name__ == "__main__":
     try:
         list_gitlab(host, owner_repo, path, ref, token)
     except Exception as error:
-        print(f"Could not list GitLab project {owner_repo} ({error}); skipping.", file=sys.stderr)
+        print(
+            f"Could not list GitLab project {owner_repo} ({error}); skipping.",
+            file=sys.stderr,
+        )

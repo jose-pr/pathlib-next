@@ -11,19 +11,31 @@ Run directly:
     export FTP_EXAMPLE_REMOTE_PATH=/debian  # optional, default shown below
     python examples/ftp_listing.py
 """
+
 import os
 import sys
+from urllib.parse import quote
 
 from pathlib_next.uri import UriPath
 
 
-def list_ftp(remote_uri: str):
-    remote = UriPath(remote_uri)
-    print(f"Listing FTP directory: {remote_uri}")
+def list_ftp(remote: UriPath):
+    # str() of a URI path drops the password, so printing it is safe.
+    print(f"Listing FTP directory: {remote}")
     for child in remote.iterdir():
         kind = "dir " if child.is_dir() else "file"
         size = "" if child.is_dir() else f" ({child.stat().st_size} bytes)"
         print(f"  [{kind}] {child.name}{size}")
+
+
+def _userinfo(user, password):
+    # Percent-encode both parts: a raw "/", "#", "?" or "@" in a password
+    # would otherwise change where the URI's host and path begin.
+    if not user:
+        return ""
+    if password:
+        return f"{quote(user, safe='')}:{quote(password, safe='')}@"
+    return f"{quote(user, safe='')}@"
 
 
 if __name__ == "__main__":
@@ -39,11 +51,11 @@ if __name__ == "__main__":
     user = os.environ.get("FTP_EXAMPLE_USER")
     password = os.environ.get("FTP_EXAMPLE_PASSWORD")
     remote_path = os.environ.get("FTP_EXAMPLE_REMOTE_PATH", "/")
-    
-    userinfo = f"{user}:{password}@" if user and password else (f"{user}@" if user else "")
-    remote_uri = f"ftp://{userinfo}{host}{remote_path}"
+
+    userinfo = _userinfo(user, password)
+    remote = UriPath(f"ftp://{userinfo}{host}{remote_path}")
 
     try:
-        list_ftp(remote_uri)
+        list_ftp(remote)
     except Exception as error:
-        print(f"Could not connect to {remote_uri} ({error}); skipping.", file=sys.stderr)
+        print(f"Could not connect to {remote} ({error}); skipping.", file=sys.stderr)

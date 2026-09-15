@@ -9,6 +9,7 @@ Run directly:
     python examples/http_listing.py
     HTTP_LISTING_URL=http://example.com/some/dir/ python examples/http_listing.py
 """
+
 import os
 import sys
 
@@ -22,9 +23,9 @@ from pathlib_next.uri import UriPath
 DEFAULT_URL = "http://ftp.gnu.org/gnu/"
 
 
-def list_and_stat(url: str):
-    root = UriPath(url)
-    print(f"Listing {url}")
+def list_and_stat(root: UriPath):
+    # str() of a URI path drops any password in the URL, so printing it is safe.
+    print(f"Listing {root}")
     for child in root.iterdir():
         kind = "dir " if child.is_dir() else "file"
         size = "" if child.is_dir() else f" ({child.stat().st_size} bytes)"
@@ -32,8 +33,8 @@ def list_and_stat(url: str):
 
 
 if __name__ == "__main__":
-    url = os.environ.get("HTTP_LISTING_URL", DEFAULT_URL)
+    root = UriPath(os.environ.get("HTTP_LISTING_URL", DEFAULT_URL))
     try:
-        list_and_stat(url)
+        list_and_stat(root)
     except Exception as error:
-        print(f"Could not reach {url} ({error}); skipping.", file=sys.stderr)
+        print(f"Could not reach {root} ({error}); skipping.", file=sys.stderr)

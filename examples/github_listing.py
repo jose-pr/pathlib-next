@@ -14,6 +14,7 @@ Run directly:
     export GITHUB_TOKEN=...               # optional
     python examples/github_listing.py
 """
+
 import os
 import sys
 
@@ -49,4 +50,7 @@ if __name__ == "__main__":
     try:
         list_github(owner_repo, path, ref, token)
     except Exception as error:
-        print(f"Could not list GitHub repo {owner_repo} ({error}); skipping.", file=sys.stderr)
+        print(
+            f"Could not list GitHub repo {owner_repo} ({error}); skipping.",
+            file=sys.stderr,
+        )

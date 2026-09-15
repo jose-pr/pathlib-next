@@ -11,6 +11,7 @@ Run directly:
     export S3_EXAMPLE_PREFIX=some/folder/   # optional
     python examples/s3_listing.py
 """
+
 import os
 import sys
 
@@ -43,4 +44,7 @@ if __name__ == "__main__":
     try:
         list_s3(bucket, prefix)
     except Exception as error:
-        print(f"Could not connect to S3 bucket {bucket} ({error}); skipping.", file=sys.stderr)
+        print(
+            f"Could not connect to S3 bucket {bucket} ({error}); skipping.",
+            file=sys.stderr,
+        )
