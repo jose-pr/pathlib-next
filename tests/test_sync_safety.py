@@ -456,3 +456,442 @@ def test_sibling_prefix_is_not_an_overlap(tmp_path):
 
     assert (tmp_path / "data2" / "a.txt").read_text() == "aaa"
     assert (tmp_path / "data" / "a.txt").read_text() == "aaa"
+
+
+# --- wave 5 (G6): remaining PathSyncer soundness findings ------------------
+
+import errno
+import stat as stat_module
+
+from pathlib_next.utils.stat import FileStat
+
+
+def _events():
+    events = []
+
+    def hook(source, target, event, dry_run):
+        # SyncStart is reported with the raw paths the call received.
+        source = getattr(source, "path", source)
+        target = getattr(target, "path", target)
+        events.append((event, str(source), str(target), dry_run))
+
+    return events, hook
+
+
+# sync-symlink-preserve-deletes-before-failing
+
+
+def test_preserve_onto_backend_without_symlinks_keeps_existing_entry(tmp_path):
+    real = tmp_path / "real"
+    _write(real / "file.txt", "content")
+    source = tmp_path / "src"
+    source.mkdir()
+    _symlink(real, source / "data", directory=True)
+    target = MemPath("/dst")
+    (target / "data").mkdir(parents=True)
+    (target / "data" / "precious.txt").write_text("precious")
+    calls, ignore = _collect()
+
+    PathSyncer(_size, follow_symlinks=False, ignore_error=ignore).sync(
+        pathlib_next.LocalPath(source), target
+    )
+
+    assert (target / "data" / "precious.txt").read_text() == "precious"
+    assert len(calls) == 1
+    error, _, failing_target, event = calls[0]
+    assert isinstance(error, NotImplementedError)
+    assert event is SyncEvent.Symlink
+    assert failing_target.path == target / "data"
+
+
+def test_preserve_runtime_symlink_refusal_keeps_existing_file(tmp_path, monkeypatch):
+    # A backend that implements symlinks but refuses at runtime (WinError
+    # 1314 without the privilege, an SFTP permission error): the refusal
+    # happens on a temporary sibling, before the target is removed.
+    source = tmp_path / "src"
+    source.mkdir()
+    _write(tmp_path / "real.txt", "real")
+    _symlink(tmp_path / "real.txt", source / "link.txt")
+    target = tmp_path / "dst"
+    _write(target / "link.txt", "previous regular file")
+
+    def refuse(self, target, target_is_directory=False):
+        raise PermissionError(errno.EPERM, "no symlink privilege", str(self))
+
+    monkeypatch.setattr(pathlib_next.LocalPath, "_symlink_to", refuse)
+    with pytest.raises(PermissionError):
+        PathSyncer(_size, follow_symlinks=False).sync(
+            pathlib_next.LocalPath(source), pathlib_next.LocalPath(target)
+        )
+
+    assert (target / "link.txt").read_text() == "previous regular file"
+    assert sorted(p.name for p in target.iterdir()) == ["link.txt"]
+
+
+def test_preserve_replaces_existing_file_with_link(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    _write(tmp_path / "real.txt", "real")
+    _symlink(os.path.join("..", "real.txt"), source / "link.txt")
+    target = tmp_path / "dst"
+    _write(target / "link.txt", "old")
+
+    PathSyncer(_size, follow_symlinks=False).sync(
+        pathlib_next.LocalPath(source), pathlib_next.LocalPath(target)
+    )
+
+    assert (target / "link.txt").is_symlink()
+    assert os.readlink(target / "link.txt") == os.path.join("..", "real.txt")
+    assert sorted(p.name for p in target.iterdir()) == ["link.txt"]
+
+
+# sync-copy-not-atomic
+
+
+class _ResetStream(io.RawIOBase):
+    """Serves one chunk, then fails like a dropped connection."""
+
+    def __init__(self, data):
+        self._data = data
+        self._reads = 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        self._reads += 1
+        if self._reads > 1:
+            raise ConnectionResetError(errno.ECONNRESET, "connection reset")
+        chunk = self._data[:4]
+        buffer[: len(chunk)] = chunk
+        return len(chunk)
+
+
+class _FlakyMemPath(MemPath):
+    def _open(self, mode="r", buffering=-1):
+        handle = super()._open(mode, buffering)
+        if mode == "r" and self.name == "data.bin":
+            return _ResetStream(handle.read())
+        return handle
+
+
+def _flaky_source():
+    source = _FlakyMemPath("/src")
+    source.mkdir()
+    (source / "data.bin").write_bytes(b"NEW! content of a different size")
+    return source
+
+
+def test_failed_copy_keeps_previous_local_version(tmp_path):
+    target = tmp_path / "dst"
+    _write(target / "data.bin", "previous good version")
+
+    with pytest.raises(ConnectionResetError):
+        PathSyncer(_size).sync(_flaky_source(), pathlib_next.LocalPath(target))
+
+    assert (target / "data.bin").read_text() == "previous good version"
+    # The temporary sibling is gone too.
+    assert sorted(p.name for p in target.iterdir()) == ["data.bin"]
+
+
+def test_failed_copy_ignored_keeps_previous_version_and_continues(tmp_path):
+    source = _flaky_source()
+    (source / "z.txt").write_text("later sibling")
+    target = tmp_path / "dst"
+    _write(target / "data.bin", "previous good version")
+    calls, ignore = _collect()
+
+    PathSyncer(_size, ignore_error=ignore).sync(source, pathlib_next.LocalPath(target))
+
+    assert (target / "data.bin").read_text() == "previous good version"
+    assert (target / "z.txt").read_text() == "later sibling"
+    assert [event for _, _, _, event in calls] == [SyncEvent.Copy]
+
+
+def test_copy_replaces_changed_local_file(tmp_path):
+    source = MemPath("/src")
+    source.mkdir()
+    (source / "a.txt").write_text("new, longer content")
+    target = tmp_path / "dst"
+    _write(target / "a.txt", "old")
+
+    PathSyncer(_size).sync(source, pathlib_next.LocalPath(target))
+
+    assert (target / "a.txt").read_text() == "new, longer content"
+    assert sorted(p.name for p in target.iterdir()) == ["a.txt"]
+
+
+def test_failed_copy_onto_backend_without_rename_keeps_target():
+    # MemPath has no rename(): overwritten in place, but the source is
+    # opened before the target is truncated.
+    class VanishingMemPath(MemPath):
+        def _open(self, mode="r", buffering=-1):
+            if mode == "r" and self.name == "a.txt":
+                raise FileNotFoundError(errno.ENOENT, "vanished", str(self))
+            return super()._open(mode, buffering)
+
+    source = VanishingMemPath("/src")
+    source.mkdir()
+    (source / "a.txt").write_text("a different size")
+    target = MemPath("/dst")
+    target.mkdir()
+    (target / "a.txt").write_text("previous")
+
+    with pytest.raises(FileNotFoundError):
+        PathSyncer(_size).sync(source, target)
+
+    assert (target / "a.txt").read_text() == "previous"
+
+
+# sync-dry-run-crashes
+
+
+def _mutations(events):
+    mutating = {
+        SyncEvent.Copy,
+        SyncEvent.RemovedMissing,
+        SyncEvent.CreatedDirectory,
+        SyncEvent.TypeMismatch,
+        SyncEvent.Symlink,
+    }
+    return [(e, s, t) for e, s, t, _ in events if e in mutating]
+
+
+def test_dry_run_over_new_subdirectory_with_remove_missing(tmp_path):
+    source = tmp_path / "src"
+    _write(source / "newsub" / "deep" / "f.txt", "f")
+    _write(source / "keep.txt", "keep")
+    target = tmp_path / "dst"
+    _write(target / "keep.txt", "keep")
+    _write(target / "stale.txt", "stale")
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+
+    dry_events, dry_hook = _events()
+    PathSyncer(_size, remove_missing=True, hook=dry_hook).sync(
+        pathlib_next.LocalPath(source), pathlib_next.LocalPath(target), dry_run=True
+    )
+
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before
+
+    real_events, real_hook = _events()
+    PathSyncer(_size, remove_missing=True, hook=real_hook).sync(
+        pathlib_next.LocalPath(source), pathlib_next.LocalPath(target)
+    )
+    assert _mutations(dry_events) == _mutations(real_events)
+    assert (target / "newsub" / "deep" / "f.txt").read_text() == "f"
+    assert not (target / "stale.txt").exists()
+
+
+def test_dry_run_onto_absent_root_with_remove_missing(tmp_path):
+    source = tmp_path / "src"
+    _write(source / "sub" / "f.txt", "f")
+    target = tmp_path / "dst"
+
+    PathSyncer(_size, remove_missing=True).sync(
+        pathlib_next.LocalPath(source), pathlib_next.LocalPath(target), dry_run=True
+    )
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("remove_missing", [True, False])
+def test_dry_run_over_file_to_directory_change(remove_missing):
+    source = MemPath("/src")
+    (source / "x").mkdir(parents=True)
+    (source / "x" / "child.txt").write_text("child")
+    target = MemPath("/dst")
+    target.mkdir()
+    (target / "x").write_text("was a file")
+
+    dry_events, dry_hook = _events()
+    PathSyncer(_size, remove_missing=remove_missing, hook=dry_hook).sync(
+        source, target, dry_run=True
+    )
+
+    assert (target / "x").read_text() == "was a file"
+
+    real_events, real_hook = _events()
+    PathSyncer(_size, remove_missing=remove_missing, hook=real_hook).sync(
+        source, target
+    )
+    assert _mutations(dry_events) == _mutations(real_events)
+    assert (target / "x" / "child.txt").read_text() == "child"
+
+
+# sync-removedmissing-event-reports-parent
+
+
+def test_removed_missing_event_names_the_removed_entry(tmp_path):
+    source = MemPath("/src")
+    (source / "sub").mkdir(parents=True)
+    target = tmp_path / "dst"
+    _write(target / "stale1.txt", "1")
+    _write(target / "sub" / "stale2.txt", "2")
+    events, hook = _events()
+
+    PathSyncer(_size, remove_missing=True, hook=hook).sync(
+        source, pathlib_next.LocalPath(target), dry_run=True
+    )
+
+    removed = sorted(t for e, _, t, _ in events if e is SyncEvent.RemovedMissing)
+    assert removed == sorted(
+        [str(target / "stale1.txt"), str(target / "sub" / "stale2.txt")]
+    )
+    sources = sorted(s for e, s, _, _ in events if e is SyncEvent.RemovedMissing)
+    assert sources == ["/src/stale1.txt", "/src/sub/stale2.txt"]
+    assert (target / "stale1.txt").exists()
+
+
+# sync-error-policy-duplicated-and-misattributed
+
+
+def _nested_trees(tmp_path):
+    source = MemPath("/src")
+    (source / "l1" / "l2").mkdir(parents=True)
+    (source / "l1" / "l2" / "f.txt").write_text("source")
+    target = tmp_path / "dst"
+    _write(target / "l1" / "l2" / "f.txt", "target")
+    return source, pathlib_next.LocalPath(target)
+
+
+def test_checksum_error_reaches_policy_once_with_the_file(tmp_path):
+    def bad_checksum(entry):
+        raise RuntimeError("checksum failed")
+
+    source, target = _nested_trees(tmp_path)
+    calls = []
+
+    def decline(error, source_entry, target_entry, event):
+        calls.append((error, str(source_entry.path), target_entry.path, event))
+        return False
+
+    with pytest.raises(RuntimeError):
+        PathSyncer(bad_checksum, ignore_error=decline).sync(source, target)
+
+    assert len(calls) == 1
+    _, source_path, target_path, event = calls[0]
+    assert source_path == "/src/l1/l2/f.txt"
+    assert target_path == target / "l1" / "l2" / "f.txt"
+    assert event is SyncEvent.Compare
+
+
+def test_copy_error_reaches_policy_once(tmp_path):
+    target = tmp_path / "dst"
+    _write(target / "data.bin", "previous good version")
+    calls = []
+
+    def decline(error, source_entry, target_entry, event):
+        calls.append((str(target_entry.path), event))
+        return False
+
+    with pytest.raises(ConnectionResetError):
+        PathSyncer(_size, ignore_error=decline).sync(
+            _flaky_source(), pathlib_next.LocalPath(target)
+        )
+
+    assert calls == [(str(target / "data.bin"), SyncEvent.Copy)]
+
+
+def test_root_file_pair_checksum_error_reaches_policy(tmp_path):
+    def bad_checksum(entry):
+        raise RuntimeError("checksum failed")
+
+    _write(tmp_path / "a.txt", "a")
+    _write(tmp_path / "b.txt", "b")
+    calls, ignore = _collect()
+
+    PathSyncer(bad_checksum, ignore_error=ignore).sync(
+        pathlib_next.LocalPath(tmp_path / "a.txt"),
+        pathlib_next.LocalPath(tmp_path / "b.txt"),
+    )
+
+    assert [event for _, _, _, event in calls] == [SyncEvent.Compare]
+    assert (tmp_path / "b.txt").read_text() == "b"
+
+    with pytest.raises(RuntimeError):
+        PathSyncer(bad_checksum).sync(
+            pathlib_next.LocalPath(tmp_path / "a.txt"),
+            pathlib_next.LocalPath(tmp_path / "b.txt"),
+        )
+
+
+def test_tolerated_compare_error_does_not_stop_siblings(tmp_path):
+    def checksum(entry):
+        if entry.path.name == "bad.txt":
+            raise RuntimeError("checksum failed")
+        return entry.stat.st_size
+
+    source = MemPath("/src")
+    source.mkdir()
+    (source / "bad.txt").write_text("source")
+    (source / "good.txt").write_text("new content")
+    target = tmp_path / "dst"
+    _write(target / "bad.txt", "target")
+    _write(target / "good.txt", "old")
+    calls, ignore = _collect()
+
+    PathSyncer(checksum, ignore_error=ignore).sync(
+        source, pathlib_next.LocalPath(target)
+    )
+
+    assert len(calls) == 1
+    assert (target / "bad.txt").read_text() == "target"
+    assert (target / "good.txt").read_text() == "new content"
+
+
+# sync-special-files-treated-as-directories
+
+
+class _FifoMemPath(MemPath):
+    """Reports the entry named "fifo" as a named pipe."""
+
+    def stat(self, *, follow_symlinks=True):
+        result = super().stat(follow_symlinks=follow_symlinks)
+        if self.name == "fifo":
+            return FileStat(st_mode=stat_module.S_IFIFO | 0o644)
+        return result
+
+    def _scandir(self):
+        for name, _ in super()._scandir():
+            yield name, None
+
+
+@pytest.mark.parametrize("follow_symlinks", [True, False])
+def test_special_source_entry_is_skipped_not_made_a_directory(
+    tmp_path, follow_symlinks
+):
+    source = _FifoMemPath("/src")
+    source.mkdir()
+    (source / "fifo").write_text("")
+    (source / "z.txt").write_text("later sibling")
+    target = tmp_path / "dst"
+    _write(target / "fifo", "a regular target file")
+    events, hook = _events()
+
+    PathSyncer(
+        _size, remove_missing=True, follow_symlinks=follow_symlinks, hook=hook
+    ).sync(source, pathlib_next.LocalPath(target))
+
+    assert (target / "fifo").read_text() == "a regular target file"
+    assert (target / "z.txt").read_text() == "later sibling"
+    fifo_events = [e for e, s, _, _ in events if s == "/src/fifo"]
+    assert SyncEvent.Skipped in fifo_events
+    assert SyncEvent.CreatedDirectory not in fifo_events
+    assert SyncEvent.TypeMismatch not in fifo_events
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="named pipes via os.mkfifo are POSIX-only")
+def test_real_fifo_is_skipped(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    os.mkfifo(source / "pipe")
+    _write(source / "z.txt", "z")
+    target = tmp_path / "dst"
+    _write(target / "pipe", "keep me")
+
+    PathSyncer(_size).sync(
+        pathlib_next.LocalPath(source), pathlib_next.LocalPath(target)
+    )
+
+    assert (target / "pipe").read_text() == "keep me"
+    assert (target / "z.txt").read_text() == "z"

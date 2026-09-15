@@ -54,8 +54,8 @@ class NativeChecksum(_ty.Protocol):
     @_utils.notimplemented
     def checksum(self, algorithm: str = "md5") -> str:
         """Return a hex-digest checksum of this file's content, computed by
-        the backend itself (e.g. an SFTP server's `check-file@openssh.com`
-        extension, a WebDAV `getetag`, ...) rather than by streaming the
+        the backend itself (e.g. an SFTP server implementing the filexfer draft's
+        `check-file-handle` extension -- OpenSSH does not --, a WebDAV `getetag`, ...) rather than by streaming the
         content through `open("rb")`.
 
         `algorithm` names a `hashlib`-style digest (at least `"md5"` must

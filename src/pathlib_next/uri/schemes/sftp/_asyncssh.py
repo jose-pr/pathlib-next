@@ -110,10 +110,20 @@ def _run(coro, timeout: "float | None" = _UNSET_TIMEOUT):
 
     Raises `RuntimeError` immediately when called on the bridge-loop thread
     itself (a sync `Path` method inside a coroutine or callback running
-    there): blocking would deadlock the loop the coroutine needs.
+    there): blocking would deadlock the loop the coroutine needs. Also
+    raised once the interpreter is finalizing: the daemon loop thread can no
+    longer run, so waiting would only hang shutdown (for `timeout`, or for
+    ever without one) -- e.g. a file left open at module scope.
     """
     if timeout is _UNSET_TIMEOUT:
         timeout = _DEFAULT_TIMEOUT
+    if _sys.is_finalizing():
+        if _asyncio.iscoroutine(coro):
+            coro.close()
+        raise RuntimeError(
+            "SFTP request made while the interpreter is shutting down -- the "
+            "asyncssh bridge loop can no longer run"
+        )
     loop = _ensure_loop()
     if _on_loop_thread():
         if _asyncio.iscoroutine(coro):
@@ -277,10 +287,13 @@ class _SyncSftpFile(_io.RawIOBase):
         self,
         afile: "_asyncssh.SFTPClientFile",
         timeout: "float | None" = _UNSET_TIMEOUT,
+        mode: str = "r+",
     ):
         super().__init__()
         self._afile = afile
         self._timeout = timeout
+        self._readable = "r" in mode or "+" in mode
+        self._writable = any(kind in mode for kind in "wxa+")
 
     # read()/write() carry whole payloads (read_bytes() is one read(-1)), so
     # their duration grows with the data: no wall-clock bound.
@@ -289,33 +302,62 @@ class _SyncSftpFile(_io.RawIOBase):
         return _run(self._afile.read(size), None)
 
     @_reraise_sftp_errors
+    def readall(self) -> bytes:
+        # One request stream to EOF (asyncssh parallelizes it), instead of
+        # RawIOBase's loop of DEFAULT_BUFFER_SIZE reads.
+        return _run(self._afile.read(-1), None)
+
+    @_reraise_sftp_errors
+    def readinto(self, buffer) -> int:
+        view = memoryview(buffer).cast("B")
+        data = _run(self._afile.read(len(view)), None)
+        view[: len(data)] = data
+        return len(data)
+
+    @_reraise_sftp_errors
     def write(self, data: bytes) -> int:
-        return _run(self._afile.write(data), None)
+        return _run(self._afile.write(bytes(data)), None)
 
     @_reraise_sftp_errors
     def seek(self, offset: int, whence: int = 0) -> int:
         return _run(self._afile.seek(offset, whence), self._timeout)
 
+    @_reraise_sftp_errors
     def tell(self) -> int:
         return _run(self._afile.tell(), self._timeout)
 
     def close(self) -> None:
-        if not self.closed:
-            if _on_loop_thread():
+        if self.closed:
+            return
+        try:
+            if _sys.is_finalizing():
+                # The loop thread cannot run any more; the server releases
+                # the handle when the connection drops.
+                pass
+            elif _on_loop_thread():
                 # A finalizer can run here; closing must not block the loop.
                 _loop.create_task(self._afile.close())
             else:
-                _run(self._afile.close(), self._timeout)
-        super().close()
+                try:
+                    _run(self._afile.close(), self._timeout)
+                except _asyncssh.SFTPError as error:
+                    raise _translate(error) from error
+        finally:
+            super().close()
 
     def readable(self) -> bool:
-        return True
+        return self._readable
 
     def writable(self) -> bool:
-        return True
+        return self._writable
 
     def seekable(self) -> bool:
         return True
+
+
+#: Buffer size for the `io.Buffered*` wrapper `_SyncSftpClient.open()`
+#: returns: each refill is one SFTP read request.
+_BUFFER_SIZE = 64 * 1024
 
 
 # --- sync client wrapper ----------------------------------------------------
@@ -368,14 +410,24 @@ class _SyncSftpClient:
         ]
 
     @_reraise_sftp_errors
-    def open(self, path: str, mode: str = "r", buffering: int = -1) -> _SyncSftpFile:
+    def open(self, path: str, mode: str = "r", buffering: int = -1) -> _io.IOBase:
         # aclient.open() is `@async_context_manager`-decorated -- calling it
         # returns a custom awaitable, not a plain coroutine object, which
         # asyncio.run_coroutine_threadsafe() rejects outright ("A coroutine
         # object is required"). Wrapping the `await` in a real `async def`
         # helper produces a genuine coroutine object that IS accepted.
         afile = self._run(_aopen(self._aclient, path, mode))
-        return _SyncSftpFile(afile, self._timeout)
+        raw = _SyncSftpFile(afile, self._timeout, mode)
+        if buffering == 0:
+            return raw
+        # Buffered like paramiko's files and a local open(): a raw handle
+        # made readline() one round trip per byte.
+        size = buffering if buffering > 1 else _BUFFER_SIZE
+        if "+" in mode:
+            return _io.BufferedRandom(raw, size)
+        if raw.readable():
+            return _io.BufferedReader(raw, size)
+        return _io.BufferedWriter(raw, size)
 
     @_reraise_sftp_errors
     def mkdir(self, path: str, mode: "int | None" = None) -> None:
@@ -411,6 +463,13 @@ class _SyncSftpClient:
     @_reraise_sftp_errors
     def rename(self, oldpath: str, newpath: str) -> None:
         self._run(self._aclient.rename(oldpath, newpath))
+
+    @_reraise_sftp_errors
+    def posix_rename(self, oldpath: str, newpath: str) -> None:
+        # Replaces newpath. Raises NotImplementedError (SFTPOpUnsupported,
+        # decided locally) when the server did not advertise
+        # posix-rename@openssh.com and the protocol is below v5.
+        self._run(self._aclient.posix_rename(oldpath, newpath))
 
     @_reraise_sftp_errors
     def symlink(self, source: str, dest: str) -> None:
@@ -820,10 +879,12 @@ async def _concurrent_copy(
                 pass
 
     async def gather_tasks(tasks):
-        if ignore_error is not None:
+        # Path.copy()'s contract: a callable is notified and the error
+        # suppressed, True suppresses, False/None fail fast.
+        if ignore_error:
             results = await _asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
-                if isinstance(result, Exception):
+                if isinstance(result, Exception) and callable(ignore_error):
                     # User code: off the loop thread, so it may call sync
                     # Path methods (which _run() back onto this loop).
                     await _asyncio.to_thread(ignore_error, result)

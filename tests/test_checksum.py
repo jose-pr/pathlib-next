@@ -5,6 +5,8 @@ fallback coverage lives in `tests/test_sftp.py`, following that module's
 `_FakeBackend` pattern.
 """
 
+import pytest
+
 from pathlib_next.mempath import MemPath
 from pathlib_next.protocols.checksum import NativeChecksum
 from pathlib_next.utils import checksum as checksum_utils
@@ -487,3 +489,25 @@ def test_quick_check_does_not_apply_to_local_to_local_pairs(tmp_path):
     # proves quick_check's skip-the-checksum-call behavior never engaged
     # for this local-to-local pair.
     assert len(calls) >= 1
+
+
+@pytest.mark.parametrize("source_mtime, target_mtime", [(0, 0), (0, 1000), (1000, 0)])
+def test_quick_check_zero_mtime_is_unknown_not_in_sync(source_mtime, target_mtime):
+    # sync-quick-check-zero-mtime-false-in-sync: backends report st_mtime 0
+    # for "unknown" (MemPath, GitHub/GitLab, HTTP without Last-Modified).
+    # Same size plus 0 == 0 used to skip the checksum, so a changed file was
+    # never updated.
+    source = _NonLocalMemPath("/")
+    (source / "cfg.json").write_text('{"v": 2}')
+    target = _NonLocalMemPath("/")
+    (target / "cfg.json").write_text('{"v": 1}')
+    (source / "cfg.json").set_mtime(source_mtime)
+    (target / "cfg.json").set_mtime(target_mtime)
+    (source / "cfg.json").open_calls.clear()
+    (target / "cfg.json").open_calls.clear()
+
+    PathSyncer().sync(source, target)
+
+    assert (target / "cfg.json").read_text() == '{"v": 2}'
+    # Checksummed (both sides streamed), not trusted from metadata.
+    assert (source / "cfg.json").open_calls[0] == "r"

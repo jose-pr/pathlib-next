@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import errno as _errno
 import os as _os
 import typing as _ty
+import weakref as _weakref
 
 from .... import utils as _utils
+from ....path import _contains
 from ....utils.stat import FileStat
-from ... import Source, Uri, UriPath
+from ... import _NOSOURCE, Source, Uri, UriPath
+
+#: SFTP clients on which `posix-rename@openssh.com` proved unavailable (the
+#: extension request failed and a plain rename then succeeded), so later
+#: renames skip the doomed request. Weak: a reconnect starts over.
+_NO_POSIX_RENAME: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
+
+
+def _posix_rename_known_unsupported(client) -> bool:
+    try:
+        return client in _NO_POSIX_RENAME
+    except TypeError:
+        return False
+
+
+def _mark_posix_rename_unsupported(client) -> None:
+    try:
+        _NO_POSIX_RENAME[client] = True
+    except TypeError:
+        pass
 
 
 class BaseSftpBackend(object):
@@ -35,9 +57,8 @@ class BaseSftpBackend(object):
         here (the default): no client-library support for any
         native-hashing extension at all -- true for `AsyncsshSftpBackend`,
         which inherits this. `SftpBackend` (paramiko) overrides this with a
-        real per-connection probe against `path`, since neither paramiko
-        nor asyncssh expose the server's advertised SFTP extension list
-        (paramiko's version-negotiation code reads and discards it -- see
+        per-connection probe against `path` (paramiko's version negotiation
+        reads and discards the server's extension list -- see
         `_paramiko.py::SftpBackend.supported_checksums`). Takes a `path`
         argument (unlike a bare capability flag) because the only reliable
         way to know is to actually try the extension against a real file.
@@ -55,7 +76,9 @@ class BaseSftpBackend(object):
     @_utils.notimplemented
     def checksum(self, path: "SftpPath", algorithm: str) -> str:
         """Backend-native digest for `path`'s content, e.g. via the
-        OpenSSH `check-file@openssh.com` SFTP protocol extension. Raises
+        filexfer draft's `check-file-handle` SFTP extension (implemented by
+        some servers, e.g. ProFTPD's mod_sftp; OpenSSH has no such
+        extension). Raises
         `NotImplementedError` (the base/default here) when the backend has
         no such capability at all, and MUST also raise it -- not return a
         value -- when the server doesn't advertise `algorithm` specifically
@@ -197,9 +220,9 @@ class SftpPath(UriPath):
     `sftp-async` extra (asyncssh). Also implements
     `protocols.checksum.NativeChecksum` (`checksum()`, delegating to
     `self.backend.checksum()`) -- native on the paramiko backend via the
-    OpenSSH `check-file@openssh.com` extension, `NotImplementedError`
-    (falls back to streaming) on asyncssh or a server without that
-    extension."""
+    filexfer draft's `check-file-handle` extension where the server
+    implements it (OpenSSH does not), `NotImplementedError` (falls back to
+    streaming) on asyncssh or a server without that extension."""
 
     __SCHEMES = ("sftp",)
     __slots__ = ("_ssh_config",)
@@ -346,14 +369,14 @@ class SftpPath(UriPath):
         on the paramiko backend (see
         `_paramiko.py::SftpBackend.supported_checksums`), so this can be
         empty even on the paramiko backend if the connected server doesn't
-        actually implement `check-file@openssh.com`.
+        actually implement `check-file-handle` (OpenSSH never does).
         """
         return self.backend.supported_checksums(self)
 
     def checksum(self, algorithm: str = "md5") -> str:
         """`protocols.checksum.NativeChecksum` implementation: delegates to
-        `self.backend.checksum()` (the OpenSSH `check-file@openssh.com`
-        SFTP extension on the paramiko backend; unimplemented on asyncssh
+        `self.backend.checksum()` (the `check-file-handle` SFTP extension
+        on the paramiko backend; unimplemented on asyncssh
         -- see `BaseSftpBackend.checksum`). Any failure that isn't already
         `NotImplementedError` (a server that doesn't advertise the
         extension, an unsupported algorithm, a transport-level error) is
@@ -372,9 +395,14 @@ class SftpPath(UriPath):
             ) from error
 
     def unlink(self, missing_ok=False):
-        if missing_ok and not self.exists():
-            return
-        return self._sftpclient.remove(self.path)
+        # No exists() pre-check: it follows symlinks, so a dangling link
+        # read as missing and was never removed (breaking
+        # symlink_to(force=True)). pathlib ignores only ENOENT from the call.
+        try:
+            return self._sftpclient.remove(self.path)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
 
     def rmdir(self):
         return self._sftpclient.rmdir(self.path)
@@ -390,8 +418,51 @@ class SftpPath(UriPath):
         # -- and is taken as a literal path rather than re-parsed as a URI,
         # which used to truncate "rn?b.txt" to "rn" on the wire (see
         # `Uri._rename_target`).
+        #
+        # Replaces an existing target (POSIX rename semantics) through the
+        # `posix-rename@openssh.com` extension where the server has it;
+        # plain SFTPv3 RENAME refuses to overwrite with a generic failure,
+        # which is raised as FileExistsError when the target exists.
         target = self._rename_target(target)
-        return self._sftpclient.rename(self.path, target.path)
+        client = self._sftpclient
+        posix_rename = getattr(client, "posix_rename", None)
+        if posix_rename is not None and not _posix_rename_known_unsupported(client):
+            try:
+                return posix_rename(self.path, target.path)
+            except NotImplementedError:
+                # asyncssh: the server did not advertise the extension.
+                _mark_posix_rename_unsupported(client)
+            except OSError as error:
+                if error.errno is not None:
+                    raise
+                # paramiko reports "unsupported" and "failed" alike (a
+                # status without errno): a plain rename tells them apart.
+                try:
+                    result = client.rename(self.path, target.path)
+                except OSError as rename_error:
+                    self._raise_if_exists(target, rename_error)
+                    raise
+                _mark_posix_rename_unsupported(client)
+                return result
+        try:
+            return client.rename(self.path, target.path)
+        except OSError as error:
+            self._raise_if_exists(target, error)
+            raise
+
+    def _raise_if_exists(self, target: Uri, error: OSError) -> None:
+        if isinstance(error, (FileNotFoundError, PermissionError)):
+            return
+        try:
+            # `target` may be a plain Uri: probe it over this connection.
+            probe = self._from_parsed_parts(self.source, target.path, None, None)
+            exists = FileStat.from_path(probe, follow_symlink=False) is not None
+        except Exception:
+            return
+        if exists:
+            raise FileExistsError(
+                _errno.EEXIST, "File exists", str(target.path)
+            ) from error
 
     def _symlink_to(
         self, target: "SftpPath | Uri", target_is_directory: bool = False
@@ -421,8 +492,13 @@ class SftpPath(UriPath):
         # *result*, and resolving it would silently diverge from pathlib
         # on the one method whose entire job is reporting the stored
         # target as-is.
+        #
+        # Verbatim either way (no dot-segment folding). A relative target
+        # carries no host: with this path's authority it had no printable
+        # URI at all, so str()/repr()/== raised ValueError.
         target = self._sftpclient.readlink(self.path)
-        return self.with_segments(target)
+        source = self.source if target.startswith("/") else _NOSOURCE
+        return self._from_parsed_parts(source, target, None, None)
 
     def hardlink_to(self, target: "SftpPath | Uri | str"):
         if not self.backend.supports_hardlink:
@@ -516,6 +592,8 @@ class SftpPath(UriPath):
             # connection: only a target on the same host may use it.
             or not isinstance(target, SftpPath)
             or not self._same_location(target)
+            # A link copied as a link is the generic copy's job.
+            or (not follow_symlinks and self.is_symlink())
             or not self.is_dir()
         ):
             return super().copy(
@@ -528,8 +606,12 @@ class SftpPath(UriPath):
                 progress=progress,
             )
 
-        if isinstance(target, str):
-            target = type(self)(target)
+        if _contains(self, target):
+            # As the generic copy(): checked before anything is created, or
+            # the new directory is listed and copied into itself.
+            raise OSError(
+                _errno.EINVAL, "Cannot copy a directory into itself", str(target)
+            )
 
         if target.exists():
             if not target.is_dir():

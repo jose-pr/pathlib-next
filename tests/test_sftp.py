@@ -629,18 +629,29 @@ def test_sftppath_supported_checksums_reflects_backend_advertisement():
 
 
 # --- native checksum: paramiko SftpBackend wire-level implementation ------
-# SftpBackend.checksum() speaks the OpenSSH check-file@openssh.com
+# SftpBackend.checksum() speaks the filexfer draft's check-file-handle
 # extension directly via paramiko's low-level _request()/CMD_EXTENDED --
 # these tests fake that primitive to prove the request is built correctly
-# (handle, algorithm, int64 offset/length, quick_check) and the reply is
-# parsed/validated correctly, without needing a real OpenSSH server. The
-# real SFTP test server used elsewhere in this suite is asyncssh's own
-# SFTPServer (tests/conftest.py::sftp_server), which has NO
-# check-file@openssh.com support at all -- so a real-server round trip can
-# only ever exercise the fallback branch, never a true native-hash
-# request/response. This file fakes the paramiko wire primitive instead,
-# which is the only way to exercise the native branch at all without a
-# real OpenSSH server.
+# (handle, algorithm, int64 offset/length, block-size) and the reply is
+# parsed/validated correctly. Neither OpenSSH nor the asyncssh test server
+# (tests/conftest.py::sftp_server) implements the extension, so a
+# real-server round trip only ever exercises the fallback branch.
+
+_MD5_DEADBEEF = bytes.fromhex("deadbeef" * 4)
+
+
+def _check_file_reply(algorithm="md5", digest=_MD5_DEADBEEF, prefixed=False):
+    """A draft check-file reply: [string "check-file"] string algorithm,
+    then the raw hash bytes as the rest of the packet."""
+    import paramiko.message as message
+
+    msg = message.Message()
+    if prefixed:
+        msg.add_string("check-file")
+    msg.add_string(algorithm)
+    msg.add_bytes(digest)
+    msg.rewind()
+    return msg
 
 
 def test_paramiko_checksum_sends_correct_extended_request(monkeypatch):
@@ -668,13 +679,7 @@ def test_paramiko_checksum_sends_correct_extended_request(monkeypatch):
 
         def _request(self, cmd, *args):
             calls.append(("_request", cmd, args))
-            import paramiko.message as message
-
-            msg = message.Message()
-            msg.add_string("md5")
-            msg.add_string(bytes.fromhex("deadbeef"))
-            msg.rewind()
-            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+            return paramiko_sftp.CMD_EXTENDED_REPLY, _check_file_reply()
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
@@ -683,16 +688,17 @@ def test_paramiko_checksum_sends_correct_extended_request(monkeypatch):
     p = _sftp("sftp://host/a.txt", backend=backend)
     result = backend.checksum(p, "md5")
 
-    assert result == "deadbeef"
+    assert result == "deadbeef" * 4
     assert fake_client.opened.closed is True
     assert calls[0] == ("open", "/a.txt", "r")
     _, cmd, args = calls[1]
     assert cmd == paramiko_sftp.CMD_EXTENDED
-    assert args[0] == "check-file@openssh.com"
+    # Not "check-file@openssh.com": OpenSSH has no such extension.
+    assert args[0] == "check-file-handle"
     assert args[1] == b"handle-bytes"
     assert args[2] == "md5"
-    assert int(args[3]) == 0 and int(args[4]) == 0  # offset, length
-    assert args[5] == 0  # quick_check
+    assert int(args[3]) == 0 and int(args[4]) == 0  # start-offset, length
+    assert args[5] == 0  # block-size: one hash over the whole file
 
 
 def test_paramiko_checksum_closes_handle_even_when_request_raises(monkeypatch):
@@ -816,13 +822,7 @@ def test_paramiko_supported_checksums_reflects_working_server(monkeypatch):
             return _FakeHandleFile()
 
         def _request(self, cmd, *args):
-            import paramiko.message as message
-
-            msg = message.Message()
-            msg.add_string("md5")
-            msg.add_string(bytes.fromhex("deadbeef"))
-            msg.rewind()
-            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+            return paramiko_sftp.CMD_EXTENDED_REPLY, _check_file_reply()
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
@@ -885,13 +885,7 @@ def test_paramiko_supported_checksums_caches_per_connection(monkeypatch):
 
         def _request(self, cmd, *args):
             self.request_calls += 1
-            import paramiko.message as message
-
-            msg = message.Message()
-            msg.add_string("md5")
-            msg.add_string(b"\x00")
-            msg.rewind()
-            return paramiko_sftp.CMD_EXTENDED_REPLY, msg
+            return paramiko_sftp.CMD_EXTENDED_REPLY, _check_file_reply()
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
@@ -906,6 +900,107 @@ def test_paramiko_supported_checksums_caches_per_connection(monkeypatch):
     # Only the FIRST call actually probed the server -- subsequent calls
     # for the same connection are served from the cache.
     assert fake_client.request_calls == 1
+
+
+class _CountingParamikoClient:
+    """Fake paramiko client for the check-file tests below: counts opens and
+    extension requests, and answers each request with `reply()`."""
+
+    class _HandleFile:
+        handle = b"h"
+
+        def close(self):
+            pass
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.opens = 0
+        self.requests = 0
+
+    def open(self, path, mode, buffering=-1):
+        self.opens += 1
+        return self._HandleFile()
+
+    def _request(self, cmd, *args):
+        self.requests += 1
+        return self.reply()
+
+
+def _paramiko_backend_with(monkeypatch, client):
+    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
+
+    backend = _RealSftpBackend.__new__(_RealSftpBackend)
+    monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: client)
+    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+    return backend
+
+
+def test_paramiko_checksum_refusal_is_cached_for_the_connection(monkeypatch):
+    # sftp-check-file-openssh-extension-does-not-exist: OpenSSH answers
+    # SSH_FX_OP_UNSUPPORTED (paramiko: OSError without errno). Only the
+    # first file pays the open + request + close; later ones send nothing.
+    def unsupported():
+        raise OSError("Operation unsupported")
+
+    client = _CountingParamikoClient(unsupported)
+    backend = _paramiko_backend_with(monkeypatch, client)
+    p = _sftp("sftp://host/a.txt", backend=backend)
+
+    for _ in range(3):
+        with pytest.raises(NotImplementedError):
+            p.checksum()
+
+    assert client.requests == 1
+    assert client.opens == 1
+    assert backend.supported_checksums(p) == frozenset()
+    assert client.requests == 1
+
+
+def test_paramiko_checksum_errno_failure_is_not_cached(monkeypatch):
+    # A typed failure (the handle vanished) says nothing about the
+    # extension: the next file tries again.
+    import errno
+
+    def missing():
+        raise OSError(errno.ENOENT, "No such file")
+
+    client = _CountingParamikoClient(missing)
+    backend = _paramiko_backend_with(monkeypatch, client)
+    p = _sftp("sftp://host/a.txt", backend=backend)
+
+    for _ in range(2):
+        with pytest.raises(NotImplementedError):
+            p.checksum()
+    assert client.requests == 2
+
+
+def test_paramiko_checksum_accepts_check_file_prefixed_reply(monkeypatch):
+    import paramiko.sftp as paramiko_sftp
+
+    client = _CountingParamikoClient(
+        lambda: (paramiko_sftp.CMD_EXTENDED_REPLY, _check_file_reply(prefixed=True))
+    )
+    backend = _paramiko_backend_with(monkeypatch, client)
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    assert backend.checksum(p, "md5") == "deadbeef" * 4
+
+
+def test_paramiko_checksum_rejects_digest_of_wrong_length(monkeypatch):
+    # A length-prefixed or truncated hash is a reply shape the parser does
+    # not understand: never returned as a digest.
+    import paramiko.sftp as paramiko_sftp
+
+    client = _CountingParamikoClient(
+        lambda: (
+            paramiko_sftp.CMD_EXTENDED_REPLY,
+            _check_file_reply(digest=bytes.fromhex("deadbeef")),
+        )
+    )
+    backend = _paramiko_backend_with(monkeypatch, client)
+    p = _sftp("sftp://host/a.txt", backend=backend)
+    with pytest.raises(NotImplementedError):
+        backend.checksum(p, "md5")
 
 
 # --- PathSyncer + SFTP: native path used, and fallback still works --------
@@ -1205,3 +1300,189 @@ def test_symlink_to_str_target_keeps_dot_dot_relative():
     p = _sftp("sftp://host/mnt/sub/link", backend=backend)
     p.symlink_to("../real.txt")
     assert backend._client.symlink_calls == [("../real.txt", "/mnt/sub/link")]
+
+
+# --- wave 5 (G6): rename / unlink / readlink parity -------------------------
+
+
+class _LinkAndRenameClient(_FakeSftpClient):
+    """Fake client with a tiny namespace: `entries` maps a path to "file" or
+    ("link", target); stat() follows links, lstat() does not."""
+
+    def __init__(self, entries, *, posix_rename=True, posix_error=None):
+        super().__init__()
+        self.entries = dict(entries)
+        self.posix_rename_calls = []
+        self.remove_calls = []
+        self._posix_error = posix_error
+        if not posix_rename:
+            self.posix_rename = None
+
+    def _attr(self, path):
+        import stat as stat_module
+
+        from pathlib_next.utils.stat import FileStat
+
+        entry = self.entries.get(path)
+        if entry is None:
+            raise FileNotFoundError(2, "No such file", path)
+        if isinstance(entry, tuple):
+            return FileStat(st_mode=stat_module.S_IFLNK | 0o777)
+        return FileStat(st_mode=stat_module.S_IFREG | 0o644)
+
+    def lstat(self, path):
+        return self._attr(path)
+
+    def stat(self, path):
+        entry = self.entries.get(path)
+        if isinstance(entry, tuple):
+            return self._attr(entry[1])
+        return self._attr(path)
+
+    def remove(self, path):
+        self.remove_calls.append(path)
+        if path not in self.entries:
+            raise FileNotFoundError(2, "No such file", path)
+        del self.entries[path]
+
+    def readlink(self, path):
+        return self.entries[path][1]
+
+    def posix_rename(self, path, target):
+        self.posix_rename_calls.append((path, target))
+        if self._posix_error is not None:
+            raise self._posix_error
+        self.entries[target] = self.entries.pop(path)
+
+    def rename(self, path, target):
+        self.rename_calls.append((path, target))
+        if target in self.entries:
+            raise OSError("Failure")
+        self.entries[target] = self.entries.pop(path)
+
+
+def _link_backend(client):
+    backend = _FakeBackend()
+    backend._client = client
+    return backend
+
+
+def test_unlink_missing_ok_removes_dangling_link_without_exists_probe():
+    client = _LinkAndRenameClient({"/current": ("link", "/releases/41")})
+    link = _sftp("sftp://host/current", backend=_link_backend(client))
+    assert not link.exists()
+
+    link.unlink(missing_ok=True)
+
+    assert client.remove_calls == ["/current"]
+    assert "/current" not in client.entries
+
+
+def test_unlink_missing_ok_ignores_only_a_missing_entry():
+    client = _LinkAndRenameClient({})
+    path = _sftp("sftp://host/gone", backend=_link_backend(client))
+    path.unlink(missing_ok=True)
+    with pytest.raises(FileNotFoundError):
+        path.unlink()
+
+
+def test_symlink_to_force_repoints_a_dangling_link():
+    client = _LinkAndRenameClient({"/current": ("link", "/releases/41")})
+    link = _sftp("sftp://host/current", backend=_link_backend(client))
+
+    link.symlink_to("/releases/42", force=True)
+
+    assert client.symlink_calls == [("/releases/42", "/current")]
+
+
+def test_rename_uses_posix_rename_to_replace_existing_target():
+    client = _LinkAndRenameClient({"/a.txt": "file", "/b.txt": "file"})
+    path = _sftp("sftp://host/a.txt", backend=_link_backend(client))
+
+    path.rename("b.txt")
+
+    assert client.posix_rename_calls == [("/a.txt", "/b.txt")]
+    assert client.rename_calls == []
+
+
+def test_rename_without_posix_rename_raises_file_exists_error():
+    import errno
+
+    client = _LinkAndRenameClient(
+        {"/a.txt": "file", "/b.txt": "file"}, posix_rename=False
+    )
+    path = _sftp("sftp://host/a.txt", backend=_link_backend(client))
+
+    with pytest.raises(FileExistsError) as excinfo:
+        path.rename("b.txt")
+
+    assert excinfo.value.errno == errno.EEXIST
+    assert client.entries == {"/a.txt": "file", "/b.txt": "file"}
+
+
+def test_rename_falls_back_when_posix_rename_is_unsupported():
+    # asyncssh: NotImplementedError (the extension was not advertised).
+    client = _LinkAndRenameClient(
+        {"/a.txt": "file"}, posix_error=NotImplementedError("unsupported")
+    )
+    path = _sftp("sftp://host/a.txt", backend=_link_backend(client))
+
+    path.rename("c.txt")
+
+    assert client.rename_calls == [("/a.txt", "/c.txt")]
+    assert "/c.txt" in client.entries
+
+
+def test_rename_paramiko_generic_failure_is_learned_as_unsupported():
+    # paramiko renders SSH_FX_OP_UNSUPPORTED as OSError without errno: once a
+    # plain rename then succeeds, later renames skip the extension request.
+    client = _LinkAndRenameClient(
+        {"/a.txt": "file", "/b.txt": "file"},
+        posix_error=OSError("Operation unsupported"),
+    )
+    backend = _link_backend(client)
+
+    _sftp("sftp://host/a.txt", backend=backend).rename("c.txt")
+    _sftp("sftp://host/b.txt", backend=backend).rename("d.txt")
+
+    assert client.posix_rename_calls == [("/a.txt", "/c.txt")]
+    assert client.rename_calls == [("/a.txt", "/c.txt"), ("/b.txt", "/d.txt")]
+
+
+def test_rename_errno_failure_from_posix_rename_propagates():
+    client = _LinkAndRenameClient(
+        {"/a.txt": "file"}, posix_error=PermissionError(13, "denied")
+    )
+    path = _sftp("sftp://host/a.txt", backend=_link_backend(client))
+    with pytest.raises(PermissionError):
+        path.rename("c.txt")
+    assert client.rename_calls == []
+
+
+def test_readlink_relative_target_is_printable_and_comparable():
+    client = _LinkAndRenameClient({"/srv/app/current": ("link", "releases/42")})
+    link = _sftp("sftp://host/srv/app/current", backend=_link_backend(client))
+
+    target = link.readlink()
+
+    assert target.path == "releases/42"
+    assert str(target) == "releases/42"
+    assert "releases/42" in repr(target)
+    assert target == link.readlink()
+    assert target.name == "42"
+
+
+def test_readlink_keeps_dot_segments_verbatim():
+    client = _LinkAndRenameClient({"/srv/current": ("link", "../x/./y")})
+    link = _sftp("sftp://host/srv/current", backend=_link_backend(client))
+    assert link.readlink().path == "../x/./y"
+
+
+def test_readlink_absolute_target_keeps_the_host():
+    client = _LinkAndRenameClient({"/srv/current": ("link", "/releases/42")})
+    link = _sftp("sftp://host/srv/current", backend=_link_backend(client))
+
+    target = link.readlink()
+
+    assert target.path == "/releases/42"
+    assert target.source == link.source

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib as _hashlib
 import pathlib as _pathlib
 import threading as _thread
 import weakref as _weakref
@@ -104,25 +105,31 @@ _CACHED_CLIENTS = _utils.LRU(
     _create_sftpclient, maxsize=128, on_evict=_close_sftpclient
 )
 
-# Algorithm names the OpenSSH check-file@openssh.com extension protocol
-# itself supports (https://github.com/openssh/openssh-portable/blob/
-# master/PROTOCOL) -- the full candidate set a real probe tries, in
-# preference order (md5 first: matches PathSyncer's current default, so
-# the common case resolves in exactly one round trip).
+#: The SFTP extension request `SftpBackend.checksum()` sends: the filexfer
+#: draft's `check-file-handle` (draft-ietf-secsh-filexfer-extensions-00,
+#: section 3; implemented by e.g. ProFTPD's mod_sftp). OpenSSH implements no
+#: check-file extension at all -- its sftp-server answers
+#: SSH_FX_OP_UNSUPPORTED, which is cached per connection (see
+#: `_CHECKSUM_SUPPORT_CACHE`) so it costs one request, not one per file.
+_CHECK_FILE_EXTENSION = "check-file-handle"
+
+# Hash algorithm names from the draft, in preference order (md5 first:
+# PathSyncer's default, so the common case resolves in one round trip).
 _CHECK_FILE_ALGORITHMS = ("md5", "sha1", "sha256", "sha384", "sha512")
 
-# Per-connection cache of which algorithms a real probe has confirmed the
-# server supports (see SftpBackend.supported_checksums) -- keyed by the SFTP
-# client object itself (WeakKeyDictionary, not id(): a plain dict keyed by
-# id() risks a stale hit if a client is GC'd and a new, unrelated object
-# happens to get the same id() -- a real risk here since _CACHED_CLIENTS
-# above can evict/replace clients over a long-running process). A reconnect
-# (new client instance, e.g. after the old socket went inactive -- see
-# SftpBackend.client()) naturally starts with a clean slate. Paramiko
-# exposes no public way to read the server's advertised extension list from
-# version negotiation (_send_version() reads and discards that part of the
-# CMD_VERSION reply), so an actual attempt against a real file is the only
-# reliable source of truth.
+# Per-connection cache of which algorithms the server supports (see
+# SftpBackend.supported_checksums) -- keyed by the SFTP client object itself
+# (WeakKeyDictionary, not id(): a plain dict keyed by id() risks a stale hit
+# if a client is GC'd and a new, unrelated object happens to get the same
+# id() -- a real risk here since _CACHED_CLIENTS above can evict/replace
+# clients over a long-running process). A reconnect (new client instance,
+# e.g. after the old socket went inactive -- see SftpBackend.client())
+# naturally starts with a clean slate. Paramiko exposes no public way to
+# read the server's advertised extension list from version negotiation
+# (_send_version() reads and discards that part of the CMD_VERSION reply),
+# so an actual attempt against a real file is the only source of truth. An
+# empty set is a definitive "unsupported": `checksum()` then raises
+# NotImplementedError without sending anything.
 _CHECKSUM_SUPPORT_CACHE: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
 _CHECKSUM_SUPPORT_LOCK = _thread.Lock()
 
@@ -278,86 +285,118 @@ class SftpBackend(BaseSftpBackend):
                 _CACHED_CLIENTS.discard(*key)
 
     def checksum(self, path: "SftpPath", algorithm: str) -> str:
-        """Server-side digest via the OpenSSH `check-file@openssh.com` SFTP
-        protocol extension (https://github.com/openssh/openssh-portable/
-        blob/master/PROTOCOL, "check-file@openssh.com"). Not part of
-        paramiko's public API -- built on the same low-level
-        `_request(CMD_EXTENDED, ...)` primitive paramiko itself uses
-        internally for `posix-rename@openssh.com` (see
-        `SFTPClient.posix_rename`). Requires an actual OpenSSH (or
-        compatible) server; anything else -- including this project's own
-        asyncssh-backed test server (`tests/conftest.py::sftp_server`,
-        which has no `check-file@openssh.com` support at all) -- fails and
-        is translated to `NotImplementedError` by `SftpPath.checksum()`.
+        """Server-side digest via the filexfer draft's `check-file-handle`
+        SFTP extension (see `_CHECK_FILE_EXTENSION`). Not part of paramiko's
+        public API -- built on the same low-level `_request(CMD_EXTENDED,
+        ...)` primitive paramiko itself uses for `posix-rename@openssh.com`.
+        OpenSSH does not implement it, nor does this project's asyncssh
+        test server (`tests/conftest.py::sftp_server`): the first refusal is
+        cached for the connection, and every later call raises
+        `NotImplementedError` without a round trip. `SftpPath.checksum()`
+        translates any other failure to `NotImplementedError` too.
         """
         client = self.client(path.source)
-        # check-file@openssh.com hashes an *open handle*, not a bare path --
-        # open read-only, always close even on failure so a checksum
-        # attempt (whether it succeeds, or the server simply doesn't
-        # support the extension) never leaks a file handle.
+        if self._cached_support(client) == frozenset():
+            raise NotImplementedError(
+                f"{_CHECK_FILE_EXTENSION}: not supported by this server"
+            )
+        # The extension hashes an *open handle*, not a bare path -- open
+        # read-only, always close even on failure so a checksum attempt
+        # (whether it succeeds, or the server simply doesn't support the
+        # extension) never leaks a file handle.
         handle_file = client.open(path.path, "r")
         try:
             handle = handle_file.handle
-            msg_type, msg = client._request(
-                _paramiko_sftp.CMD_EXTENDED,
-                "check-file@openssh.com",
-                handle,
-                algorithm,
-                # int64(...): a plain `int` would be packed as a 32-bit
-                # int by Message.add() (see paramiko's _async_request
-                # arg-type dispatch) -- the extension's wire format
-                # requires uint64 for offset/length.
-                _paramiko_sftp.int64(0),  # offset
-                _paramiko_sftp.int64(0),  # length: 0 means "whole file"
-                0,  # quick_check: 0 requests a real hash, not a fast probe
-            )
+            try:
+                msg_type, msg = client._request(
+                    _paramiko_sftp.CMD_EXTENDED,
+                    _CHECK_FILE_EXTENSION,
+                    handle,
+                    algorithm,  # hash-algorithm-list: just the one wanted
+                    # int64(...): a plain `int` would be packed as a 32-bit
+                    # int by Message.add() (see paramiko's _async_request
+                    # arg-type dispatch) -- the wire format requires uint64
+                    # for start-offset/length.
+                    _paramiko_sftp.int64(0),  # start-offset
+                    _paramiko_sftp.int64(0),  # length: 0 means to end of file
+                    0,  # block-size: 0 means one hash over the whole range
+                )
+            except OSError as error:
+                if error.errno is None:
+                    # A status reply without an errno: paramiko's rendering
+                    # of SSH_FX_OP_UNSUPPORTED (and any other generic
+                    # failure) to the extension request itself.
+                    self._cache_support(client, frozenset())
+                raise
         finally:
             handle_file.close()
         if msg_type != _paramiko_sftp.CMD_EXTENDED_REPLY:
+            self._cache_support(client, frozenset())
             raise NotImplementedError(
-                "check-file@openssh.com: unexpected reply type "
-                f"{msg_type!r} (server likely doesn't support this "
-                "extension)"
+                f"{_CHECK_FILE_EXTENSION}: unexpected reply type "
+                f"{msg_type!r} (server likely doesn't support this extension)"
             )
         reply_algorithm = msg.get_text()
+        if reply_algorithm == "check-file":
+            # Later filexfer drafts prefix the reply with the extension name.
+            reply_algorithm = msg.get_text()
         if reply_algorithm != algorithm:
             # A server MUST echo back one of the algorithms we offered --
             # if it names something else, don't trust the digest.
             raise NotImplementedError(
-                f"check-file@openssh.com returned {reply_algorithm!r}, "
+                f"{_CHECK_FILE_EXTENSION} returned {reply_algorithm!r}, "
                 f"requested {algorithm!r}"
             )
-        return msg.get_binary().hex()
+        digest = msg.get_remainder()
+        try:
+            expected = _hashlib.new(algorithm).digest_size
+        except ValueError:
+            expected = None
+        if expected is not None and len(digest) != expected:
+            # The hash is the raw rest of the packet; any other length means
+            # a reply shape this parser does not understand.
+            raise NotImplementedError(
+                f"{_CHECK_FILE_EXTENSION} returned a {len(digest)}-byte "
+                f"{algorithm} digest, expected {expected}"
+            )
+        return digest.hex()
+
+    @staticmethod
+    def _cached_support(client) -> "frozenset[str] | None":
+        with _CHECKSUM_SUPPORT_LOCK:
+            try:
+                return _CHECKSUM_SUPPORT_CACHE.get(client)
+            except TypeError:
+                return None
+
+    @staticmethod
+    def _cache_support(client, supported: "frozenset[str]") -> None:
+        with _CHECKSUM_SUPPORT_LOCK:
+            try:
+                _CHECKSUM_SUPPORT_CACHE[client] = supported
+            except TypeError:
+                pass
 
     def supported_checksums(self, path: "SftpPath") -> "frozenset[str]":
-        """Real per-connection probe: try `checksum()` against `path` for
-        every algorithm `check-file@openssh.com` itself supports, and cache
-        which ones this specific connected client actually accepted (see
+        """Per-connection probe: try `checksum()` against `path` once and
+        cache the answer for this connected client (see
         `_CHECKSUM_SUPPORT_CACHE` above -- paramiko has no cheaper way to
         learn this). `path` must already exist and be readable, or the
         probe's own `open()` fails for an unrelated reason (a missing
-        file), which is reported the same as "unsupported" here -- this
+        file), which is reported as empty here but not cached -- this
         method is advisory, never raises.
 
-        Only the FIRST algorithm is actually attempted once a connection's
-        support is confirmed for any algorithm: a real OpenSSH server
-        either implements `check-file@openssh.com` (and lists it in its
-        extension advertisement, which implies every algorithm from the
-        RFC), or it doesn't -- there is no realistic "supports md5 but not
-        sha256" split in practice, and re-probing every algorithm every
-        time would multiply round trips for no real benefit. If a caller
-        actually needs a different specific algorithm to be reconfirmed
-        against a server with genuinely partial support, `checksum()`
-        itself remains authoritative and still raises `NotImplementedError`
-        per call regardless of what this advertises.
+        Only the FIRST algorithm is actually attempted: a server either
+        implements the extension (and then the draft's algorithm set) or it
+        doesn't. `checksum()` itself remains authoritative for any specific
+        algorithm and still raises `NotImplementedError` per call regardless
+        of what this advertises.
         """
         client = self.client(path.source)
-        with _CHECKSUM_SUPPORT_LOCK:
-            cached = _CHECKSUM_SUPPORT_CACHE.get(client)
+        cached = self._cached_support(client)
         if cached is not None:
             return cached
 
-        supported = frozenset()
         try:
             self.checksum(path, _CHECK_FILE_ALGORITHMS[0])
         except NotImplementedError:
@@ -370,8 +409,7 @@ class SftpBackend(BaseSftpBackend):
         else:
             supported = frozenset(_CHECK_FILE_ALGORITHMS)
 
-        with _CHECKSUM_SUPPORT_LOCK:
-            _CHECKSUM_SUPPORT_CACHE[client] = supported
+        self._cache_support(client, supported)
         return supported
 
     @classmethod
