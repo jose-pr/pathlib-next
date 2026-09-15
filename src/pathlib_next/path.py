@@ -11,6 +11,7 @@ import abc as _abc
 import errno as _errno
 import os as _os
 import re as _re
+import stat as _stat
 import sys as _sys
 import typing as _ty
 
@@ -331,9 +332,16 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         for index, pattern in enumerate(reversed(pattern_names)):
             if index == len(names):
                 # A relative pattern as long as the path reaches its root.
-                # 3.12+ compares it like any other part, and no wildcard
-                # matches a separator; 3.9-3.11 fnmatch the root string, so
-                # "*" and "?" match it there.
+                # 3.13+ compiles the root part "/" like any other part with
+                # glob.translate: "*" and "?" never match the separator, but
+                # a bracket expression such as "[!a]" does. 3.12 matches no
+                # wildcard there; 3.9-3.11 fnmatch the root string, so "*"
+                # and "?" match it too.
+                if _sys.version_info >= (3, 13):
+                    from .fspath import _translate_segment
+
+                    regex = f"(?s:{_translate_segment(pattern, '[^/]')})\\Z"
+                    return _re.match(regex, "/", flags) is not None
                 if _sys.version_info >= (3, 12):
                     return False
                 return _re.match(_fnmatch.translate(pattern), "/", flags) is not None
@@ -390,9 +398,10 @@ PurePathLike = _ty.Union[str, Pathname]
 #     without this guard `LocalPath().symlink_to(t, force=True)` raises
 #     TypeError while every other backend honors it.
 #
-# `glob`/`walk`/`_scandir` are deliberately absent: `LocalPath` overrides
-# them itself (with local-specific behavior that must be kept), so they are
-# already pathlib_next-owned wherever it matters.
+# `glob`/`walk`/`_scandir` are not in this list: `LocalPath` overrides them
+# itself (with local-specific behavior that must be kept). A class mixing a
+# concrete stdlib path with `Path` *without* `LocalPath` gets the same local
+# implementations from `_LOCAL_COMPANION_NAMES` instead.
 _OPERATION_NAMES = (
     "copy",
     "move",
@@ -402,6 +411,61 @@ _OPERATION_NAMES = (
     "write_text",
     "symlink_to",
 )
+
+# What the operations above call on `self` with pathlib_next's signature
+# and contract: `stat(follow_symlinks=)` (3.10+ in stdlib), `glob()` with
+# `include_hidden=`/`recursive=`/`dironly=`, and `_scandir()` yielding
+# `(name, FileStat)` tuples (stdlib 3.11-3.13's yields `os.DirEntry`, which
+# stdlib 3.12+'s `walk()` also expects). Guarding `exists`/`rglob`/`copy`
+# without these made them raise TypeError on a downstream concrete-local
+# class. Replaced only where stdlib `pathlib` would supply them.
+_LOCAL_COMPANION_NAMES = ("stat", "chmod", "glob", "walk", "_scandir")
+
+
+def _stdlib_stat(self, *, follow_symlinks=True):
+    """`LocalPath.stat()`'s pre-3.10 shim, for a class without LocalPath."""
+    import pathlib as _pathlib
+
+    if follow_symlinks:
+        return _pathlib.Path.stat(self)
+    return _pathlib.Path.lstat(self)
+
+
+def _stdlib_chmod(self, mode, *, follow_symlinks=True):
+    """`LocalPath.chmod()`'s pre-3.10 shim, for a class without LocalPath."""
+    import pathlib as _pathlib
+
+    mode = _utils.as_mode(mode)
+    if follow_symlinks:
+        return _pathlib.Path.chmod(self, mode)
+    return _pathlib.Path.lchmod(self, mode)
+
+
+def _local_companion(cls: type, name: str):
+    if name in ("stat", "chmod"):
+        if _sys.version_info >= (3, 10):
+            return None
+        return _stdlib_stat if name == "stat" else _stdlib_chmod
+    # Imported lazily: fspath imports this module. LocalPath defines all of
+    # these in its own body, so this never runs while fspath is loading.
+    from .fspath import LocalPath, _BaseFSPathname
+
+    if name == "glob" and not issubclass(cls, _BaseFSPathname):
+        # LocalPath.glob needs the flavour helpers of _BaseFSPathname.
+        return Path.glob
+    return vars(LocalPath)[name]
+
+
+def _is_stdlib_owner(cls: type, name: str) -> bool:
+    """Whether `cls` inherits `name` from stdlib `pathlib` (and does not
+    define it in its own body)."""
+    if name in vars(cls):
+        return False
+    owner = next((base for base in cls.__mro__[1:] if name in vars(base)), None)
+    if owner is None:
+        return False
+    owner_module = getattr(owner, "__module__", "") or ""
+    return owner_module == "pathlib" or owner_module.startswith("pathlib.")
 
 
 class Path(Pathname, Chmod, Stat, BinaryOpen):
@@ -454,6 +518,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             if ours is None:
                 continue
             setattr(cls, name, ours)
+        for name in _LOCAL_COMPANION_NAMES:
+            if not _is_stdlib_owner(cls, name):
+                continue
+            ours = _local_companion(cls, name)
+            if ours is not None:
+                setattr(cls, name, ours)
 
     def __new__(cls, *args, **kwargs):
         if cls is Path:
@@ -976,7 +1046,23 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             target = self._coerce_target(target)
         src = self
 
+        if not follow_symlinks and src.is_symlink():
+            # pathlib 3.14: copy the link itself, not what it points at.
+            # Copying the target's content (and chmod'ing it with the link's
+            # own 0o777) silently defeated the flag.
+            return src._copy_symlink(target, overwrite=overwrite)
+
         if recursive and src.is_dir():
+            if _contains(src, target):
+                # Checked before anything is created: the new directory would
+                # be listed and copied into itself without end.
+                raise OSError(
+                    _errno.EINVAL,
+                    "Cannot copy a directory into itself",
+                    str(target),
+                )
+            # Listed before the target exists, as shutil.copytree does.
+            children = list(src.iterdir())
             if target.exists():
                 if not target.is_dir():
                     raise FileExistsError(target)
@@ -984,7 +1070,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     raise FileExistsError(target)
             else:
                 target.mkdir()
-            for child in src.iterdir():
+            for child in children:
                 try:
                     child.copy(
                         target / child.name,
@@ -1011,7 +1097,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             raise OSError(
                 _errno.EINVAL, "Source and target are the same file", str(target)
             )
-        target_exists = target.exists()
+        # stat(), not exists(): exists() reads a transient error (a 503, a
+        # timeout) as "missing", and overwrite=False must never be decided by
+        # a failure. Only FileNotFoundError means the target is absent.
+        try:
+            target.stat()
+            target_exists = True
+        except FileNotFoundError:
+            target_exists = False
         if target_exists:
             if target.is_dir():
                 raise IsADirectoryError(target)
@@ -1056,9 +1149,38 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 # applying it made every copy from MemPath/HTTP/S3/... a
                 # read-only file that a re-copy or re-sync could not replace.
                 if getattr(stat, "mode_known", True) and stat.st_mode:
-                    target.chmod(stat.st_mode)
+                    # Permission bits only: the file-type bits of st_mode
+                    # (0o100000 for a regular file) are not a mode, and a
+                    # backend such as FTP's SITE CHMOD sends them verbatim.
+                    target.chmod(_stat.S_IMODE(stat.st_mode))
             except NotImplementedError:
                 pass
+
+    def _copy_symlink(self, target: "Path", *, overwrite=False):
+        """`copy(follow_symlinks=False)` of a symlink: create a link at
+        `target` with the same (unresolved) target text. Raises
+        NotImplementedError when this backend cannot read links or the
+        target's cannot create them -- never falls back to copying content."""
+        readlink = getattr(self, "readlink", None)
+        if not callable(readlink):
+            raise NotImplementedError(f"copy(follow_symlinks=False) of {self!r}")
+        link = readlink()
+        if type(link) is not type(target):
+            # Another backend: hand over the literal target text.
+            text = getattr(link, "path", None)
+            link = text if isinstance(text, str) else link.as_posix()
+        if _same_file(self, target):
+            raise OSError(
+                _errno.EINVAL, "Source and target are the same file", str(target)
+            )
+        target_stat = FileStat.from_path(target, follow_symlink=False)
+        if target_stat is not None:
+            if target_stat.is_dir() and not target_stat.is_symlink():
+                raise IsADirectoryError(target)
+            if not overwrite:
+                raise FileExistsError(target)
+            target.unlink()
+        target.symlink_to(link, target_is_directory=self.is_dir())
 
     def move(self, target: "Path|str", *, overwrite=False):
         """Move this file or directory to target, falling back to copy+unlink/rm if rename is unsupported."""
@@ -1121,6 +1243,25 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         else:
             src.copy(target, overwrite=overwrite)
             src.unlink()
+
+
+def _contains(src: Path, target: Path) -> bool:
+    """Whether `target` is `src` or lies inside it, on the same backend
+    (pathlib 3.14's copy() refuses both). Conservative like `_same_file`:
+    paths of different types, or with different per-instance backends, are
+    never reported as nested."""
+    if type(src) is not type(target):
+        return False
+    if not hasattr(src, "source") and getattr(src, "_backend", None) is not getattr(
+        target, "_backend", None
+    ):
+        # A URI's equality already includes its authority; any other
+        # backend (a MemPath tree) must be the same instance.
+        return False
+    try:
+        return bool(target.is_relative_to(src))
+    except Exception:
+        return False
 
 
 def _same_file(src: Path, target: Path) -> bool:

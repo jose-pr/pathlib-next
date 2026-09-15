@@ -261,9 +261,9 @@ def test_copy_applies_a_backend_reported_mode():
     src = Source("/a.txt")
     src.write_text("x")
     src.copy(Target("/b.txt"))
-    assert calls == [stat.S_IFREG | 0o640]
+    assert calls == [0o640]
     src.copy(Target("/c.txt"), preserve_metadata=False)
-    assert calls == [stat.S_IFREG | 0o640]
+    assert calls == [0o640]
 
 
 def test_copy_between_local_paths_still_preserves_a_real_readonly_mode(tmp_path):

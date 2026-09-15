@@ -335,16 +335,30 @@ def _uri_string(draw):
     return "".join(parts)
 
 
+# The oracle is uritools' getters, with three deliberate contract changes
+# (wave 5, Design Q1 and the non-UTF-8/data: findings):
+# * the query is the RAW, still-encoded component, never decoded at parse;
+# * percent-escapes that are not UTF-8 decode with surrogateescape instead
+#   of raising UnicodeDecodeError;
+# * a data: path skips dot-segment removal (RFC 2397 payloads are opaque).
+_ERRORS = "surrogateescape"
+
+
 def _oracle_parse(uri: str):
     parsed = uritools.urisplit(uri)
+    scheme = parsed.getscheme()
+    if scheme == "data":
+        path = uritools.uridecode(parsed.path, errors=_ERRORS)
+    else:
+        path = parsed.getpath(errors=_ERRORS)
     return (
-        parsed.getscheme(),
-        parsed.getuserinfo(),
-        parsed.gethost() or "",
+        scheme,
+        parsed.getuserinfo(errors=_ERRORS),
+        parsed.gethost(errors=_ERRORS) or "",
         parsed.getport(),
-        parsed.getpath(),
-        parsed.getquery() or "",
-        parsed.getfragment() or "",
+        path,
+        parsed.query or "",
+        parsed.getfragment(errors=_ERRORS) or "",
     )
 
 
@@ -353,11 +367,14 @@ def _fast_parse(uri: str):
     scheme = scheme.lower() if scheme is not None else None
     userinfo, host, port = _split_authority(authority)
     if userinfo is not None:
-        userinfo = uritools.uridecode(userinfo)
+        userinfo = uritools.uridecode(userinfo, errors=_ERRORS)
     host = _decode_host(host) if host is not None else ""
-    path = uritools.uridecode(_remove_dot_segments(path))
-    query = uritools.uridecode(query) if query is not None else None
-    fragment = uritools.uridecode(fragment) if fragment is not None else None
+    if scheme != "data":
+        path = _remove_dot_segments(path)
+    path = uritools.uridecode(path, errors=_ERRORS)
+    fragment = (
+        uritools.uridecode(fragment, errors=_ERRORS) if fragment is not None else None
+    )
     return scheme, userinfo, host, port, path, (query or ""), (fragment or "")
 
 
@@ -426,10 +443,37 @@ _compose_frag_st = st.one_of(
 )
 
 
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _oracle_raw_query(query: str) -> str:
+    """Design Q1: a stored query is already encoded, so composing keeps every
+    valid %XX escape and every delimiter, and encodes only characters that
+    cannot appear in a query (uritools.uricompose encodes "%" itself, which
+    double-encoded a received query)."""
+    out = []
+    index = 0
+    while index < len(query):
+        char = query[index]
+        escape = query[index + 1 : index + 3]
+        if char == "%" and len(escape) == 2 and all(h in _HEX for h in escape):
+            out.append(query[index : index + 3])
+            index += 3
+            continue
+        out.append(uritools.uriencode(char, "!$&'()*+,;=:@/?").decode())
+        index += 1
+    return "".join(out)
+
+
+def _with_raw_query(uri: str, query) -> str:
+    if query is None:
+        return uri
+    head, sep, fragment = uri.partition("#")
+    return f"{head}?{_oracle_raw_query(query)}{sep}{fragment}"
+
+
 def _oracle_format_parsed_parts(source, path, query, fragment, sanitize=True):
     parts = {"path": path}
-    if query:
-        parts["query"] = query
     if fragment:
         parts["fragment"] = fragment
     if source:
@@ -437,7 +481,9 @@ def _oracle_format_parsed_parts(source, path, query, fragment, sanitize=True):
         if sanitize:
             source_["userinfo"] = (source_["userinfo"] or "").split(":", maxsplit=1)[0]
         parts.update(source_)
-    return uritools.uricompose(**{k: v for k, v in parts.items() if v})
+    return _with_raw_query(
+        uritools.uricompose(**{k: v for k, v in parts.items() if v}), query or None
+    )
 
 
 @given(
@@ -499,14 +545,16 @@ def test_compose_uri_matches_uricompose_direct(
     except Exception as e:
         fast = ("EXC", type(e).__name__)
     try:
-        oracle = uritools.uricompose(
-            scheme=scheme,
-            userinfo=userinfo,
-            host=host,
-            port=port,
-            path=path,
-            query=query or None,
-            fragment=fragment or None,
+        oracle = _with_raw_query(
+            uritools.uricompose(
+                scheme=scheme,
+                userinfo=userinfo,
+                host=host,
+                port=port,
+                path=path,
+                fragment=fragment or None,
+            ),
+            query or None,
         )
     except Exception as e:
         oracle = ("EXC", type(e).__name__)

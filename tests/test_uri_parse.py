@@ -89,9 +89,16 @@ def test_truediv_pathlib():
     uri = authkeys.as_uri()
     assert uri == "sftp://root@sftpexample/root/.ssh/authorized_keys"
 
+    # A relative concrete Path joins like a relative PurePath and keeps the
+    # base's source (Design Q2). It used to become the LOCAL file
+    # "file:/root/.ssh/authorized_keys".
     authkeys = sftp_root / pathlib.Path("root/.ssh/authorized_keys")
     uri = authkeys.as_uri()
-    assert uri == "file:/root/.ssh/authorized_keys"
+    assert uri == "sftp://root@sftpexample/root/.ssh/authorized_keys"
+
+    # An absolute one still replaces the base, as a local file: URI.
+    absolute = pathlib.Path("/root/.ssh/authorized_keys").absolute()
+    assert (sftp_root / absolute).as_uri() == Uri(absolute.as_uri()).as_uri()
 
 
 def test_join_without_root():

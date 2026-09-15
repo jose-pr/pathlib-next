@@ -14,9 +14,12 @@ def _querylist(
     items: _ty.Sequence[_ty.Tuple[str, _ty.Any]], sep: str, encoding: str
 ) -> bytes:
     safe = _SAFE_QUERY.replace(sep, "")
+    # "=" ends a name: a literal one in a key must be escaped, or
+    # {"a=b": "c"} decodes back as ("a", "b=c").
+    name_safe = safe.replace("=", "")
     terms = []
     for key, value in items:
-        name = _uritools.uriencode(key, safe, encoding)
+        name = _uritools.uriencode(key, name_safe, encoding)
         if value is None:
             terms.append(name)
         elif isinstance(value, (bytes, str)):
@@ -40,7 +43,12 @@ def _querydict(mapping: _ty.Mapping[str, _ty.Any], sep: str, encoding: str) -> b
 
 class Query(str):
     """A URI query string (`str` subclass) that can also be built from a
-    dict/list of pairs and decoded back with `to_dict()`/iteration."""
+    dict/list of pairs and decoded back with `to_dict()`/iteration.
+
+    The string is always the percent-encoded form: a `str` argument is
+    taken as already encoded (it is what `Uri.query` holds, as received),
+    a mapping or pair sequence is encoded here, and `decode()`/`to_dict()`
+    decode each name and value exactly once."""
 
     __slots__ = ("_encoding", "_separator")
     SEPARATOR = "&"

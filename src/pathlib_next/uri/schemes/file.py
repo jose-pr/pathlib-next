@@ -4,7 +4,7 @@ import os as _os
 
 from ...fspath import LocalPath as _Local
 from ...path import FsPathLike
-from .. import Source, UriPath
+from .. import Source, UriPath, _is_drive
 
 
 class FileUri(UriPath):
@@ -24,7 +24,7 @@ class FileUri(UriPath):
     def parent(self):
         parent = super().parent
         path = parent.path
-        if _os.name == "nt" and len(path) == 2 and path[1] == ":" and path[0].isalpha():
+        if _os.name == "nt" and _is_drive(path.removeprefix("/")):
             # "C:" alone is drive-RELATIVE (the current directory on C:); the
             # parent of a top-level "C:/Windows" is the drive root "C:/".
             return parent.with_path(path + "/")
@@ -39,11 +39,24 @@ class FileUri(UriPath):
         /,
         **kwargs,
     ):
-        if _os.name == "nt" and path and path[0] == "/":
+        # With a host ("file://localhost/C:/x") the "/" before the drive
+        # stays: a path under an authority must start with "/", and without
+        # it str()/repr()/hash() raised ValueError. `__fspath__` drops it.
+        if _os.name == "nt" and path and path[0] == "/" and not source.host:
             root, *_ = path[1:].split("/", maxsplit=1)
             if root and root[-1] == ":":
                 path = path.removeprefix("/")
         super()._init(source, path, query, fragment, **kwargs)
+
+    @classmethod
+    def _format_parsed_parts(cls, source, path, query, fragment, /, sanitize=True):
+        if _os.name == "nt" and _is_drive(path.partition("/")[0]):
+            # Render "C:/x" as "file:/C:/x", the spelling `Uri` itself
+            # parses it to, so `Uri(p) == UriPath(p)` for a local path.
+            path = "/" + path
+        return super()._format_parsed_parts(
+            source, path, query, fragment, sanitize=sanitize
+        )
 
     def _listdir(self):
         yield from _os.listdir(self.filepath)

@@ -234,3 +234,50 @@ def test_notadirectoryerror_names_the_offending_ancestor():
     with pytest.raises(NotADirectoryError) as excinfo:
         MemPath("a/f.txt/sub", backend=backend).stat()
     assert str(excinfo.value.args[0]) == "a/f.txt"
+
+
+def test_iterdir_on_missing_path_raises_filenotfounderror():
+    # pathlib raises FileNotFoundError; this used to be NotADirectoryError.
+    with pytest.raises(FileNotFoundError):
+        list(MemPath("/nope").iterdir())
+    errors = []
+    list(MemPath("/missing").walk(on_error=errors.append))
+    assert [type(error) for error in errors] == [FileNotFoundError]
+
+
+def test_iterdir_on_file_still_raises_notadirectoryerror():
+    path = MemPath("/f.txt")
+    path.write_text("x")
+    with pytest.raises(NotADirectoryError):
+        list(path.iterdir())
+
+
+@pytest.mark.parametrize("write_mode, read_mode", [("wt", "rt"), ("w", "r")])
+def test_text_modes_with_and_without_t(write_mode, read_mode):
+    path = MemPath("/t.txt")
+    with path.open(write_mode) as handle:
+        handle.write("line\n")
+    with path.open(read_mode) as handle:
+        assert handle.read() == "line\n"
+    created = path.with_name("x.txt")
+    with created.open("xt") as handle:
+        handle.write("new")
+    assert created.read_text() == "new"
+
+
+def test_mtime_is_set_and_advances_on_every_write():
+    path = MemPath("/m.txt")
+    path.write_bytes(b"old.")
+    first = path.stat().st_mtime
+    assert first > 0
+    # Same size, new content: a (size, mtime) quick check must see it.
+    path.write_bytes(b"NEW!")
+    second = path.stat().st_mtime
+    assert second > first
+    with path.open("ab") as handle:
+        handle.write(b"+")
+    third = path.stat().st_mtime
+    assert third > second
+    # Reading does not touch it.
+    path.read_bytes()
+    assert path.stat().st_mtime == third

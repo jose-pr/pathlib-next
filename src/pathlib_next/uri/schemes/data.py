@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import io as _io
-import urllib.parse as _urlparse
 from base64 import b64decode as _b64decode
 
 from ...utils.stat import FileStat
 from .. import UriPath
+from ..source import _ERRORS
 
 _DEFAULT_MEDIATYPE = "text/plain;charset=US-ASCII"
 
@@ -42,9 +42,14 @@ class DataUri(UriPath):
         header, sep, data = self.path.partition(",")
         if not sep:
             raise FileNotFoundError(self)
+        # `.path` is already percent-decoded exactly once (and, for data:,
+        # not dot-normalized), with any non-UTF-8 byte carried as a
+        # surrogate -- so this re-encodes rather than unquoting a second
+        # time, which turned "100%2525" into b"100%" instead of b"100%25".
+        payload = data.encode("utf-8", _ERRORS)
         if self._is_base64:
-            return _b64decode(_urlparse.unquote_to_bytes(data))
-        return _urlparse.unquote_to_bytes(data)
+            return _b64decode(payload)
+        return payload
 
     def stat(self, *, follow_symlinks=True):
         return FileStat(st_size=len(self._content()), is_dir=False)

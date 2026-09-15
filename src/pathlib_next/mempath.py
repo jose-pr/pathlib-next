@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import posixpath as _posix
+import time as _time
 from io import IOBase
 from urllib.parse import quote as _urlquote
 
@@ -14,6 +15,28 @@ class MemPathBackend(dict):
     value is a directory; a `bytearray` value is a file's content. Share
     one instance across `MemPath`s (via `backend=`) to give them the same
     virtual filesystem."""
+
+
+class MemFile(bytearray):
+    """A file's content in a `MemPathBackend`, carrying its modification
+    time. A plain `bytearray` placed in a backend by hand still works; it
+    reports `st_mtime` 0."""
+
+    __slots__ = ("mtime",)
+
+    def __init__(self, *args) -> None:
+        super().__init__(*args)
+        self.mtime = 0.0
+        _touch(self)
+
+
+def _touch(content) -> None:
+    """Advance `content`'s mtime -- strictly, even within one clock tick:
+    a sync quick check comparing (size, mtime) must see every write."""
+    try:
+        content.mtime = max(_time.time(), getattr(content, "mtime", 0.0) + 1e-6)
+    except AttributeError:
+        pass
 
 
 class MemBytesIO(io.BytesIO):
@@ -29,9 +52,11 @@ class MemBytesIO(io.BytesIO):
         # getvalue(), not seek(0);read(): a caller that seeks before
         # closing (or opened in append mode, positioned at EOF) would
         # otherwise lose everything before the current position.
-        content = self.getvalue()
-        self._bytes.clear()
-        self._bytes.extend(content)
+        if not self.closed:
+            content = self.getvalue()
+            self._bytes.clear()
+            self._bytes.extend(content)
+            _touch(self._bytes)
         return super().close()
 
 
@@ -215,11 +240,17 @@ class MemPath(Path):
         # st_size was never set for files (always defaulted to 0), which
         # silently broke any size-based checksum (e.g. PathSyncer's default
         # usage pattern).
-        return FileStat(is_dir=is_dir, st_size=0 if is_dir else len(content))
+        return FileStat(
+            is_dir=is_dir,
+            st_size=0 if is_dir else len(content),
+            st_mtime=getattr(content, "mtime", 0),
+        )
 
     def iterdir(self):
         parent, name = self._parent_container()
         content = parent.get(name) if name else parent
+        if content is None:
+            raise FileNotFoundError(self)
         if not isinstance(content, dict):
             raise NotADirectoryError(self)
         for c in list(content.keys()):
@@ -246,17 +277,24 @@ class MemPath(Path):
                 # Truncating over a directory silently replaced the whole
                 # subtree with a file; stdlib raises IsADirectoryError.
                 raise IsADirectoryError(self)
-            content = bytearray()
-            parent[name] = content
+            content = parent.get(name)
+            if isinstance(content, bytearray):
+                # Truncate the same file, as "w" does on disk: its mtime
+                # then still advances past the previous write's.
+                content.clear()
+                _touch(content)
+            else:
+                content = MemFile()
+                parent[name] = content
             return MemBytesIO(content)
         elif mode == "x":
             if name in parent:
                 raise FileExistsError(self)
-            content = bytearray()
+            content = MemFile()
             parent[name] = content
             return MemBytesIO(content)
         elif mode == "a":
-            content = parent.setdefault(name, bytearray())
+            content = parent.setdefault(name, MemFile())
             if isinstance(content, dict):
                 raise IsADirectoryError(self)
             buf = MemBytesIO(content)

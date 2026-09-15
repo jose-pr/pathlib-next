@@ -260,3 +260,45 @@ def test_mixin_defined_operation_is_not_displaced():
         __slots__ = ()
 
     assert Composed.copy is CopyMixin.copy
+
+
+# --- what the guarded operations call must be pathlib_next's too -----------
+
+
+def test_concrete_local_downstream_guarded_operations_run(tmp_path):
+    """The guard re-asserts exists/rglob/copy/..., which call `stat(
+    follow_symlinks=)`, `glob(include_hidden=...)` and tuple-yielding
+    `_scandir()`. Without those companions a concrete-local downstream class
+    raised TypeError (3.9: exists(), walk(), copy(), rm(); every version:
+    rglob). Calls each operation and checks its result."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("a")
+    root = DownstreamConcreteLocal(tmp_path)
+    sub = DownstreamConcreteLocal(tmp_path / "sub")
+    source = DownstreamConcreteLocal(tmp_path / "sub" / "a.txt")
+
+    assert source.exists() is True
+    assert source.exists(follow_symlinks=False) is True
+    assert source.stat(follow_symlinks=False).st_size == 1
+    assert [p.name for p in root.rglob("*.txt")] == ["a.txt"]
+    assert [p.name for p in root.glob("*", include_hidden=True)] == ["sub"]
+    assert [(p.name, d, f) for p, d, f in root.walk()] == [
+        (root.name, ["sub"], []),
+        ("sub", [], ["a.txt"]),
+    ]
+
+    copied = DownstreamConcreteLocal(tmp_path / "copy.txt")
+    source.copy(copied)
+    assert copied.read_text() == "a"
+    tree_copy = DownstreamConcreteLocal(tmp_path / "tree")
+    sub.copy(tree_copy, recursive=True)
+    assert (tmp_path / "tree" / "a.txt").read_text() == "a"
+
+    tree_copy.rm(recursive=True)
+    assert not (tmp_path / "tree").exists()
+
+
+@pytest.mark.parametrize("name", ["glob", "walk"])
+def test_concrete_local_downstream_companions_resolve_to_pathlib_next(name):
+    module = _impl_module(DownstreamConcreteLocal, name)
+    assert module.startswith("pathlib_next"), (name, module)

@@ -7,6 +7,42 @@ import typing as _ty
 from .. import utils as _utils
 
 
+def _canonical_mode(mode, buffering, encoding, errors, newline) -> str:
+    """`open()`'s mode validation (CPython `_io.open`), returning the mode
+    as kind + optional "+" + "b" for binary. A mode such as "rt" used to
+    reach `_open()` verbatim and fail as NotImplementedError, and "zz" or
+    "rw" raised NotImplementedError where `open()` raises ValueError."""
+    if not isinstance(mode, str):
+        raise TypeError(
+            f"open() argument 'mode' must be str, not {type(mode).__name__}"
+        )
+    modes = set(mode)
+    if modes - set("axrwb+t") or len(mode) > len(modes):
+        raise ValueError(f"invalid mode: {mode!r}")
+    kinds = [kind for kind in "xrwa" if kind in modes]
+    text = "t" in modes
+    binary = "b" in modes
+    if text and binary:
+        raise ValueError("can't have text and binary mode at once")
+    if len(kinds) != 1:
+        raise ValueError(
+            "must have exactly one of create/read/write/append mode"
+            if kinds
+            else "Must have exactly one of create/read/write/append "
+            "mode and at most one plus"
+        )
+    if binary:
+        if encoding is not None:
+            raise ValueError("binary mode doesn't take an encoding argument")
+        if errors is not None:
+            raise ValueError("binary mode doesn't take an errors argument")
+        if newline is not None:
+            raise ValueError("binary mode doesn't take a newline argument")
+    elif buffering == 0:
+        raise ValueError("can't have unbuffered text I/O")
+    return kinds[0] + ("+" if "+" in modes else "") + ("b" if binary else "")
+
+
 class BinaryOpen(_ty.Protocol):
     """Protocol for objects that support open->io.IoBase"""
 
@@ -34,7 +70,13 @@ class BinaryOpen(_ty.Protocol):
     ) -> _io.IOBase:
         """
         Open the a handle to an object that implement io.IOBase
+
+        The mode is validated like `open()` (ValueError for an invalid mode,
+        or an encoding/errors/newline with a binary one), and `_open()`
+        receives it canonical: one of "r"/"w"/"x"/"a", plus "+" if given --
+        never "b" or "t", so "rt"/"wt" reach every backend as "r"/"w".
         """
+        mode = _canonical_mode(mode, buffering, encoding, errors, newline)
         fh = self._open(mode.replace("b", ""), buffering)
         if "b" not in mode:
             # io.text_encoding is 3.10+; on 3.9 pass encoding through as-is

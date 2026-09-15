@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools as _functools
 import ipaddress as _ip
+import re as _re
 import typing as _ty
 
 import netimps as _netimps
@@ -13,6 +14,13 @@ if _ty.TYPE_CHECKING:
     from . import UriPath
 
 _DIGITS = "0123456789"
+
+#: Decoding and encoding error handler for percent-escapes. A valid URI may
+#: escape bytes that are not UTF-8 (`caf%E9.html` from a latin-1 server);
+#: `surrogateescape` carries each such byte through the decoded `str` and
+#: back out to the same escape, where the default `strict` raised
+#: UnicodeDecodeError while the path object was being constructed.
+_ERRORS = "surrogateescape"
 
 
 def _split_authority(
@@ -72,7 +80,7 @@ def _decode_host(host: str) -> "str | _IPAddress":
     try:
         return _ip.IPv4Address(host)
     except ValueError:
-        return _uritools.uridecode(host).lower()
+        return _uritools.uridecode(host, errors=_ERRORS).lower()
 
 
 def _remove_dot_segments(path: str) -> str:
@@ -128,6 +136,28 @@ _SAFE_QUERY = _SUB_DELIMS + ":@/?"
 _SAFE_FRAGMENT = _SAFE_QUERY
 
 
+_PERCENT_ESCAPE = _re.compile("(%[0-9A-Fa-f]{2})")
+
+
+def _encode_raw_query(query: str) -> str:
+    """Emit a stored query for the wire: it is kept in its received,
+    still-percent-encoded form (see `Uri.query`), so an existing `%XX`
+    escape and every delimiter (`&`, `=`, `+`, `;`) go out unchanged. Only
+    characters that cannot appear in a query at all (a space, non-ASCII, a
+    `%` that starts no escape) are encoded.
+
+    Decoding at parse time and re-encoding here with `&`/`=`/`+` as safe
+    characters turned `name=a%26b&sig=ab%2Bcd%3D%3D` into
+    `name=a&b&sig=ab+cd==` on the wire, corrupting signed URLs."""
+    pieces = _PERCENT_ESCAPE.split(query)
+    for index in range(0, len(pieces), 2):
+        if pieces[index]:
+            pieces[index] = _uritools.uriencode(
+                pieces[index], _SAFE_QUERY, errors=_ERRORS
+            ).decode()
+    return "".join(pieces)
+
+
 def _compose_host(host: "str | _IPAddress") -> str:
     """Encode a host for composition -- mirrors `uritools`' private
     `_authority()`/`_host()` composer helpers, including the fact that a
@@ -144,7 +174,7 @@ def _compose_host(host: "str | _IPAddress") -> str:
     try:
         return f"[{_ip.IPv6Address(host).compressed}]"
     except ValueError:
-        return _uritools.uriencode(host.lower(), _SAFE_HOST).decode()
+        return _uritools.uriencode(host.lower(), _SAFE_HOST, errors=_ERRORS).decode()
 
 
 def _compose_uri(
@@ -164,14 +194,18 @@ def _compose_uri(
     if has_authority:
         parts.append("//")
         if userinfo is not None:
-            parts.append(_uritools.uriencode(userinfo, _SAFE_USERINFO).decode())
+            parts.append(
+                _uritools.uriencode(userinfo, _SAFE_USERINFO, errors=_ERRORS).decode()
+            )
             parts.append("@")
         if host is not None:
             parts.append(_compose_host(host))
         if port is not None:
             parts.append(":")
             parts.append(str(port))
-    path_enc = _uritools.uriencode(path, _SAFE_PATH).decode() if path else ""
+    path_enc = (
+        _uritools.uriencode(path, _SAFE_PATH, errors=_ERRORS).decode() if path else ""
+    )
     if has_authority and path_enc and not path_enc.startswith("/"):
         raise ValueError("Invalid path with authority component")
     if not has_authority and path_enc.startswith("//"):
@@ -182,10 +216,12 @@ def _compose_uri(
     parts.append(path_enc)
     if query is not None:
         parts.append("?")
-        parts.append(_uritools.uriencode(query, _SAFE_QUERY).decode())
+        parts.append(_encode_raw_query(query))
     if fragment is not None:
         parts.append("#")
-        parts.append(_uritools.uriencode(fragment, _SAFE_FRAGMENT).decode())
+        parts.append(
+            _uritools.uriencode(fragment, _SAFE_FRAGMENT, errors=_ERRORS).decode()
+        )
     return "".join(parts)
 
 
@@ -255,7 +291,7 @@ class Source(_ty.NamedTuple):
         scheme = uri.scheme.lower() if uri.scheme is not None else None
         userinfo, host, port = _split_authority(uri.authority)
         if userinfo is not None:
-            userinfo = _uritools.uridecode(userinfo)
+            userinfo = _uritools.uridecode(userinfo, errors=_ERRORS)
         if host is not None:
             host = _decode_host(host)
         return cls(scheme, userinfo, host, port)
@@ -283,6 +319,11 @@ class Source(_ty.NamedTuple):
                 schemesmap = UriPath._schemesmap()
             _cls = schemesmap.get(self.scheme, None)
             if _cls is None:
+                # The map is rebuilt whenever a UriPath subclass is defined
+                # (UriPath.__init_subclass__), so a miss here is a scheme no
+                # imported class registers; `_load_entry_point` caches that
+                # negative answer instead of rescanning every installed
+                # distribution on each construction.
                 if UriPath._load_entry_point(
                     self.scheme
                 ) or UriPath._load_builtin_scheme(self.scheme):

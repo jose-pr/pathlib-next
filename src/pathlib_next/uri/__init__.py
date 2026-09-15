@@ -17,6 +17,7 @@ from ..path import Path, Pathname
 from ..utils.stat import FileStat
 from .query import Query
 from .source import (
+    _ERRORS,
     Source,
     _compose_uri,
     _decode_host,
@@ -59,7 +60,31 @@ def _segments_of(path: str) -> list[str]:
 
 
 def _uriencode(text: str, safe=""):
-    return uritools.uriencode(text, safe=safe).decode()
+    return uritools.uriencode(text, safe=safe, errors=_ERRORS).decode()
+
+
+class _RelativeLocalPath(str):
+    """The encoded posix spelling of a *relative* concrete local path
+    (`pathlib.Path("a/b")`, `LocalPath("a/b")`) in `Uri._raw_uris`.
+
+    It joins like a relative `PurePath` -- onto the preceding segments,
+    keeping their source -- and supplies a `file:` scheme only when no
+    segment has a source at all. Turning it into `file:a/b` up front let
+    that scheme replace the base's, so
+    `UriPath("sftp://h/srv/") / pathlib.Path("etc/x")` became the LOCAL
+    file `/srv/etc/x`."""
+
+    __slots__ = ()
+
+
+_FILE_SOURCE = Source("file", None, "", None)
+
+#: scheme -> the `importlib.metadata.entry_points` that found no plugin for it.
+_ENTRY_POINT_MISSES: "dict[str, object]" = {}
+
+
+def _is_drive(segment: str) -> bool:
+    return len(segment) == 2 and segment[1] == ":" and segment[0].isalpha()
 
 
 class Uri(Pathname):
@@ -110,8 +135,9 @@ class Uri(Pathname):
                 try:
                     uri = uri.as_uri()
                 except ValueError:
-                    # as_uri() raises ValueError for a relative path.
-                    uri = f"file:{_uriencode(uri.as_posix(), safe='/')}"
+                    # as_uri() raises ValueError for a relative path, which
+                    # joins like a relative PurePath (see _RelativeLocalPath).
+                    uri = _RelativeLocalPath(_uriencode(uri.as_posix(), safe="/"))
                 _uris.append(uri)
             elif isinstance(uri, (_pathlib.PurePath, Pathname)):
                 _uris.append(f"{_uriencode(uri.as_posix(), safe='/')}")
@@ -152,15 +178,28 @@ class Uri(Pathname):
         # against uritools as oracle) -- see source.py's helpers for the
         # equivalence notes, including one uritools quirk reproduced
         # on purpose.
+        #
+        # Deliberate differences from uritools' getters:
+        # * the query is NOT decoded: `.query` is the received,
+        #   percent-encoded string, sent back out unchanged and decoded only
+        #   per key/value by `Query.decode()`/`to_dict()`. Decoding it here
+        #   made an escaped `&`, `=` or `+` in a value indistinguishable from
+        #   a delimiter.
+        # * escapes that are not UTF-8 decode with `surrogateescape` (see
+        #   `source._ERRORS`) instead of raising UnicodeDecodeError.
+        # * a `data:` payload (RFC 2397) is an opaque octet string, so it
+        #   gets no dot-segment removal: "data:,a/./b" is the bytes "a/./b".
         scheme, authority, path, query, fragment = uritools.urisplit(uri)
         scheme = scheme.lower() if scheme is not None else None
         userinfo, host, port = _split_authority(authority)
         if userinfo is not None:
-            userinfo = uritools.uridecode(userinfo)
+            userinfo = uritools.uridecode(userinfo, errors=_ERRORS)
         host = _decode_host(host) if host is not None else ""
-        path = uritools.uridecode(_remove_dot_segments(path))
-        query = uritools.uridecode(query) if query is not None else None
-        fragment = uritools.uridecode(fragment) if fragment is not None else None
+        if scheme != "data":
+            path = _remove_dot_segments(path)
+        path = uritools.uridecode(path, errors=_ERRORS)
+        if fragment is not None:
+            fragment = uritools.uridecode(fragment, errors=_ERRORS)
         return (
             Source(scheme, userinfo, host, port),
             path,
@@ -187,6 +226,7 @@ class Uri(Pathname):
         source = _NOSOURCE
         query = fragment = None
         _path = ""
+        local = False
 
         if not uris:
             pass
@@ -198,6 +238,7 @@ class Uri(Pathname):
                 src, path, q, frag = (
                     _uri.parts if isinstance(_uri, Uri) else self._parse_uri(_uri)
                 )
+                local = local or isinstance(_uri, _RelativeLocalPath)
                 if bool(src):
                     source = src
                 if q:
@@ -217,6 +258,11 @@ class Uri(Pathname):
                     _path = path
                 if _path.startswith("/"):
                     break
+
+            if local and not source:
+                # Nothing but relative local paths and sourceless strings:
+                # still a local file.
+                source = _FILE_SOURCE
 
         if (
             (source.host or source.userinfo or source.port)
@@ -347,10 +393,25 @@ class Uri(Pathname):
 
     def __fspath__(self):
         if (self.source.scheme or "file") == "file":
-            if not self.source.host or self.is_local():
-                return self.path
+            host = self.source.host
+            if not host or (isinstance(host, str) and host.lower() == "localhost"):
+                path = self.path
+                # "file://localhost/C:/x" keeps the "/" before its drive (it
+                # must, to render with an authority); the OS path does not.
+                if (
+                    os.name == "nt"
+                    and path.startswith("/")
+                    and _is_drive(path[1:].partition("/")[0])
+                ):
+                    path = path[1:]
+                return path
             elif os.name == "nt":
-                return f"//{self.source.host}/{self.path.removeprefix('/')}"
+                # A named host is a UNC share even when it is this machine:
+                # "file://gungnir/share/x" is "//gungnir/share/x", never
+                # "/share/x" on the current drive. No DNS lookup either.
+                return f"//{host}/{self.path.removeprefix('/')}"
+            elif self.is_local():
+                return self.path
             else:
                 raise NotImplementedError("OS Support for not local fspath")
 
@@ -401,6 +462,9 @@ class Uri(Pathname):
 
     @property
     def query(self) -> str:
+        """The query exactly as received: still percent-encoded, so an
+        escaped `&`, `=` or `+` inside a value survives the round trip. Use
+        `Query.decode()`/`to_dict()` for decoded pairs."""
         if not self._initiated:
             self._load_parts()
         return self._query
@@ -451,7 +515,11 @@ class Uri(Pathname):
         )
 
     def with_query(self, query: str):
-        """Return a new URI with the query replaced."""
+        """Return a new URI with the query replaced.
+
+        A `str` is taken in the percent-encoded form `.query` returns and is
+        sent as given; a mapping or a sequence of pairs is encoded by
+        `Query`."""
         if not isinstance(query, Query):
             query = Query(query)
         return self._from_parsed_parts(self.source, self.path, query, self.fragment)
@@ -636,6 +704,15 @@ class UriPath(Uri, Path):
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # A scheme class defined after the first dispatch must be found by
+        # the next one: drop every cached map that could include it.
+        for base in cls.__mro__:
+            if isinstance(base, type) and issubclass(base, UriPath):
+                setattr(base, f"_{base.__name__}__SCHEMESMAP", None)
+        _ENTRY_POINT_MISSES.clear()
+
     @classmethod
     def _schemesmap(cls, reload=False) -> _ty.Mapping[str, type["Self"]]:
         _propname = f"_{cls.__name__}__SCHEMESMAP"
@@ -646,6 +723,8 @@ class UriPath(Uri, Path):
                     return schemesmap
             except AttributeError:
                 pass
+        else:
+            _ENTRY_POINT_MISSES.clear()
         schemesmap = cls._get_schemesmap()
         setattr(cls, _propname, schemesmap)
         return schemesmap
@@ -673,6 +752,13 @@ class UriPath(Uri, Path):
         """
         import importlib.metadata as _metadata
 
+        # A miss is remembered: scanning every installed distribution cost
+        # 13-29 ms on each construction with an unregistered scheme
+        # (including "C:/x" on Windows, read as scheme "c"). Keyed on the
+        # lookup function as well, so a replaced `entry_points` is asked
+        # afresh; `_schemesmap(reload=True)` and a new subclass clear it.
+        if _ENTRY_POINT_MISSES.get(scheme) is _metadata.entry_points:
+            return False
         try:
             eps = _metadata.entry_points(group="pathlib_next.schemes")
         except TypeError:
@@ -683,6 +769,7 @@ class UriPath(Uri, Path):
             if ep.name == scheme:
                 ep.load()
                 return True
+        _ENTRY_POINT_MISSES[scheme] = _metadata.entry_points
         return False
 
     @classmethod
@@ -813,6 +900,12 @@ class UriPath(Uri, Path):
             return type(self)(self, key, findclass=True)
         except (TypeError, NotImplementedError):
             return NotImplemented
+
+    def joinpath(self, *args: str | Uri | os.PathLike) -> "UriPath":
+        """Combine this path with segments, choosing the result's class from
+        its scheme as `/` does: joining an absolute local path gives a
+        `FileUri`, not this class carrying a `file:` URI."""
+        return type(self)(self, *args, findclass=True)
 
     def with_source(self, source: Source):
         cls = type(self)
