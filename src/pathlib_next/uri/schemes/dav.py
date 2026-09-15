@@ -11,7 +11,7 @@ from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import Uri
 from ..source import _compose_uri
-from .http import HttpPath, _translate_http_errors
+from .http import HttpPath, _split_userinfo, _translate_http_errors
 
 _NS = {"D": "DAV:"}
 
@@ -78,6 +78,8 @@ class DavPath(HttpPath):
     __slots__ = ()
 
     def _wire_uri(self) -> str:
+        # Keeps the userinfo: `HttpBackend.request` strips it from the URL
+        # it sends and turns it into `auth=`.
         # Direct string assembly instead of
         # uricompose() -- called on every DAV HTTP request, and every
         # component here already came from this instance's own parsed
@@ -246,7 +248,10 @@ class DavPath(HttpPath):
 
     def rename(self, target: "DavPath | Uri | str"):
         target = self._rename_target(target)
-        dest = self.with_path(target.path)._wire_uri()
+        # No userinfo in the header: the credentials already travel as
+        # `auth=` (see `HttpBackend.request`), and a header value ends up in
+        # server and proxy logs.
+        dest = _split_userinfo(self.with_path(target.path)._wire_uri())[0]
         resp = self.backend.request(
             "MOVE", self._wire_uri(), headers={"Destination": dest, "Overwrite": "F"}
         )

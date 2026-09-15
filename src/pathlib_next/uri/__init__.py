@@ -668,6 +668,7 @@ class UriPath(Uri, Path):
             "archive+zip": "pathlib_next.uri.schemes.archive",
             "archive+tar": "pathlib_next.uri.schemes.archive",
             "ftp": "pathlib_next.uri.schemes.ftp",
+            "ftps": "pathlib_next.uri.schemes.ftp",
             "http": "pathlib_next.uri.schemes.http",
             "https": "pathlib_next.uri.schemes.http",
             "dav": "pathlib_next.uri.schemes.dav",

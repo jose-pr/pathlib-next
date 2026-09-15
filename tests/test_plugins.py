@@ -90,7 +90,7 @@ class TestLoadEntryPoint:
 
 class TestLoadBuiltinScheme:
     @pytest.mark.parametrize(
-        "scheme", ["file", "data", "zip", "tar", "ftp", "http", "https"]
+        "scheme", ["file", "data", "zip", "tar", "ftp", "ftps", "http", "https"]
     )
     def test_known_stdlib_schemes_return_true(self, scheme):
         """All stdlib-only schemes should always load successfully."""
@@ -130,3 +130,25 @@ class TestGetSchemeCls:
             with mock.patch.object(UriPath, "_load_builtin_scheme", return_value=False):
                 cls = source.get_scheme_cls()
         assert cls is UriPath
+
+
+def test_every_builtin_scheme_is_in_both_fallback_registries():
+    """Every `__SCHEMES` value a builtin scheme class declares must resolve
+    through the entry points AND `_load_builtin_scheme` -- `ftps` was
+    declared by `FtpPath` but missing from both, so `UriPath("ftps://...")`
+    returned a do-nothing `UriPath` in a fresh process. Only classes whose
+    optional dependencies import here are checked."""
+    import pathlib_next.uri.schemes  # noqa: F401  (registers what imports)
+
+    declared = {
+        scheme
+        for scheme, cls in UriPath._get_schemesmap().items()
+        if cls.__module__.startswith("pathlib_next.uri.schemes")
+    }
+    assert "ftps" in declared
+    try:
+        eps = importlib.metadata.entry_points(group="pathlib_next.schemes")
+    except TypeError:  # Python 3.9
+        eps = importlib.metadata.entry_points().get("pathlib_next.schemes", ())
+    assert sorted(declared - {ep.name for ep in eps}) == []
+    assert sorted(s for s in declared if not UriPath._load_builtin_scheme(s)) == []

@@ -19,29 +19,74 @@ from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import UriPath
 
+DEFAULT_TIMEOUT = (10, 60)
+"""`(connect, read)` timeout, in seconds, `HttpBackend` sends with every
+request unless the caller supplies `timeout` (via `with_session(...,
+timeout=...)` / `requests_args`, or per request); `timeout=None` there
+restores requests' unbounded wait."""
+
+_RE_URL_SCHEME = _re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _split_userinfo(url: str) -> "tuple[str, tuple[str, str] | None]":
+    """Split the userinfo out of an absolute URL: `(url_without_userinfo,
+    (user, password) | None)`, both parts percent-decoded. Credentials sent
+    inside the request URL end up in `Response.url`, `raise_for_status()`
+    text and redirect handling; they go out as `auth=` instead."""
+    match = _RE_URL_SCHEME.match(url)
+    if not match:
+        return url, None
+    start = match.end()
+    end = len(url)
+    for sep in "/?#":
+        index = url.find(sep, start)
+        if index != -1 and index < end:
+            end = index
+    userinfo, at, hostport = url[start:end].rpartition("@")
+    if not at:
+        return url, None
+    user, _, password = userinfo.partition(":")
+    auth = (_urlparse.unquote(user), _urlparse.unquote(password))
+    return url[:start] + hostport + url[end:], (auth if any(auth) else None)
+
 
 @_contextlib.contextmanager
 def _translate_http_errors(path_obj):
+    # `from None`: a requests exception can carry a URL (a proxy URL from
+    # the environment included) with credentials in it, and a chained cause
+    # is printed by every formatted traceback and `logging.exception`. The
+    # status code/reason or the exception type stay in the message instead.
     try:
         yield
     except _req.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
+        response = e.response
+        status = response.status_code if response is not None else None
+        reason = getattr(response, "reason", None) or ""
         if status == 404:
-            raise FileNotFoundError(path_obj) from e
+            raise FileNotFoundError(path_obj) from None
         elif status in (401, 403):
-            raise PermissionError(path_obj) from e
+            raise PermissionError(path_obj) from None
         elif status == 409:
-            raise FileExistsError(path_obj) from e
+            raise FileExistsError(path_obj) from None
         elif status in (405, 501):
-            raise PermissionError(f"Method not allowed for {path_obj}") from e
+            raise PermissionError(
+                f"Method not allowed for {path_obj} (HTTP {status})"
+            ) from None
         else:
-            raise OSError(_errno.EIO, f"HTTP Error {status} for {path_obj}") from e
+            raise OSError(
+                _errno.EIO,
+                f"HTTP Error {status} {reason}".rstrip() + f" for {path_obj}",
+            ) from None
     except _req.exceptions.Timeout as e:
-        raise TimeoutError(f"Timeout for {path_obj}") from e
+        raise TimeoutError(f"Timeout for {path_obj} ({type(e).__name__})") from None
     except _req.exceptions.ConnectionError as e:
-        raise ConnectionError(f"Connection error for {path_obj}") from e
+        raise ConnectionError(
+            f"Connection error for {path_obj} ({type(e).__name__})"
+        ) from None
     except _req.exceptions.RequestException as e:
-        raise OSError(_errno.EIO, f"Request failed for {path_obj}") from e
+        raise OSError(
+            _errno.EIO, f"Request failed for {path_obj} ({type(e).__name__})"
+        ) from None
 
 
 _RE_ISO8601 = _re.compile(r"\d{4}-\d+-\d+T\d+:\d{2}:\d{2}Z")
@@ -452,7 +497,14 @@ class HttpAppendStream(_io.BytesIO):
 
 class HttpBackend(_ty.NamedTuple):
     """Per-instance `requests.Session` + extra request kwargs shared by an
-    `HttpPath` tree (see `with_session()`)."""
+    `HttpPath` tree (see `with_session()`).
+
+    Every request gets `timeout=DEFAULT_TIMEOUT` (`(10, 60)` seconds)
+    unless `requests_args` or the call supplies `timeout` (`None` there
+    waits forever). URL userinfo (`http://user:password@host/`) is never
+    sent inside the request URL: it is stripped and sent as `auth=(user,
+    password)` -- unless `requests_args`/the call pass their own `auth`
+    or the session has `session.auth` set, which win as they did before."""
 
     session: _req.Session
     requests_args: dict
@@ -460,12 +512,16 @@ class HttpBackend(_ty.NamedTuple):
     append_mode: str = "rewrite"
 
     def request(self, method, uri: "HttpPath|str", **kwargs):
-        return self.session.request(
-            **self.requests_args,
-            **kwargs,
-            method=method,
-            url=uri if isinstance(uri, str) else uri.as_uri(False),
-        )
+        url, auth = _split_userinfo(uri if isinstance(uri, str) else uri.as_uri(False))
+        args = {**self.requests_args, **kwargs}
+        args.setdefault("timeout", DEFAULT_TIMEOUT)
+        if (
+            auth is not None
+            and "auth" not in args
+            and not getattr(self.session, "auth", None)
+        ):
+            args["auth"] = auth
+        return self.session.request(method=method, url=url, **args)
 
 
 class HttpPath(UriPath):

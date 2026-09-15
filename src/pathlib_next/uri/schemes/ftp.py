@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as _dt
 import ftplib as _ftplib
 import io as _io
+import ssl as _ssl
 import threading as _thread
 import typing as _ty
 
@@ -25,26 +26,91 @@ class BaseFtpBackend(object):
     def client(self, source: Source, tls: bool) -> "_ftplib.FTP": ...
 
 
+DEFAULT_TIMEOUT = 30.0
+"""Socket timeout, in seconds, `FtpBackend` applies to connect, replies and
+transfers when the caller does not pass one."""
+
+
+class _SessionReuseFTP_TLS(_ftplib.FTP_TLS):
+    """`FTP_TLS` whose data connections resume the control connection's TLS
+    session. Stdlib `ntransfercmd` wraps the data socket without
+    `session=`, and servers such as vsftpd (`require_ssl_reuse=YES`, the
+    default) and FileZilla Server reject such a data connection with
+    `522`. With TLS 1.3 the session ticket arrives after the handshake; by
+    the first transfer the login replies have been read, so it is there."""
+
+    def ntransfercmd(self, cmd, rest=None):
+        # Skip FTP_TLS.ntransfercmd (it wraps without `session=`).
+        conn, size = super(_ftplib.FTP_TLS, self).ntransfercmd(cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(
+                conn,
+                server_hostname=self.host,
+                session=getattr(self.sock, "session", None),
+            )
+        return conn, size
+
+
 class FtpBackend(BaseFtpBackend):
     """Connects via stdlib `ftplib.FTP` (`ftp:`) or `ftplib.FTP_TLS`
-    (`ftps:`, with `PROT P` for an encrypted data channel too)."""
+    (`ftps:`, with `PROT P` for an encrypted data channel too).
 
-    __slots__ = ("timeout",)
+    `timeout` (seconds, default `DEFAULT_TIMEOUT` = 30) bounds connect,
+    every reply and every transfer read; `None` blocks forever.
 
-    def __init__(self, timeout: float = None) -> None:
+    `ftps:` verifies the server certificate and host name by default
+    (`ssl.create_default_context()`), before `USER`/`PASS` are sent. To
+    trust a private CA or a self-signed certificate, pass your own
+    `ssl_context` (e.g. `ssl.create_default_context(cafile=...)`). To turn
+    verification off entirely -- accepting any certificate, so anyone on
+    the network path can read the password -- pass `verify=False`.
+    `ssl_context` wins over `verify` when both are given. Data connections
+    reuse the control connection's TLS session."""
+
+    __slots__ = ("timeout", "ssl_context", "verify")
+
+    def __init__(
+        self,
+        timeout: "float | None" = DEFAULT_TIMEOUT,
+        ssl_context: "_ssl.SSLContext | None" = None,
+        verify: bool = True,
+    ) -> None:
         self.timeout = timeout
+        self.ssl_context = ssl_context
+        self.verify = verify
+
+    def _tls_context(self) -> "_ssl.SSLContext":
+        if self.ssl_context is not None:
+            return self.ssl_context
+        context = _ssl.create_default_context()
+        if not self.verify:
+            context.check_hostname = False
+            context.verify_mode = _ssl.CERT_NONE
+        return context
 
     def client(self, source: Source, tls: bool):
-        cls = _ftplib.FTP_TLS if tls else _ftplib.FTP
-        client = cls(timeout=self.timeout)
-        client.connect(
-            str(source.host), source.port or _netimps.get_default_port("ftp")
-        )
-        user, password = source.parsed_userinfo()
-        client.login(user or "anonymous", password or "")
         if tls:
-            client.prot_p()
-        client.set_pasv(True)
+            client = _SessionReuseFTP_TLS(
+                context=self._tls_context(), timeout=self.timeout
+            )
+        else:
+            client = _ftplib.FTP(timeout=self.timeout)
+        try:
+            client.connect(
+                str(source.host), source.port or _netimps.get_default_port("ftp")
+            )
+            user, password = source.parsed_userinfo()
+            client.login(user or "anonymous", password or "")
+            if tls:
+                client.prot_p()
+            client.set_pasv(True)
+        except BaseException:
+            # A rejected certificate or a timed-out greeting must not leave
+            # the half-open control socket behind.
+            close = getattr(client, "close", None)
+            if close is not None:
+                close()
+            raise
         return client
 
 

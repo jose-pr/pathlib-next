@@ -30,9 +30,14 @@ class GitPath(UriPath):
         elif host in ("gitlab.com", "www.gitlab.com"):
             provider_cls = GitLabPath
         else:
+            # Redacted like the git-hosting schemes: the userinfo can be a
+            # bare token, which `Uri`'s own repr keeps.
+            shown = GitHubPath._format_parsed_parts(
+                uri.source, uri.path, uri.query, uri.fragment, sanitize=True
+            )
             raise ValueError(
                 f"git: can only auto-detect github.com and gitlab.com; "
-                f"use github:, gitlab:, git+github:, or git+gitlab: for {uri!r}"
+                f"use github:, gitlab:, git+github:, or git+gitlab: for {shown!r}"
             )
         inst = UriPath.__new__(provider_cls, *args, **kwargs)
         inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
