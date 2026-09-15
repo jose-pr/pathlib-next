@@ -183,7 +183,10 @@ pathlib_next`.
   `exists()`, `is_dir()`, `is_file()`, `is_symlink()`, `is_block_device()`,
   `is_char_device()`, `is_fifo()`, `is_socket()` — all methods, not
   properties. `exists()`/the `is_*` methods swallow `OSError`/`ValueError`
-  from `stat()` and report `False` rather than propagating (pathlib parity).
+  from `stat()` and report `False` rather than propagating, on every Python
+  version (pathlib 3.13+ behaviour; 3.9-3.12 re-raise errors such as
+  `PermissionError` — see `docs/divergences.md`). `is_dir()`/`is_file()`
+  accept `follow_symlinks=`.
 - **`fs.Chmod`** — `Protocol`. `chmod(mode, *, follow_symlinks=True)` (not
   implemented by default); derives `lchmod(mode)`. `mode` may be a `str`,
   parsed as **octal** (`"0755"` == `"755"` == `0o755`); a non-octal digit

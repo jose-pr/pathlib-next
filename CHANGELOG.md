@@ -302,7 +302,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Docs**: the CI benchmark table had its Ubuntu, Windows and macOS columns
   rotated; the paramiko single-file write/copy slowdown was on Ubuntu.
 
+- **Core, MemPath and URI edge cases.** `open()` leaked the backend handle
+  when the text wrapper failed; synthesized errors from `rm()`/`touch()` and
+  `MemPath` lacked `errno`/`filename`; `copy(progress=)` never reported a
+  zero-byte file; `samefile(str)` lost the backend or host; `MemPath` handles
+  appended at the seek position, hid unflushed writes and accepted writes on
+  read handles, and exclusive create/`mkdir` could both succeed under
+  concurrency; `FileStat.from_stat()` kept `None` fields; checksums failed on
+  FIPS hosts (`usedforsecurity=False`); `is_dir()`/`is_file()` rejected
+  `follow_symlinks=`; `"prefix" / path` was unsupported; suffix/stem ignored
+  3.14's rules; lazy URI parsing could expose unset components to another
+  thread; `Uri.__eq__` raised against a relative local path; a `//` path with
+  no authority could not be rendered; non-ASCII hosts were sent
+  percent-encoded; `Uri("/a").is_absolute()` was `False`; `data:` accepted
+  `r+` and discarded writes.
+- **Scheme and CLI edge cases.** FTP listed MLSD `cdir`/`pdir` entries named
+  like children; archives nested in archives could not be addressed;
+  GitLab `iterdir()` on a file yielded nothing; GitHub/GitLab 429 and
+  secondary rate limits were not recognised; `git://<ip>` raised
+  `AttributeError`; a custom `BaseRepoBackend` without a cache crashed on
+  GitLab; git-hosting `open("r+")` returned a writable buffer; `uripath cp -`
+  overwrote an existing target without `--overwrite`, a local name with a
+  colon was treated as a URI, and a closed pipe or Ctrl-C printed errors;
+  `HttpPath.iterdir()` on a file downloaded it; HTTP 409 on PUT and 410 were
+  mis-mapped; WebDAV read only the first `<propstat>`; HTTP listings behind a
+  prefix were scoped by the page title; S3/GCS listings disagreed with
+  `stat()` when a key was both an object and a prefix; GCS/Azure roots always
+  reported existing; asyncssh SFTP errors had no `errno`/`filename`.
+- **`PathSyncer` edge cases.** Tolerated errors left no trace; a directory
+  that became a file or symlink in the source deleted the target directory
+  even with `remove_missing=False`; `SyncStart` passed raw paths to the hook
+  and dry runs reported `dry_run=False` for traversal events; preserved
+  directory symlinks were created as file links on Windows; an identical
+  symlink was recreated on every run; `PathAndStat(path)` described a symlink
+  itself instead of following it.
+
 ### Changed
+- **`PathSyncer` keeps non-empty target directories on a type change unless
+  `remove_missing=True`** (`IsADirectoryError` through `ignore_error`,
+  `SyncEvent.TypeMismatch`). Every tolerated error is now logged at WARNING
+  on `pathlib_next.sync` and reported to the hook as `SyncEvent.Error`.
+  `PathAndStat` follows symlinks by default. `PathSyncer.hook()` gains a
+  keyword-only `always_run`.
+- **URI comparisons and rendering**: `Uri == <non-URI Pathname>` (e.g. a
+  `LocalPath`) is now `False` (a `Uri` still equals another `Uri` or a URI
+  string); non-ASCII hosts are rendered in IDNA form; an explicit
+  `schemesmap=` is authoritative (an unknown scheme gives a plain `UriPath`);
+  `with_source()` with a scheme-less source returns a plain `UriPath`; `/` no
+  longer hides a `TypeError` raised inside a scheme class.
+- **`data:` URIs** reject `r+`, decode base64 only with `;base64`, and imply
+  `text/plain` for a parameters-only header.
+- **`uripath`** exits 141 on a closed stdout and 130 on Ctrl-C.
 - **Package metadata uses PEP 639** (`License-Expression: MIT`) instead of
   the `License ::` classifier, and adds `Typing :: Typed`,
   `Development Status :: 4 - Beta` and Python 3.9-3.14 classifiers. Building
@@ -372,6 +422,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   thread raises `RuntimeError` instead of hanging.
 
 ### Added
+- `SyncEvent.Error` and `SyncEvent.TypeMismatch` reporting; `str / path`
+  (`__rtruediv__`) on `Pathname` and `Uri`.
 - `pathlib_next.testing.populate_fixture_tree(root)` and `FIXTURE_TREE`.
 - `benchmarks/bench.py --save` (min/median/max ms per call as JSON under
   `benchmarks/results/`) and `--samples`.
