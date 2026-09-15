@@ -1,145 +1,151 @@
 # Extending
 
-Two equally first-class ways to add a new path-addressable resource. In
-both, you implement a small, documented method surface; everything else
+Two equally first-class ways to add a new path-addressable resource. In both,
+you implement a small method surface; everything else
 (`open`/`read_text`/`write_text`/`glob`/`walk`/`touch`/`rm`/`copy`/`move`/
-`exists`/`is_dir`/`is_file`/...) is *derived* automatically from the
-protocols in `pathlib_next.protocols`.
+`exists`/`is_dir`/`is_file`/...) is *derived* from the protocols in
+`pathlib_next.protocols`.
 
-- **Track A -- subclass `Path` directly**: for any custom path-addressable
-  resource that isn't naturally a URI (e.g. a database-backed virtual
-  filesystem, an archive member, a key-value store). `MemPath` is the
-  reference exemplar.
-- **Track B -- subclass `UriPath`**: for a new URI scheme (`http:`,
-  `sftp:`, ...). Registers automatically and gets pure-path parsing
-  (join, query, fragment) for free from `Uri`.
+- **Track A -- subclass `Path` directly**: for a resource that is not
+  naturally a URI (a database-backed virtual filesystem, a key-value store,
+  ...). `MemPath` is the reference implementation.
+- **Track B -- subclass `UriPath`**: for a new URI scheme. The class registers
+  itself and gets URI parsing, joining, query and fragment handling from
+  `Uri`.
 
-Whichever track you pick, run the shared contract test suite against your
+Whichever track you pick, run the shared contract suite against your
 implementation -- see [Testing your implementation](#testing-your-implementation)
 below.
 
 ## Track A: subclass `Path`
 
-Required (pure-path side, from the `Pathname` ABC):
+Required on the pure-path side (abstract on `Pathname`):
 
-```python
-segments        # property -> sequence of path component strings
-parts           # property -> whatever "parts" means for your type
-parent          # property -> the logical parent
-with_segments(*segments)   # construct a same-type instance from new segments
-as_uri()        # a URI string identifying this path (can be a custom scheme)
-relative_to(other)          # or raise NotImplementedError if not meaningful
-```
+| Member | Contract |
+| --- | --- |
+| `segments` | property: the path components; a leading `""` marks an absolute path |
+| `parts` | property: whatever "parts" means for your type |
+| `parent` | property: the logical parent (the root is its own parent) |
+| `with_segments(*segments)` | a same-type instance, keeping per-instance state such as a backend |
+| `as_uri()` | a URI string identifying the path (a custom scheme is fine) |
+| `relative_to(other)` | may raise `NotImplementedError` if not meaningful |
 
-Equality is **not** on that list: `Pathname` supplies a default `__eq__`/
-`__hash__` keyed on `(type(self), tuple(self.segments))`, so your class is
-usable as a dict key or set member, and the equality-based helpers
-(`is_relative_to()`, `parents` membership) work, without you writing
-anything. Override both together if your type needs a different identity
--- e.g. case-insensitive segments, or one that also distinguishes the
-backing store two otherwise-identical paths point at. (`LocalPath` and the
-`*Pathname` classes don't use this default: `pathlib.PurePath` precedes
-`Pathname` in their MRO and keeps its own equality.)
+`is_absolute()` is an optional stub that raises `NotImplementedError` until you
+override it. Equality is not required either: `Pathname` supplies
+`__eq__`/`__hash__` keyed on `(type(self), tuple(self.segments))`, so paths
+work as dict keys and `is_relative_to()`/`parents` membership work. Override
+both together if your type needs another identity (case-insensitive names, or
+one that distinguishes two backing stores).
 
-Optional I/O, implement whichever your resource actually supports -- leave
-the rest as the inherited `@notimplemented` stubs (derived helpers either
-fall back, e.g. `move()` falls back to copy+unlink when `rename()` isn't
-implemented, or raise `NotImplementedError` cleanly):
+On the I/O side, implement what the resource supports and leave the rest as
+the inherited stubs. Derived operations either fall back (`move()` copies and
+deletes when `rename()` is missing) or raise `NotImplementedError`:
 
-```python
-iterdir()                       # yield child instances
-_scandir()                      # optional: yield (name, FileStat|None) pairs
-                                 #    instead, if listing your resource can
-                                 #    cheaply include stat metadata -- speeds
-                                 #    up walk()/glob() (see Track B's
-                                 #    "_scandir: listing with metadata" below,
-                                 #    which applies here too)
-stat(*, follow_symlinks=True)   # -> a FileStatLike (utils.stat.FileStat is a
-                                 #    ready-made concrete one)
-_open(mode, buffering)          # -> a *binary* IOBase; open()/read_text()/
-                                 #    write_bytes()/copy() are all derived
-                                 #    from this one method
-_mkdir(mode)                    # create just this directory (mkdir() layers
-                                 #    parents=/exist_ok= handling on top)
-unlink(), rmdir()
-rename(target)
-chmod(mode, *, follow_symlinks=True)
-```
+| Method | Contract |
+| --- | --- |
+| `stat(*, follow_symlinks=True)` | a `FileStatLike`; `utils.stat.FileStat(st_mode=None, st_size=0, st_mtime=0, is_dir=False)` is ready-made. Raise `FileNotFoundError` for a missing path. |
+| `iterdir()` | yield child instances; raise `FileNotFoundError`/`NotADirectoryError` like pathlib. Required for any listing: `copy(recursive=True)` and `for child in path` call it, and the default `_scandir()` is built on it. |
+| `_scandir()` | optional addition: yield `(name, FileStat or None)` when the listing already carries metadata. `walk()`, `glob()`, `rm(recursive=True)` and `PathSyncer` use it instead of a `stat()` per child. The stat is non-following; `None` means "unknown". |
+| `_open(mode, buffering)` | a **binary** stream. `open()` validates the mode and passes a canonical `"r"`, `"w"`, `"x"` or `"a"`, optionally with `"+"` (never `"b"`/`"t"`); raise `NotImplementedError` for a mode you do not support. `read_text()`, `write_bytes()`, `copy()`, `touch()` all derive from it. |
+| `_mkdir(mode)` | create this one directory: `FileExistsError` if it exists, `FileNotFoundError` if the parent is missing (`mkdir(parents=True)` relies on it). |
+| `unlink(missing_ok=False)`, `rmdir()` | pathlib's exceptions: `IsADirectoryError`, `NotADirectoryError`, `OSError(errno.ENOTEMPTY)`. |
+| `rename(target)` | return the new path. |
+| `chmod(mode, *, follow_symlinks=True)` | normalize with `utils.as_mode(mode)` so octal strings work. |
+| `_symlink_to(target, target_is_directory=False)`, `readlink()` | `symlink_to(..., force=)` is derived; `target` is already a path object. |
+| `_chown(uid, gid, *, follow_symlinks=True)` | receives a canonical pair (`None` = unchanged); `chown()` is derived. |
 
-`MemPath` (`src/pathlib_next/mempath.py`) implements exactly this surface
-over a backend of nested dicts (`MemPathBackend`; a `dict` value is a
-directory, a `bytearray` value is a file) -- read it end to end as a
-worked example; it's under 200 lines.
+When a method accepts a `str` path, turn it into a path with
+`self.with_segments(value)`, never `type(self)(value)`, which drops
+per-instance state (for `MemPath`, the whole in-memory tree). `copy()` and
+`move()` convert a `str` destination through `_coerce_target()`, which does
+exactly that by default.
+
+`MemPath` implements this surface over nested dicts (`MemPathBackend`: a
+`dict` value is a directory, a `bytearray` a file); see
+[Memory Path API](../api/mempath.md).
 
 ## Track B: subclass `UriPath`
 
-The pure-path side (parsing, join, query/fragment, `with_*`) comes free
-from `Uri`. Register your scheme and implement the I/O surface:
+The pure-path side (parsing, join, query/fragment, `with_*`) comes from `Uri`.
+Register the scheme and implement the I/O surface:
 
 ```python
+import errno
+import os
+
 from pathlib_next.uri import UriPath
+from pathlib_next.utils.stat import FileStat
+
 
 class MyPath(UriPath):
-    __SCHEMES = ("myscheme",)   # name-mangled per-class; redeclare in every
-                                 # subclass, don't inherit it
+    __SCHEMES = ("myscheme",)  # name-mangled: declare it in every class
 
-    def _listdir(self):
-        ...                      # yield child *names* (str), not instances --
-                                  # UriPath.iterdir() wraps each into a child
+    def _initbackend(self):
+        # Connection or session state, created on first use and shared by
+        # every path derived from this one on the same endpoint.
+        return None
+
+    def _scandir(self):
+        # Or implement `_listdir()` to yield names only.
+        yield from ()
 
     def stat(self, *, follow_symlinks=True):
-        ...
+        hint = self._pop_stat_hint()  # metadata from the parent's listing
+        if hint is not None:
+            return hint
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(self))
 
     def _open(self, mode="r", buffering=-1):
-        ...
+        raise NotImplementedError(f"open(mode={mode!r})")
 
-    def _mkdir(self, mode): ...
-    def unlink(self, missing_ok=False): ...
-    def rmdir(self): ...
-    def rename(self, target): ...
-    def chmod(self, mode, *, follow_symlinks=True): ...
+    def rename(self, target):
+        target = self._rename_target(target)  # sibling str, same endpoint only
+        ...  # rename self.path to target.path on the server
+        return self.with_path(target.path)
+
+
+print(type(UriPath("myscheme://host/data/file.txt")).__name__)
 ```
 
-Importing the module that defines your subclass is enough to register it
-(`UriPath._schemesmap()` walks `__subclasses__()` and caches the result) --
-`UriPath("myscheme://host/path")` then dispatches to `MyPath` automatically.
+Defining (importing) the subclass is enough: `UriPath("myscheme://...")`
+dispatches to it, also when the class is defined after the first dispatch.
+The class name must not start with an underscore, or the name-mangled
+`__SCHEMES` lookup misses it. A distribution can also register the class
+without an import, through an entry point:
 
-### `_scandir`: listing with metadata
-
-If your remote listing call already returns type/size/mtime for every
-child in one round trip (an HTML directory index, WebDAV PROPFIND, SFTP
-`listdir_attr`, FTP MLSD, an S3 `list_objects_v2` page, ...), override
-`_scandir()` instead of (or alongside) `_listdir()`:
-
-```python
-def _scandir(self):
-    for name, meta in my_one_shot_listing_call(self.path):
-        yield name, FileStat(st_size=meta.size, st_mtime=meta.mtime,
-                              is_dir=meta.is_dir)
+```toml
+[project.entry-points."pathlib_next.schemes"]
+myscheme = "mypackage.paths:MyPath"
 ```
 
-`UriPath.iterdir()` is derived from `_scandir()` and pre-seeds each child
-with its `FileStat` as a *single-use* hint: the child's first `stat()` call
-returns the hint directly (no request), and every call after that re-fetches
-for real -- so a live mutation is never masked by a stale value. `walk()`/
-`glob()` then classify directories vs. files from this same hint, turning a
-remote-tree walk from O(entries) round trips into O(dirs). If you don't
-override `_scandir()`, it falls back to `_listdir()` + one `stat()` per
-child (no round-trip savings, but nothing breaks) -- `_listdir()`/
-`iterdir()` remain fully supported on their own for schemes that have no
-richer listing call to offer. See `HttpPath`/`DavPath`/`SftpPath`/`FtpPath`/
-`S3Path` (`src/pathlib_next/uri/schemes/`) for worked examples.
+Conventions for a scheme implementation:
 
-Optional: override `_initbackend()` to lazily create per-instance
-connection/session state (see `HttpBackend`/`SftpBackend`/`MemPathBackend`
-for the pattern -- a NamedTuple or small class holding a session/client,
-propagated to children via `with_segments`/`_make_child_relpath`).
+- Use `self.path` (percent-decoded) on the wire and `self.source`
+  (`scheme`, `userinfo`, `host`, `port`, `parsed_userinfo()`) for the
+  connection. `str(self)` is already redacted for error messages.
+- `iterdir()` is derived from `_scandir()`, which defaults to `_listdir()`
+  plus one `stat()` per child. Override `_scandir()` when one listing call
+  returns type, size and mtime (an HTML index, `PROPFIND`, `listdir_attr`,
+  `MLSD`, an S3 list page): each child's first `stat()` then returns the
+  listing's metadata through `_pop_stat_hint()`, and later calls fetch
+  again, so a remote walk costs one request per directory.
+- `rename()` and `symlink_to()` receive a `str` as a decoded path, not URI
+  syntax; `_rename_target()` resolves a relative one against the parent and
+  raises `NotImplementedError` for another endpoint, which makes `move()`
+  copy instead. Override `_same_location()` when your namespace is narrower
+  than the authority (an archive, a container).
+- A backend is inherited by derived paths only for the same scheme, userinfo,
+  host and port; paths elsewhere call `_initbackend()` again.
+- Set `_host_filesystem_path = True` only when `self.path` is a real
+  filesystem path on the remote host (as for `sftp:`); `os.fspath()` and
+  `host_fspath()` then return it.
 
-`FileUri`, `HttpPath`, and `SftpPath` (`src/pathlib_next/uri/schemes/`) are
-the three built-in worked examples, in increasing order of complexity
-(`FileUri` is ~70 lines wrapping `LocalPath`; `SftpPath` adds connection
-pooling; `HttpPath` adds HTML-scraping-based listing and HEAD/GET stat
-fallback).
+The built-in schemes are worked examples of increasing size:
+[`FileUri`](../api/schemes/local.md) delegates to `LocalPath`,
+[`S3Path`](../api/schemes/objstore.md) emulates directories over key
+prefixes, [`HttpPath`](../api/schemes/http.md) scrapes HTML listings behind a
+`requests` session, and [`SftpPath`](../api/schemes/sftp.md) caches
+connections behind two interchangeable backends.
 
 ## Testing your implementation
 

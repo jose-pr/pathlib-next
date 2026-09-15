@@ -1,152 +1,248 @@
 # Schemes
 
-Capability matrix for every built-in `Path`/`UriPath` implementation. A
-"No" means the method raises `NotImplementedError` (or, for `http:`, isn't
-meaningful for a read-only scheme) -- everything else (name/suffix parsing,
-`glob()`, `walk()`, `copy()`, ...) is derived from these primitives and
-works identically across all of them.
+Every built-in implementation shares one contract: `exists()`, `is_dir()`,
+`iterdir()`, `glob()`, `walk()`, `open()`/`read_text()`/`write_bytes()`,
+`copy()`/`move()`, `rm()` and `PathSyncer` are derived from a few primitives
+(`stat`, `_open`, listing, `_mkdir`, `unlink`, `rmdir`, `rename`, `chmod`).
+Where a backend lacks a primitive, the operation raises
+`NotImplementedError`; `move()` falls back to copy + delete when `rename()` is
+unavailable or the target is elsewhere.
 
-| Capability | `LocalPath` | `file:` (`FileUri`) | `mem:` (`MemPath`) | `http(s):` (`HttpPath`) | `sftp:` (`SftpPath`) | `data:` (`DataUri`) | `ftp(s):` (`FtpPath`) | `zip:` (`ZipUri`) | `tar:` (`TarUri`) | `archive:`/`archive+<fmt>:` (`ArchiveUri`) | `dav(s):` (`DavPath`) | `s3:` (`S3Path`) | `gs:` (`GsPath`) | `az:` (`AzPath`) | `github:` (`GitHubPath`) | `gitlab:` (`GitLabPath`) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Read (`read_text`/`read_bytes`/`open`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Write (`write_text`/`write_bytes`/`open("w")`) | Yes | Yes | Yes | Yes (PUT, configurable) | Yes | No | Yes | New/overwritten entries, local outer archive only | No | Same as `zip:`, only if the outer resolves/is detected as zip | Yes | Yes | Yes | Yes | No | No |
-| List (`iterdir`) | Yes | Yes | Yes | Yes (scrapes an HTML index) | Yes | No (`NotADirectoryError`) | Yes (MLSD, falls back to NLST) | Yes | Yes | Yes | Yes (PROPFIND) | Yes (prefix + delimiter emulation) | Yes (prefix + delimiter emulation) | Yes (prefix + delimiter emulation) | Yes (contents API) | Yes (tree API) |
-| Stat (`stat`, `exists`, `is_dir`, `is_file`, ...) | Yes | Yes | Yes | Yes (via `HEAD`, falls back to `GET`) | Yes | Yes (`st_size` from decoded payload) | Yes (MLSD, falls back to SIZE for files) | Yes | Yes | Yes | Yes (PROPFIND) | Yes (`is_dir` is prefix emulation) | Yes (`is_dir` is prefix emulation, no mtime) | Yes (`is_dir` is prefix emulation, no mtime) | Yes (no mtime) | Yes (no mtime) |
-| `mkdir` | Yes | Yes | Yes | No | Yes | No | Yes | Local outer archive only (zero-length `name/` entry) | No | Same as `zip:`, zip-detected only | Yes (MKCOL) | Yes (zero-byte `key/` marker object) | Yes (zero-byte `key/` marker object) | Yes (zero-byte `key/` marker object) | No | No |
-| Delete (`unlink`/`rmdir`/`rm`) | Yes | Yes | Yes | Yes (DELETE) | Yes | No | Yes | Yes (local outer archive only) | No | Same as `zip:`, zip-detected only | Yes (`rmdir` requires empty, see notes) | Yes (`rmdir` requires empty prefix) | Yes (`rmdir` requires empty prefix) | Yes (`rmdir` requires empty prefix) | No | No |
-| `rename` | Yes | Yes | No (`move()` falls back to copy+unlink) | No | Yes | No | Yes | Yes (local outer archive only) | No | Same as `zip:`, zip-detected only | Yes (MOVE) | Yes (server-side `copy_object`+delete, same bucket) | Yes (server-side copy+delete, same bucket) | Yes (server-side copy+delete, same container) | No | No |
-| `chmod` | Yes | Yes | No | No | Yes (`follow_symlinks=False` works on the asyncssh backend, not paramiko -- see notes) | No | Yes (`SITE CHMOD`, server-dependent) | No | No | No | No | No | No | No | No | No |
-| Extra required | none | none | none | `http` | `sftp` | none (stdlib) | none (stdlib `ftplib`) | none (stdlib `zipfile`) | none (stdlib `tarfile`) | none (reuses `zip:`/`tar:`) | `http` (reused) | `s3` | `gs` | `az` | `http` (reused) | `http` (reused) |
+`UriPath("scheme://...")` returns the class registered for the scheme. Every
+URI scheme needs the `uri` extra (`uritools`, `netimps`); the extras below
+install it too.
 
-Notes:
+## Capability matrix
 
-- **`file:`** is a thin `UriPath` wrapper around `LocalPath` -- it has
-  identical capabilities, just addressed by URI instead of a native path.
-- **`mem:` (`MemPath`)** isn't a `UriPath` at all -- it's a plain `Path`
-  subclass (Track A of [Extending](extending.md)), backed by nested dicts
-  (`MemPathBackend`). No `as_uri()` scheme is registered for it; construct
-  it directly via `MemPath(...)`.
-- **`http(s):`** supports writing via `PUT` (default, configurable to `POST` or other verbs via `with_session(..., write_method=...)`) and deleting via `DELETE` (where `rmdir()` checks empty status first). Directory listing parses Apache/nginx-style HTML indexes using a fast, zero-dependency parser. Append mode (`open("a")`) is supported via two strategies: the default "rewrite" mode (GET existing + PUT full body, safe on any server but non-atomic) and an opt-in "patch" mode using HTTP's `Content-Range` PATCH verb for real appends (see `with_session(..., append_mode="patch")`). Patch mode raises `PermissionError` if the server rejects it, never silently falls back to rewrite. Requests time out after `(10, 60)` seconds (connect, read) unless `with_session(..., timeout=...)` says otherwise. Credentials in the URL (`http://user:pw@host/`) are sent as Basic `auth=`, never inside the request URL, so they do not appear in `Response.url` or error messages.
-- **`sftp:`** has the fullest capability set of the URI schemes (it's a
-  real remote filesystem protocol), and is the one scheme with **two
-  selectable backends**: paramiko (sync, the `sftp` extra) and asyncssh
-  (async internally, bridged to a sync API via one shared background
-  event loop, the `sftp-async` extra -- also works on Python 3.9 via a
-  version-pinned release, `asyncssh<2.22`). Selection precedence, highest
-  to lowest: an explicit `backend=` constructor kwarg > a
-  `SftpPath._default_backend_cls` subclass override > the
-  `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"`/`"asyncssh"`/`"auto"`,
-  default `"auto"`: asyncssh if importable, else paramiko) > auto-detect.
-  `PATHLIB_NEXT_SFTP_BACKEND=asyncssh` with the package not installed
-  raises immediately rather than silently falling back to paramiko. The
-  asyncssh backend caches connections per `(backend, source)` (no
-  thread dimension needed, unlike paramiko's `(backend, source, thread)`
-  -- one shared connection serves concurrent calls from any calling
-  thread). Both backends implement `readlink()`/`symlink_to()`
-  (core SFTPv3 operations); `hardlink_to()` and
-  `chmod(follow_symlinks=False)` work on the asyncssh backend only
-  (paramiko's `SFTPClient` has no hard-link or `lchmod` equivalent at
-  all -- both raise `NotImplementedError` immediately, no server round
-  trip). **Host keys are verified by default** on both backends (paramiko:
-  `~/.ssh/known_hosts` plus ssh_config `UserKnownHostsFile`, with
-  `RejectPolicy`; asyncssh: its own `known_hosts`/ssh_config handling), so an
-  unknown or changed key fails before any password is sent. The opt-out is
-  explicit, in code: `SftpBackend(connect_opts, paramiko.AutoAddPolicy(),
-  known_hosts=None)` or `AsyncsshSftpBackend(connect_opts={"known_hosts":
-  None})`. paramiko connect/banner/auth timeouts default to 30 s
-  (`SftpBackend(..., timeout=...)`); asyncssh bounds single requests at 60 s
-  (`AsyncsshSftpBackend(timeout=...)`) while recursive `copy()`/`rm()` and
-  file transfers are not wall-clock bounded. Both backends have `close()`.
-  The paramiko backend expands ssh_config `Include` and refuses `ProxyJump`
-  (use asyncssh, a `ProxyCommand`, or `connect_opts["sock"]`). See
-  `pathlib_next.uri.schemes.sftp`.
-- **`data:`** (RFC 2397) has no server or connection at all -- the entire
-  "file" content lives in the URI string itself
-  (`data:[<mediatype>][;base64],<data>`). It's always a single file, never a
-  directory.
-- **`ftp(s):`** uses the same connection-cache pattern as `sftp:` (stdlib
-  `ftplib`, no extra required). Prefers MLSD (RFC 3659) for listing/stat --
-  gives type/size/modify in one round trip -- and falls back to NLST/SIZE on
-  servers that don't support it (that fallback path can't distinguish "file
-  doesn't exist" from "is a directory" for `stat()`, since SIZE only works on
-  files). `ftps:` verifies the server certificate and host name by default
-  and reuses the TLS session on data connections; pass
-  `FtpBackend(ssl_context=...)` for a private CA or `FtpBackend(verify=False)`
-  to disable verification. FTP sockets time out after 30 s by default
-  (`FtpBackend(timeout=...)`).
-- **`zip:`/`tar:`** address an entry *inside* an archive:
-  `zip:<archive-uri>!/<inner-path>` (Java-style `!/` separator, as in JAR
-  URLs / NIO `ZipFileSystem`). The `<archive-uri>` half is itself any
-  absolute URI with an explicit scheme -- `file:`, `http:`, `sftp:`,
-  `ftp:`, even `data:` -- so an archive is readable straight off any other
-  backend; `zip:file:///backups/site.zip!/index.html` and
-  `zip:sftp://host/nightly.zip!/index.html` both work the same way.
-  `segments`/`name`/`parent`/`glob()`/... all operate on the *inner* path.
-  Writing (new entries, overwriting/deleting/renaming existing ones -- the
-  latter three via a full-archive rewrite to a temp file, then an atomic
-  `os.replace`) only works when the outer archive is itself a local `file:`
-  URI; every other outer scheme is read-only. `tar:` (with transparent
-  `.tar.gz`/`.tar.bz2`/`.tar.xz` decompression) is read-only regardless of
-  the outer scheme.
-- **`archive:`/`archive+<fmt>:`** is a convenience catch-all over `zip:`/
-  `tar:`: bare `archive:<archive-uri>!/<inner-path>` auto-detects the
-  format (outer filename extension first, then a `PK`-header magic-byte
-  sniff), while `archive+zip:`/`archive+tar:` pin the format explicitly and
-  skip detection. Resolves to the same shared backend (and registry key) as
-  the dedicated `zip:`/`tar:` schemes -- `archive:...!/x` and `zip:...!/x`
-  on the same outer archive share one open handle. `zip:`/`tar:` remain the
-  primary, explicit schemes; `archive:` exists for callers that don't know
-  (or don't care about) the format ahead of time.
-- **`dav(s):`** is WebDAV (RFC 4918) layered on `HttpPath` -- PROPFIND
-  replaces HTML-index scraping for real stat/listdir metadata, and PUT/
-  DELETE/MKCOL/MOVE give it full write support (unlike plain `http(s):`).
-  Requests go out over the equivalent `http:`/`https:` URL; `as_uri()`
-  still reports `dav:`/`davs:`. Reuses the `http` extra, no new dependency.
-  `rmdir()` enforces pathlib's "must be empty" contract with a depth-1
-  PROPFIND before issuing `DELETE`; the native recursive `DELETE` (RFC
-  4918) is still available, and cheaper than a client-side walk, via
-  `rm(recursive=True)`.
-- **`s3:`** (`s3://bucket/key/path`) has no real directories: `is_dir()`
-  is prefix emulation (any object key under `"<path>/"`), and `mkdir()`
-  creates a zero-byte `"<path>/"` marker object (the same convention the
-  AWS console itself uses for an empty "folder") -- `rmdir()` requires no
-  other keys under that prefix (pathlib's "must be empty" semantics, same
-  as `dav:`'s `rmdir()` above). A single `boto3` client is cached per
-  backend (documented thread-safe, unlike `sftp:`/`ftp:`'s per-thread
-  connection pools).
-- **`gs:`** (`gs://bucket/key/path`, Google Cloud Storage) and **`az:`**
-  (`az://account/container/key/path`, Azure Blob Storage) follow the same
-  prefix-emulation directory model as `s3:` -- `is_dir()` checks for any
-  blobs under `"<path>/"`, `mkdir()` creates a zero-byte marker blob,
-  `rmdir()` enforces empty (same semantics). Each backend caches one
-  service client per instance (thread-safe for both GCS and Azure SDKs).
-  Both report no mtime (would require metadata-only calls; `st_mtime` is 0).
-  See `pathlib_next.uri.schemes.gs` and `pathlib_next.uri.schemes.az`.
-- **`github:`/`gitlab:`** (`<scheme>://host/owner/repo/path/in/repo?ref=<ref>`)
-  are read-only views of a git-hosting repository tree over plain `requests`
-  (no PyGithub/python-gitlab SDK). `ref` (branch/tag/SHA) is always optional
-  in the `?ref=` query string; omitted, `github:` falls back to the repo's
-  default branch server-side for free, while `gitlab:` resolves and caches
-  the default branch itself via one extra `GET /projects/:id` call (GitLab's
-  file-content endpoints 400 if `ref` is omitted entirely, unlike its tree
-  endpoint -- see `docs/divergences.md`). `host` defaults to `github.com`/
-  `gitlab.com`; any other host is treated as GitHub Enterprise (API at
-  `https://{host}/api/v3`) or a self-hosted GitLab (`https://{host}/api/v4`).
-  Auth: a bearer token via `RepoBackend(token=...)` or embedded as URI
-  userinfo, either as the password (`github://x-access-token:TOKEN@github.com/owner/repo`)
-  or bare (`github://TOKEN@github.com/...`); these schemes redact the whole
-  userinfo from `str()`, `repr()` and error messages. Requests time out after
-  `(10, 60)` seconds by default (`RepoBackend(timeout=...)`). `GitHubPath` gets full
-  listing metadata (type/size) from one contents-API call per directory and
-  fetches file bodies via the `raw` media type (skips base64 and its ~1MB
-  inline-content cap); `GitLabPath`'s tree API has no size field, so only
-  directory entries get a pre-seeded `stat()` hint, file entries fall back to
-  a real per-file lookup rather than guessing a size. Both are read-only
-  (writing goes through an entirely different commits API, out of scope) and
-  report no mtime (would need a separate, expensive commits-history call).
-  See `pathlib_next.uri.schemes.github` and
-  `pathlib_next.uri.schemes.gitlab`.
-- **`git:`** is a convenience catch-all over the same providers. It auto-detects only the public SaaS hosts (`github.com` / `gitlab.com`), so `git://github.com/...` and `git://gitlab.com/...` work, but self-hosted or enterprise hosts must use the explicit `github:`/`gitlab:` schemes or the pinned `git+github:`/`git+gitlab:` forms. `git:` keeps the same `?ref=` and auth behavior as the provider schemes; it only changes the entry point.
-- See [Divergences from pathlib](../divergences.md) for the "explicitly out
-  of scope" list (`resolve`, `symlink_to`, `owner`, `expanduser`, ...) that
-  applies uniformly across every non-`LocalPath` implementation.
+| Implementation | Read | Write | Append | List | mkdir | Delete | rename | chmod | Extra |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `LocalPath` | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | none |
+| `MemPath` (no URI scheme) | Yes | Yes | Yes | Yes | Yes | Yes | No | No | none |
+| `file:` (`FileUri`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | `uri` |
+| `data:` (`DataUri`) | Yes | No | No | No | No | No | No | No | `uri` |
+| `zip:` (`ZipUri`) | Yes | Local `file:` archive | No | Yes | Local archive | Local archive | Local archive | No | `uri` |
+| `tar:` (`TarUri`) | Yes | No | No | Yes | No | No | No | No | `uri` |
+| `archive:` / `archive+zip:` / `archive+tar:` | As `zip:` or `tar:` for the detected or pinned format | | | | | | | | `uri` |
+| `ftp:` / `ftps:` (`FtpPath`) | Yes | Yes | Yes (`APPE`) | Yes | Yes | Yes | Yes | `SITE CHMOD`, if the server has it | `uri` |
+| `http:` / `https:` (`HttpPath`) | Yes | Yes (`PUT`) | Yes (rewrite or `PATCH`) | Yes (HTML index) | No | Yes (`DELETE`) | No | No | `http` |
+| `dav:` / `davs:` (`DavPath`) | Yes | Yes | No | Yes (`PROPFIND`) | Yes (`MKCOL`) | Yes | Yes (`MOVE`) | No | `http` |
+| `sftp:` (`SftpPath`) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | `sftp` or `sftp-async` |
+| `s3:` (`S3Path`) | Yes | Yes | No | Yes (prefixes) | Yes (marker) | Yes | Same bucket | No | `s3` |
+| `gs:` (`GsPath`) | Yes | Yes | No | Yes (prefixes) | Yes (marker) | Yes | Same bucket | No | `gs` |
+| `az:` (`AzPath`) | Yes | Yes | No | Yes (prefixes) | Yes (marker) | Yes | Same container | No | `az` |
+| `github:` (`GitHubPath`) | Yes | No | No | Yes | No | No | No | No | `http` |
+| `gitlab:` (`GitLabPath`) | Yes | No | No | Yes | No | No | No | No | `http` |
+| `git:` / `git+github:` / `git+gitlab:` | As `github:`/`gitlab:` | | | | | | | | `http` |
+
+`stat()` works everywhere. `st_mtime` is real on every implementation except
+`data:` and `github:`/`gitlab:`, where it is `0`. `symlink_to()` is
+implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
+`sftp:`.
+
+## Common behavior
+
+- **Errors** map to pathlib's exception types (`FileNotFoundError`,
+  `PermissionError`, `FileExistsError`, `IsADirectoryError`,
+  `NotADirectoryError`, `OSError(ENOTEMPTY)`); network timeouts raise
+  `TimeoutError`. Transport exceptions are not chained, because their text
+  can carry credentials.
+- **Credentials** in a URI are redacted from `str()`/`repr()` (the password;
+  for `github:`/`gitlab:`/`git:` the whole userinfo). A backend (session,
+  connection, token) is reused only for the same scheme, userinfo, host and
+  port, so joining a path onto another host never sends it there.
+- **`rename()`** stays on one endpoint: a target on another host, bucket,
+  container or archive raises `NotImplementedError`, and `move()` copies and
+  deletes instead. A `str` target is a path (not URI syntax); a relative one
+  is a sibling.
+- **Backends** are passed as `UriPath(uri, backend=...)` or
+  `path.with_backend(backend)`, and inherited by every derived path.
+
+## Local and in-memory
+
+- **`LocalPath`** is `pathlib.WindowsPath`/`PosixPath` with pathlib_next's
+  `Path` mixed in.
+- **`MemPath`** is a plain `Path` subclass over nested dicts
+  (`MemPathBackend`), not a `UriPath`. Share a tree between separately built
+  paths with `MemPath(..., backend=other.backend)`. `as_uri()` returns
+  `mempath:/...`, but no `mempath:` scheme is registered.
+- **`file:`** (`FileUri`) wraps a `LocalPath` (`filepath`) and delegates all
+  I/O to it. `rename()` accepts local targets only.
+- **`data:`** (`DataUri`, RFC 2397) keeps the whole content in the URI
+  (`data:[<mediatype>][;base64],<data>`): a read-only single file with a
+  `mediatype` property.
+
+## HTTP and WebDAV
+
+- **`http(s):`** (`HttpPath`) reads with `GET` (uncompressed) and `stat()`s
+  with `HEAD`, falling back to `GET` on 405; a final URL ending in `/` is a
+  directory. Listing parses Apache/nginx-style HTML indexes; a non-HTML
+  response raises `NotADirectoryError`, and an HTML file cannot be told apart
+  from an index page. Configure it with
+  `path.with_session(session, write_method="PUT", append_mode="rewrite",
+  **requests_args)`: `requests_args` (`headers=`, `auth=`, `verify=`,
+  `timeout=`, ...) go to every request.
+  - Writes send `write_method` with the whole body on close; `open("x")`
+    checks and then writes (not atomic).
+  - `open("a")`: `append_mode="rewrite"` downloads, appends and re-uploads
+    (works on any server, not atomic); `append_mode="patch"` sends `PATCH`
+    with a `Content-Range` starting at the current size and never falls back.
+    A refused `PATCH` raises `PermissionError` (401, 403, 405, 501) or
+    `OSError` with the HTTP status (other codes, such as 400).
+  - `unlink()` refuses a directory; `rmdir()` requires an empty one.
+  - Requests time out after `(10, 60)` seconds (connect, read) unless a
+    `timeout` is given; `timeout=None` waits forever.
+  - Credentials in the URL (`https://user:pw@host/`) are sent as Basic
+    `auth=`, never inside the request URL, and take priority over `~/.netrc`.
+- **`dav(s):`** (`DavPath`) is WebDAV (RFC 4918) over the equivalent
+  `http(s):` URL, with the same `with_session()`. `PROPFIND` gives real
+  directory metadata, `MKCOL`/`PUT`/`DELETE`/`MOVE` full writes. `unlink()`
+  refuses a collection and `rmdir()` checks that it is empty (WebDAV
+  `DELETE` is recursive); `rm(recursive=True)` is a single `DELETE`.
+  `rename()` does not overwrite an existing target (`FileExistsError`).
+  Append mode is not supported.
+
+## FTP
+
+**`ftp(s):`** (`FtpPath`) uses stdlib `ftplib`.
+
+- `FtpBackend(timeout=30.0, ssl_context=None, verify=True)` configures it.
+  Sockets time out after 30 seconds by default (`timeout=None` waits forever).
+- **`ftps:` verifies the server certificate and host name** before logging in
+  and reuses the TLS session on data connections. For a private CA pass
+  `FtpBackend(ssl_context=ssl.create_default_context(cafile=...))`;
+  `FtpBackend(verify=False)` turns verification off.
+- Paths built without `backend=` share one default backend, with one cached
+  connection per server and thread; dead connections are replaced.
+- Listing and `stat()` prefer `MLSD` (type, size and UTC modification time in
+  one round trip) and fall back to `NLST`/`SIZE`.
+- Reads download the whole file into memory; writes are buffered in memory
+  and uploaded on close. `chmod()` uses `SITE CHMOD` and raises
+  `NotImplementedError` when the server lacks it.
+
+## SFTP
+
+**`sftp:`** (`SftpPath`) is a full remote filesystem with two backends:
+paramiko (`SftpBackend`, the `sftp` extra) and asyncssh
+(`AsyncsshSftpBackend`, the `sftp-async` extra; one shared background event
+loop bridges it to the synchronous API).
+
+- **Selection**, highest first: an explicit `backend=` > a
+  `SftpPath._default_backend_cls` subclass attribute > the
+  `PATHLIB_NEXT_SFTP_BACKEND` environment variable (`auto`, `asyncssh` or
+  `paramiko`; naming an uninstalled backend raises `ImportError`) > auto
+  (asyncssh if importable, else paramiko).
+- **Host keys are verified by default** on both backends, so an unknown or
+  changed key fails before any password is sent. paramiko reads
+  `~/.ssh/known_hosts` plus ssh_config `UserKnownHostsFile` and rejects
+  unknown keys (`RejectPolicy`); asyncssh applies its own `known_hosts` and
+  ssh_config handling. The opt-out is explicit, in code:
+  `SftpBackend(connect_opts, paramiko.AutoAddPolicy(), known_hosts=None)` or
+  `AsyncsshSftpBackend(connect_opts={"known_hosts": None})`.
+- **Timeouts**: paramiko's connect, banner, auth and channel-open timeouts
+  default to 30 seconds (`SftpBackend(..., timeout=...)`). asyncssh bounds
+  each single request at 60 seconds (`AsyncsshSftpBackend(timeout=...)`);
+  recursive `copy()`/`rm()` and file transfers have no wall-clock bound.
+- **ssh_config**: `SftpPath(url, ssh_config=...)` takes a path, a list of
+  paths or `None` (default `~/.ssh/config`). The paramiko backend expands
+  `Include` and refuses `ProxyJump` (use asyncssh, a `ProxyCommand`, or
+  `connect_opts["sock"]`).
+- **Connections** are cached per backend and server (paramiko also per
+  thread) and replaced when they drop; `backend.close()` closes them.
+- **Capabilities**: `readlink()`/`symlink_to()` on both backends;
+  `hardlink_to()` and `chmod(follow_symlinks=False)` on asyncssh only
+  (paramiko raises `NotImplementedError` without a round trip). `rename()`
+  replaces an existing target where the server supports
+  `posix-rename@openssh.com`. On asyncssh, `copy(recursive=True)` to the same
+  host and `rm(recursive=True)` run concurrently, bounded by
+  `max_concurrency` (default 16). `checksum()` uses the `check-file-handle`
+  extension where the server has it (OpenSSH does not).
+- `os.fspath()`/`host_fspath()` return the path on the remote host.
+
+## Object storage
+
+**`s3://bucket/key`** (`S3Path`), **`gs://bucket/key`** (`GsPath`) and
+**`az://account/container/key`** (`AzPath`) share one model.
+
+- There are no real directories: `is_dir()` is true when any key exists under
+  `key/`, `mkdir()` writes a zero-byte `key/` marker, and `rmdir()` requires an
+  empty prefix. A key that is both an object and a prefix is the object. A
+  trailing `/` in the URI is dropped from the key.
+- Writes are uploaded on close; `open("x")` is a conditional create (an S3
+  upload above 5 GiB checks first, then writes); append mode is not
+  supported; writes below a missing "directory" succeed.
+- `rename()` is a server-side copy + delete within one bucket (container);
+  renaming a prefix directory raises `NotImplementedError`, so `move()` copies
+  it. `S3Path.rm(recursive=True)` at the bucket root raises
+  `PermissionError`.
+- Clients: `S3Backend(**client_kwargs)` builds `boto3.client("s3",
+  **client_kwargs)`; `GsBackend(**client_kwargs)` builds
+  `google.cloud.storage.Client(**client_kwargs)` (for an emulator pass
+  `client_options={"api_endpoint": url}` and `use_auth_w_custom_endpoint=False`);
+  `AzBackend(account=None, **client_kwargs)` builds a `BlobServiceClient`
+  (`connection_string=`, or `account_url=`/`credential=`). An `AzPath`
+  without `backend=` targets `https://<account>.blob.core.windows.net` with
+  `azure-identity`'s `DefaultAzureCredential` (installed by the `az` extra).
+
+## Archives
+
+**`zip:`/`tar:`** address an entry inside an archive:
+`zip:<archive-uri>!/<inner-path>` (the Java-style `!/` separator of JAR URLs).
+The `<archive-uri>` is any absolute URI with an explicit scheme, so
+`zip:file:///backups/site.zip!/index.html` and
+`zip:sftp://host/nightly.zip!/index.html` work the same way. `name`,
+`parent`, `glob()`, ... operate on the inner path.
+
+- **Writing** (new members, overwriting, `mkdir()`, `unlink()`, `rmdir()`,
+  `rename()`) works for zip archives whose outer URI is a local `file:` path.
+  Each change replaces the archive atomically (temporary file, then
+  `os.replace`) and keeps the other members' metadata, the archive comment and
+  any leading bytes. Every other outer scheme is read-only and is read into
+  memory.
+- **`tar:`** (also `.tar.gz`/`.tar.bz2`/`.tar.xz`) is read-only.
+- **`archive:`** detects the format from the outer name, then from the file's
+  magic bytes; `archive+zip:`/`archive+tar:` pin it. All spellings of one
+  archive share one open handle.
+- An archive inside an archive is addressed by nesting
+  (`zip:zip:file:///outer.zip!/inner.zip!/x.txt`) and is read-only; a `!/`
+  inside a member name is written `%21/`.
+- Members whose names would escape a destination (`..`, absolute or drive
+  paths) are never listed. Exception types are the POSIX ones on every
+  platform.
+
+## Git hosting
+
+**`github:`/`gitlab:`** (`<scheme>://host/owner/repo/path/in/repo?ref=<ref>`)
+are read-only views of a repository over the REST APIs, using plain
+`requests`.
+
+- `ref` (branch, tag or SHA) is optional and carried to every child path.
+  Without it, `github:` uses the default branch server-side; `gitlab:` looks
+  the default branch up once per backend.
+- `host` defaults to `github.com`/`gitlab.com`. Another host is GitHub
+  Enterprise (`https://{host}/api/v3`) or self-hosted GitLab
+  (`https://{host}/api/v4`); `RepoBackend(api_base=...)` overrides the API
+  root. A GitLab project in a subgroup uses GitLab's separator:
+  `gitlab://host/group/subgroup/project/-/path`.
+- Authentication: `RepoBackend(token=...)`, or the token in the URI userinfo,
+  as the password (`github://x-access-token:TOKEN@github.com/owner/repo`) or
+  bare (`github://TOKEN@github.com/...`). These schemes redact the whole
+  userinfo from `str()`, `repr()` and error messages.
+- Requests time out after `(10, 60)` seconds (`RepoBackend(timeout=...)`).
+  Rate-limit replies raise `OSError(EAGAIN)`.
+- GitHub listings come from the contents API (with its type and size) and
+  switch to the Git Trees API for directories at its 1,000-entry cap; file
+  bodies use the raw media type. GitLab's tree listing has no sizes, so file
+  entries are `stat()`ed on demand. Symlinks and submodules read as plain
+  files. Git has no empty directories.
+- **`git:`** detects the provider for `github.com` and `gitlab.com` only;
+  other hosts raise `ValueError` and need `github:`/`gitlab:` or the pinned
+  `git+github:`/`git+gitlab:` forms.
+
+See [Divergences from pathlib](../divergences.md) for the reasons behind these
+choices. Every class and backend signature is in the API reference:
+[`file:`/`data:`](../api/schemes/local.md),
+[`http:`/`dav:`](../api/schemes/http.md), [`ftp:`](../api/schemes/ftp.md),
+[`sftp:`](../api/schemes/sftp.md),
+[`s3:`/`gs:`/`az:`](../api/schemes/objstore.md),
+[archives](../api/schemes/archive.md) and
+[`github:`/`gitlab:`/`git:`](../api/schemes/git.md).

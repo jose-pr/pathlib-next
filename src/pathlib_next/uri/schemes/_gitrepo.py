@@ -134,8 +134,9 @@ class _RepoApiPath(UriPath):
     """Shared base for `github:`/`gitlab:` (`<scheme>://host/owner/repo/path
     /in/repo?ref=<ref>`): read-only access to a git-hosting REST API. `ref`
     (branch/tag/SHA) is always optional, carried in the `?ref=` query string
-    -- omitted, both APIs fall back server-side to the repo's default
-    branch, so no client-side lookup is needed. `host` defaults to the
+    -- omitted, GitHub falls back server-side to the repo's default branch,
+    while GitLab's file endpoints need an explicit ref, so `GitLabPath`
+    resolves (and caches) the default branch once. `host` defaults to the
     public SaaS host; any other host is treated as a self-hosted instance.
     Auth: a bearer token via `with_backend(RepoBackend(token=...))`, or
     embedded in the URI as userinfo -- `<scheme>://user:TOKEN@host/...`

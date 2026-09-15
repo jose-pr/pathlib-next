@@ -32,10 +32,20 @@ nav:
   - Divergences from pathlib: divergences.md
   - API Reference:
       - Core Path: api/path.md
-      - URI & Schemes: api/uri.md
       - Memory Path: api/mempath.md
+      - Protocols: api/protocols.md
+      - URI: api/uri.md
+      - Schemes:
+          - "file: and data:": api/schemes/local.md
+          - "http: and dav:": api/schemes/http.md
+          - "ftp:": api/schemes/ftp.md
+          - "sftp:": api/schemes/sftp.md
+          - "s3:, gs: and az:": api/schemes/objstore.md
+          - Archives: api/schemes/archive.md
+          - "github:, gitlab: and git:": api/schemes/git.md
       - Utilities: api/utils.md
       - Testing Contracts: api/testing.md
+      - CLI: api/cli.md
   - Changelog: changelog.md
 
 plugins:

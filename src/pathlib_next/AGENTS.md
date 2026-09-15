@@ -1,516 +1,653 @@
 # `pathlib_next` — public API header
 
-Header-file-style reference for the `pathlib_next` package: every public
-export with its signature, arguments, contract, and gotchas, so this module
-can be consumed without reading its source. Kept current with the public
-API. For the project overview, install extras, and code layout, see the
-<https://github.com/jose-pr/pathlib-next>. Any behavioral divergence from `pathlib.Path` is
-recorded in `docs/divergences.md` — this file documents the *contract*, not
-every internal deviation.
+Header-file-style reference for the installed `pathlib_next` package: the
+public exports with their signatures, defaults, contracts and gotchas, so the
+package can be used without reading its source. The project overview is the
+`README.md` shipped next to this file (`pathlib_next/README.md`); the rendered
+documentation is at <https://jose-pr.github.io/pathlib-next/>. Every deliberate
+behavioral difference from `pathlib.Path` is listed, with its rationale, at
+<https://jose-pr.github.io/pathlib-next/divergences/>; this file states the
+resulting contract.
 
-`import pathlib_next` re-exports `path`, `fspath`, `utils.glob`,
-`utils.sync`, and (if `uritools` is importable) `uri.Uri`/`uri.UriPath`; a
-missing `uritools` degrades that last import silently (`try`/`except
-ImportError: pass`), so `pathlib_next.uri` may need an explicit
-`from pathlib_next.uri import UriPath` even after a plain `import
-pathlib_next`.
+## Install and imports
+
+`pip install pathlib-next[<extras>]`. No required dependencies.
+
+| Extra | Installs | Needed for |
+| --- | --- | --- |
+| *(none)* | — | `Path`, `LocalPath`, `MemPath`, `utils`, `testing`, `uripath` on local paths |
+| `uri` | `uritools`, `netimps>=0.2.0` | `pathlib_next.uri` and **every** URI scheme (`file:`, `data:`, `ftp(s):`, archives included) |
+| `http` | `requests` + `uri` | `http(s):`, `dav(s):`, `github:`, `gitlab:`, `git:` |
+| `sftp` | `paramiko` + `uri` | `sftp:` (paramiko backend) |
+| `sftp-async` | `asyncssh` + `uri` | `sftp:` (asyncssh backend) |
+| `s3` / `gs` / `az` | `boto3` / `google-cloud-storage` / `azure-storage-blob` + `uri` | `s3:` / `gs:` / `az:` |
+
+`import pathlib_next` exposes `Path`, `Pathname`, `LocalPath`,
+`PosixPathname`, `WindowsPathname`, `FileStat`, the protocols `Stat`, `Chmod`,
+`BinaryOpen`, `FsPathLike`, the aliases `PathLike`/`PurePathLike`, the modules
+`glob` (`utils.glob`) and `sync` (`utils.sync`), and `Uri`/`UriPath` **only
+when `uritools` is importable** — without the `uri` extra those two names are
+silently absent and `from pathlib_next.uri import UriPath` raises
+`ModuleNotFoundError`. `MemPath` lives in `pathlib_next.mempath`;
+`pathlib_next.testing` is never imported implicitly.
 
 ## Pure-path / I/O base (`pathlib_next.path`)
 
-- **`Pathname`** — ABC for a pure (no I/O) path: `name`, `suffix`,
-  `suffixes`, `stem`, `segments` (abstract), `parts` (abstract),
-  `with_segments(*segments)` (abstract), `with_name`/`with_stem`/
-  `with_suffix`, `relative_to(other)`, `is_relative_to(other)`,
-  `__truediv__`/`joinpath`, `root`/`drive`/`anchor` (all `""` unless
-  overridden), `parent`/`parents` (abstract `parent`), `is_absolute()`
-  (abstract), `match(pattern, *, case_sensitive=None)`,
-  `full_match(pattern, *, case_sensitive=None)`, `as_posix()`,
-  `has_glob_pattern()`. `as_uri()` is abstract on `Pathname` itself.
-  - `__eq__`/`__hash__` are supplied by default, keyed on
-    `(type(self), tuple(self.segments))` — exact type, so a subclass never
-    compares equal to its base. Classes mixing in `pathlib.PurePath`
-    (`PosixPathname`, `WindowsPathname`, `LocalPath`) keep stdlib's
-    equality instead, since `PurePath` precedes `Pathname` in their MRO;
-    `Uri` defines its own over `as_uri()`. Override both together if your
-    subclass needs a different identity.
-  - `is_relative_to(other)` parses a `str` `other` standalone, via
-    `self.with_segments(other)` — the same rule as CPython's
-    `self.with_segments(other)`, and it preserves per-instance state such
-    as `MemPath`'s backend.
+- **`Pathname`** — ABC for a pure (no I/O) path. Abstract: `segments`,
+  `parts`, `parent`, `with_segments(*segments)`, `as_uri()`,
+  `relative_to(other)`. Derived: `name`, `suffix`, `suffixes`, `stem`
+  (suffix rules of the running interpreter), `with_name`/`with_stem`/
+  `with_suffix` (`ValueError` for `""`, `.` or a separator), `parents`,
+  `is_relative_to(other)`, `joinpath(*args)`, `/` and `"prefix" / path`,
+  `root`/`drive`/`anchor` (`root` is `"/"` when the first segment is empty;
+  `drive` is `""`), `match(path_pattern, *, case_sensitive=None)` (pathlib's
+  right-anchored per-segment match; empty pattern → `ValueError`),
+  `full_match(pattern, *, case_sensitive=None)` (3.13 semantics),
+  `as_posix()`, `has_glob_pattern()`. `is_absolute()` is a stub raising
+  `NotImplementedError` unless a subclass overrides it.
+  - `__eq__`/`__hash__` default to `(type(self), tuple(self.segments))`: exact
+    type, so a subclass never equals its base. `LocalPath`/`PosixPathname`/
+    `WindowsPathname` keep `pathlib.PurePath` equality; `Uri` compares its URI
+    text. Override both together.
+  - A `str` argument to `is_relative_to()` is parsed standalone via
+    `self.with_segments(other)`, which keeps per-instance state (a `MemPath`
+    backend). Normalize strings the same way in subclasses: `type(self)(x)`
+    drops that state.
 - **`Path(Pathname, Chmod, Stat, BinaryOpen)`** — base class for I/O paths.
-  `Path(*args)` (the bare class, not a subclass) always constructs a
-  `LocalPath` (`fspath.py`) — the real local filesystem. Adds:
-  - `is_hidden()` — name starts with `"."`.
-  - `samefile(other_path)` — compares `(st_dev, st_ino)` from `stat()`;
-    raises `NotImplementedError` if either isn't available (`LocalPath` gets
-    a real implementation from `pathlib.Path` via MRO instead).
-  - `iterdir() -> Iterator[Self]` — **not implemented** by default (raises
-    `NotImplementedError`); every concrete `Path` overrides it.
-  - `_scandir() -> Iterator[tuple[str, FileStat | None]]` — default falls
-    back to `iterdir()` + one `stat()` per child; override directly when the
-    listing call already returns metadata (used by `walk()`/`glob()` so
-    remote schemes avoid a stat round trip per entry).
+  `Path(*args)` on the bare class constructs a `LocalPath`.
+  - Operation precedence: `Path.__init_subclass__` re-asserts pathlib_next's
+    `copy`, `move`, `exists`, `rglob`, `read_text`, `write_text` and
+    `symlink_to` on any subclass that would otherwise inherit stdlib
+    `pathlib`'s (and `stat`/`chmod`/`glob`/`walk`/`_scandir` for a class mixing
+    a concrete stdlib path without `LocalPath`). A method defined in the
+    subclass itself always wins.
+  - `is_hidden()` — name starts with `"."`. `__iter__()` is `iterdir()`.
+  - `samefile(other_path)` — compares `(st_dev, st_ino)`; `NotImplementedError`
+    when `stat()` lacks them (`LocalPath` uses pathlib's).
+  - `iterdir() -> Iterator[Self]` — **stub** (`NotImplementedError`); a
+    listable `Path` must implement it (or, on `UriPath`, `_listdir()`/
+    `_scandir()`).
+  - `_scandir() -> Iterator[tuple[str, FileStat | None]]` — non-following stat
+    per entry; default: `iterdir()` + one `stat(follow_symlinks=False)` per
+    child. Consumed by `walk()`, `glob()`, `rm(recursive=True)` and
+    `PathSyncer`; override it when the listing call already returns metadata.
+    `None` means "unknown", never "missing".
   - `glob(pattern, *, case_sensitive=None, include_hidden=True,
     recursive=None, dironly=None, recurse_symlinks=False)` — pathlib
-    semantics of the running interpreter: hidden entries included (pass
-    `include_hidden=False` to filter), `**` never descends into directory
-    symlinks (`recurse_symlinks=True` raises `NotImplementedError`), a
-    missing or non-directory base yields nothing, `""` raises `ValueError`
-    and an absolute pattern `glob.NonRelativePatternError` (a
-    `NotImplementedError` and a `ValueError`). A `"**"` pattern component
-    auto-enables recursion (pathlib parity); pass `recursive=False`
-    explicitly to disable it even with `"**"` present, or `True` to force it
-    without `"**"`. A recursive glob on a remote scheme walks the whole
-    subtree, one round trip per directory.
-  - `rglob(pattern, ...)` — `glob(f"**/{pattern}", recursive=True)`.
+    semantics: hidden entries included, a trailing `/` selects directories,
+    `**` never descends into directory symlinks (`recurse_symlinks=True` →
+    `NotImplementedError`), a trailing `**` selects files too on 3.13+, a
+    missing or non-directory base yields nothing, `""` → `ValueError`, an
+    absolute pattern → `glob.NonRelativePatternError`. `recursive=None`
+    enables recursion when a component is `**`; an explicit value wins.
+    Validates eagerly, selects lazily. On a remote scheme a recursive glob
+    lists every directory of the subtree.
+  - `rglob(pattern, **same_kwargs)` — `glob(f"**/{pattern}", recursive=True)`.
   - `walk(top_down=True, on_error=None, follow_symlinks=False)` — drives
-    `_scandir()`, not `iterdir()`; the pre-seeded stat from `_scandir()` is
-    trusted only when `follow_symlinks=False` (its own default) — an
-    explicit `follow_symlinks=True` always re-`stat()`s each entry.
-  - `touch(mode=None, exist_ok=True)` — never truncates an existing file;
-    raises `FileExistsError` when `exist_ok=False` and it exists. A new
-    file is chmod'ed only when `mode` is passed (unmasked); an existing
-    file's mtime is not updated on generic backends. `LocalPath`/`FileUri`
-    use pathlib's `touch()`.
-  - `_mkdir(mode)` (not implemented by default) / `mkdir(mode=0o777,
-    parents=False, exist_ok=False)` — `mkdir()` retries through
-    `_mkdir()`, creating parents on `FileNotFoundError` when `parents=True`.
-  - `unlink(missing_ok=False)` / `rmdir()` — not implemented by default;
-    every concrete `Path` overrides them.
-  - `rm(recursive=False, missing_ok=False, ignore_error=False |
-    Callable[[Exception, Self], bool])` — extension, no direct pathlib
-    equivalent. Removes a file or (with `recursive=True`) a directory tree;
-    `ignore_error` (bool or predicate) controls whether an error during the
-    walk is swallowed (predicate return `True`) or re-raised. Never descends
-    through a link: a directory symlink, or a Windows junction (the
-    `_is_junction_link()` hook, answered by `LocalPath`/`FileUri`), is
-    removed as an entry and its target's contents are left alone.
-  - `rename(target)` — not implemented by default. On a `UriPath` a `str`
-    `target` is an already-**decoded path**, not URI syntax, and a relative
-    one is a sibling rename — see `Uri._rename_target()` under "URIs".
-  - `_symlink_to(target, target_is_directory=False)` (not implemented by
-    default) / `symlink_to(target, target_is_directory=False, *,
-    force=False)` — same primitive/wrapper split as `_mkdir`/`mkdir`: a
-    backend implements only `_symlink_to()` and receives an already
-    normalized path object, then reads the raw target string the
-    way its transport needs (`Uri.path` on the wire, `os.fspath()`
-    locally). The `str`→path step is `_symlink_target(target)`, an
-    overridable hook: the default is `type(self)(target)`, and `UriPath`
-    overrides it so a link target is taken literally instead of being
-    re-parsed as a URI (a `?`/`#` in it is a filename character, not a
-    delimiter). A relative target is never anchored — it stays relative,
-    as in pathlib. `force=` is this library's extension: `False` is
-    stdlib-exact, `True` unlinks an existing **non-directory** entry at the
-    link path first (never a directory) and is **not** atomic. Listed in
-    `_OPERATION_NAMES`, since no stdlib version accepts `force=`.
+    `_scandir()`; its stats are trusted only with `follow_symlinks=False`. No
+    symlink-cycle protection when following (only `LocalPath` has pathlib's).
+  - `touch(mode=None, exist_ok=True)` — `FileExistsError` when `exist_ok=False`
+    and the path exists; never truncates; creates with `open("x")` (falls
+    back to `"w"` when `x` is unsupported); `chmod(mode)` only when `mode` is
+    passed (unmasked); does not update an existing file's mtime.
+    `LocalPath`/`FileUri` use pathlib's `touch()`.
+  - `_mkdir(mode)` (stub) / `mkdir(mode=0o777, parents=False, exist_ok=False)`.
+  - `unlink(missing_ok=False)`, `rmdir()` — stubs.
+  - `rm(recursive=False, missing_ok=False, ignore_error=False)` — extension.
+    `ignore_error` is a bool or `callable(error, path) -> bool` (True
+    swallows); each error is offered once. Recursive removal is bottom-up and
+    never descends through a directory symlink or a Windows junction (the
+    link itself is removed).
+  - `rename(target)` — stub. Implementations return the new path.
+  - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
+    object) / `symlink_to(target, target_is_directory=False, *, force=False)`
+    — `force=True` unlinks an existing non-directory entry first (not atomic;
+    never removes a directory). A `str` target is normalized by the
+    overridable `_symlink_target()` and stored verbatim; relative stays
+    relative. Implemented by `LocalPath` and `SftpPath` only.
   - `copy(target, *, overwrite=False, follow_symlinks=True,
     preserve_metadata=True, recursive=False, ignore_error=None,
-    progress=None)` — `follow_symlinks`/`preserve_metadata` names match
-    CPython 3.14's `Path.copy()`; `overwrite` is this library's own
-    extension (3.14 always raises if the destination exists).
-    `preserve_metadata` defaults `True` here (3.14 defaults `False`) and
-    only preserves `st_mode`, not timestamps/xattrs. `ignore_error`, when
-    given, receives exceptions instead of raising (same contract as
-    `rm()`'s callable form); `None` (default) fails on the first error.
-    `progress`, when given, is called as `progress(path, bytes_copied,
-    total_size)` per chunk written for each file streamed (`path` is the
-    source file; `total_size` is `None` if unknown); with `recursive=True`
-    this fires once per copied file, giving per-file identity alongside
-    byte progress. `progress=None` (default) has no per-chunk overhead and
-    is bytewise identical to before this kwarg existed. Not honored by
-    `SftpPath`'s asyncssh concurrent fan-out (native transfer, out of
-    scope) — see `docs/divergences.md`. A file copy opens the source before
-    touching the target, so a missing or unreadable source leaves an
-    existing target intact and creates nothing; a copy that fails
-    mid-stream removes the partial target; a copy onto the same file
-    (itself, or a case-insensitive alias) raises `OSError(EINVAL)`.
-  - `move(target, *, overwrite=False)` — tries `rename()` first, falls back
-    to `copy(recursive=True)` + `rm(recursive=True)`/`unlink()` when
-    `rename()` raises `NotImplementedError`. Checks before touching the
-    target: a missing source raises `FileNotFoundError`, a file onto a
-    directory raises `IsADirectoryError`, and a target that is the same file
-    (e.g. a case-only rename) is renamed in place rather than removed. With
-    `overwrite=True` a file target on a local path is replaced atomically
-    (`replace()`); elsewhere it is unlinked just before the rename.
-    `rename()` is attempted only when `_rename_compatible(target)` (a
-    `LocalPath` needs a local target) and falls back to copy + delete on
-    `NotImplementedError` or `OSError(EXDEV)`. A `str` destination is
-    resolved by `_coerce_target()`: `with_segments()` by default (so a
-    `MemPath` destination stays on the same in-memory filesystem), a URI
-    parse on `UriPath`.
-- **`PathLike`** — `Union[str, Path]`. **`PurePathLike`** — `Union[str,
-  Pathname]`. **`FsPathLike`** — `Protocol` requiring `__fspath__() -> str`.
+    progress=None) -> None`
+    - Existing target: `FileExistsError` unless `overwrite=True`; a directory
+      target of a file copy → `IsADirectoryError`; a directory source needs
+      `recursive=True`; copying into its own subtree → `OSError(EINVAL)`; onto
+      the same file (or a case-insensitive alias) → `OSError(EINVAL)`.
+    - The source is opened before the target is touched; a failed stream
+      removes the partial target.
+    - `follow_symlinks=False` on a symlink recreates the link
+      (`NotImplementedError` if either side cannot).
+    - `preserve_metadata=True` copies permission bits only, and only a mode the
+      source backend really reported (`FileStat.mode_known`).
+    - `ignore_error`: `True` suppresses child errors of a recursive copy,
+      `False`/`None` raise; a callable is called as `ignore_error(error)` and
+      the error is **always** suppressed (its return value is ignored — not
+      `rm()`'s `(error, path)` predicate).
+    - `progress(path, bytes_copied, total_size | None)` per chunk of each file
+      streamed; not called by `SftpPath`'s asyncssh recursive fan-out.
+    - A `str` target goes through `_coerce_target()`: `with_segments()` by
+      default, a URI parse on `UriPath` (so `copy("s3://b/k")` crosses
+      schemes).
+  - `move(target, *, overwrite=False)` — validates first (missing source →
+    `FileNotFoundError`, file onto directory → `IsADirectoryError`, existing
+    target without `overwrite` → `FileExistsError`; a same-file spelling is
+    renamed in place). Tries `rename()` when `_rename_compatible(target)`,
+    falling back to `copy(recursive=True)` + `rm`/`unlink` on
+    `NotImplementedError` or `OSError(EXDEV)`. `overwrite=True` replaces a
+    local file atomically (`replace()`); elsewhere the target is unlinked just
+    before the rename. Returns `rename()`'s result (`None` on the fallback).
+- **`FsPathLike`** — `Protocol` with `__fspath__() -> str`.
+  **`PathLike`** = `str | Path`; **`PurePathLike`** = `str | Pathname`.
 
 ## Local filesystem (`pathlib_next.fspath`)
 
 - **`LocalPath`** — `pathlib.WindowsPath`/`PosixPath` (by `os.name`) with
-  this library's `Path` mixed in via MRO. Behaves exactly like
-  `pathlib.Path` for anything not explicitly overridden (see
-  `docs/divergences.md`); overrides `_scandir()`, `walk()`, `copy()`,
-  `move()`, `stat()`, `chmod()`, and `glob()` to keep this project's
-  contracts (tuple-yielding `_scandir`, extended copy/move kwargs,
-  `follow_symlinks=` support pre-3.10) regardless of what a given Python
-  version's own `pathlib.Path` does at the same MRO position.
-  Stdlib inheritance is intentionally local-only: `MemPath`, `Uri`, and
-  `UriPath` implement the pathlib_next bases but are not stdlib
-  `PurePath`/`Path` instances because stdlib construction and operations
-  assume OS path syntax and a local filesystem. Conversely, a plain stdlib
-  `pathlib.Path` is not a `pathlib_next.Path`.
-- **`PosixPathname`** / **`WindowsPathname`** — pure (no I/O) path classes
-  implementing `Pathname` on top of `pathlib.PurePosixPath`/
-  `PureWindowsPath`.
+  `Path` mixed in; stdlib behavior except where overridden: `_scandir()`
+  (tuples from `os.scandir` lstat), `walk()`, `glob()`, `copy()`, `move()`,
+  `stat()`/`chmod()` (`follow_symlinks=` on 3.9; `chmod` accepts octal
+  strings), `is_dir()`/`is_file()` (`follow_symlinks=` before 3.13),
+  `_symlink_to()`, `_chown()` (`shutil.chown`; `NotImplementedError` where
+  `os.chown` is missing, i.e. Windows), plus pathlib_next's `exists`,
+  `rglob`, `read_text`, `write_text`, `symlink_to`. `exists()`/`is_*()`
+  return `False` for any `OSError`/`ValueError` on every Python version. A
+  stdlib `pathlib.Path` is not a `pathlib_next.Path`, and `MemPath`/`Uri`/
+  `UriPath` are not stdlib paths.
+- **`PosixPathname`** / **`WindowsPathname`** — pure classes over
+  `PurePosixPath`/`PureWindowsPath` implementing `Pathname`.
 
 ## In-memory filesystem (`pathlib_next.mempath`)
 
-- **`MemPath(Path)`** — `MemPath(*segments, backend=None, **kwargs)`.
-  In-memory path over nested dicts; a `dict` value is a directory, a
-  `bytearray` value is a file's content. Reference exemplar for subclassing
-  `Path` directly. `relative_to()` is not implemented. `as_uri()` returns
-  `mempath:<url-quoted posix path>`. Supports `_open()` modes `"r"`, `"w"`,
-  `"x"`, `"a"` (the `"a"` extension isn't part of the base `BinaryOpen`
-  contract). `rename()` is not implemented (see the scheme feature matrix in
-  the README).
-- **`MemPathBackend(dict)`** — the nested-dict storage. Share one instance
-  across `MemPath`s via `backend=` to give them the same virtual filesystem;
-  omitted, each root `MemPath()` gets its own.
+- **`MemPath(*segments, backend=None)`** — `Path` over nested dicts; the
+  reference `Path` subclass. Segments may be `str`, `Pathname` or `MemPath`
+  (a `MemPath` argument shares its backend; another `Path` →
+  `NotImplementedError`). Joined and normalized like `PurePosixPath`.
+  - `backend` (a `MemPathBackend`); `parts` is `(segments, backend)`;
+    `as_uri()` → `mempath:<quoted posix path>` (no `mempath:` scheme is
+    registered; build `MemPath` directly).
+  - `stat()` → `FileStat` with `st_size` and `st_mtime` (time of the last
+    write); the mode is a placeholder (`mode_known=False`).
+  - `open()` supports `r`, `w`, `x`, `a` (binary or text); `+` modes →
+    `NotImplementedError`. Writes are visible after `flush()`/`close()`.
+  - Not implemented (`NotImplementedError`): `relative_to()`,
+    `is_absolute()`, `rename()` (`move()` copies), `chmod()`, `symlink_to()`.
+  - A `str` destination to `copy()`/`move()` stays on the same backend.
+- **`MemPathBackend(dict)`** — storage: `dict` value = directory,
+  `bytearray` (`MemFile`, carrying `mtime`) = file. Pass one instance as
+  `backend=` to share a tree; each root `MemPath()` otherwise gets its own.
 
 ## Protocols (`pathlib_next.protocols`)
 
-- **`fs.FileStatLike`** — `Protocol`: `st_mode`, `st_size`, `st_mtime`
-  (all abstract properties).
-- **`fs.Stat`** — `Protocol`. `stat(*, follow_symlinks=True) ->
-  FileStatLike` (not implemented by default). Derives `lstat()`,
-  `exists()`, `is_dir()`, `is_file()`, `is_symlink()`, `is_block_device()`,
-  `is_char_device()`, `is_fifo()`, `is_socket()` — all methods, not
-  properties. `exists()`/the `is_*` methods swallow `OSError`/`ValueError`
-  from `stat()` and report `False` rather than propagating, on every Python
-  version (pathlib 3.13+ behaviour; 3.9-3.12 re-raise errors such as
-  `PermissionError` — see `docs/divergences.md`). `is_dir()`/`is_file()`
-  accept `follow_symlinks=`.
-- **`fs.Chmod`** — `Protocol`. `chmod(mode, *, follow_symlinks=True)` (not
-  implemented by default); derives `lchmod(mode)`. `mode` may be a `str`,
-  parsed as **octal** (`"0755"` == `"755"` == `0o755`); a non-octal digit
-  raises `ValueError`. Each backend overrides `chmod()` directly (each has
-  real per-scheme logic), so all of them normalize through
-  `utils.as_mode()` — the shared helper is what keeps the base from
-  drifting between them.
-  Also `chown(uid=None, gid=None, *, follow_symlinks=True)` over a
-  `_chown(uid, gid, *, follow_symlinks=True)` backend primitive (not
-  implemented by default). Extension: `pathlib` has `owner()`/`group()`
-  readers but no writer. `None` leaves a field unchanged and `-1` is an
-  alias for it; an `int` is an id, a `str` is a name. `chown()` normalizes
-  via `utils.as_owner()` and short-circuits when nothing would change, so
-  `_chown()` always receives a canonical pair and only converts to its own
-  wire spelling (`-1` for `os.chown`, an omitted attr for SFTP). On a
-  platform without `os.chown` (Windows) `LocalPath.chown()` raises
-  `NotImplementedError` for any real change; the all-unchanged no-op still
-  succeeds because it never reaches the backend.
-- **`io.BinaryOpen`** — `Protocol`. `_open(mode="r", buffering=-1) ->
-  io.IOBase` (not implemented by default; must yield a **binary** stream).
-  Derives `open(mode="r", buffering=-1, encoding=None, errors=None,
-  newline=None)`, `read_bytes()`, `read_text(encoding=None, errors=None,
-  newline=None)`, `write_bytes(data)`, `write_text(data, encoding=None,
-  errors=None, newline=None)`, `copy(target, *, progress=None,
-  chunk_size=shutil.COPY_BUFSIZE)` (streams this object's binary content
-  into another `BinaryOpen`; `progress(bytes_copied, total_size)` fires
-  per chunk when given — `total_size` from `stat().st_size` if `self` also
-  implements `Stat` and it succeeds, else `None`; `progress=None` default
-  is unchanged `shutil.copyfileobj` behavior).
-- **`checksum.NativeChecksum`** — `Protocol`. `checksum(algorithm="md5") ->
-  str` (not implemented by default). Optional, backend-native file digest
-  (e.g. `SftpPath` against a server implementing the filexfer draft's
-  `check-file-handle` extension; OpenSSH does not, and a refusal is cached
-  per connection) computed server-side instead of streaming content through
-  `open("rb")`. Not mixed into the base `Path`/`Pathname` ABC — a plain
-  `Path` has no `.checksum` attribute at all; a subclass opts in by mixing
-  this protocol in and implementing the method. MUST raise
-  `NotImplementedError` (never return a value) when it can't produce a
-  genuine digest under the requested `algorithm` — see
-  `docs/divergences.md` for why this is a hard contract, not a style
-  choice (the S3-ETag-for-multipart-uploads trap in particular).
-  `supported_checksums() -> frozenset[str]` (default: `frozenset()`) is a
-  companion *advisory* capability query — never raises, lets a caller pick
-  a shared algorithm across two paths (e.g. `source.supported_checksums()
-  & target.supported_checksums()`) without probing via trial-and-error.
-  Advisory only: `checksum()`'s own `NotImplementedError` remains the
-  authoritative per-call contract even if a caller skips this query.
-  `SftpPath.supported_checksums()` is a real per-connection probe (not a
-  static flag) — paramiko exposes no way to read the server's advertised
-  SFTP extension list, so the only reliable signal is an actual attempt,
-  cached per connection.
+- **`fs.FileStatLike`** — `st_mode`, `st_size`, `st_mtime`.
+- **`fs.Stat`** — `stat(*, follow_symlinks=True)` (stub). Derives `lstat()`,
+  `exists(*, follow_symlinks=True)`, `is_dir(*, follow_symlinks=True)`,
+  `is_file(*, follow_symlinks=True)`, `is_symlink()`, `is_block_device()`,
+  `is_char_device()`, `is_fifo()`, `is_socket()`; any `OSError`/`ValueError`
+  from `stat()` reads as `False`.
+- **`fs.Chmod`** — `chmod(mode, *, follow_symlinks=True)` (stub; every
+  implementation normalizes through `utils.as_mode()`, so `"0755"` works),
+  `lchmod(mode)`, `_chown(uid, gid, *, follow_symlinks=True)` (stub, receives a
+  canonical pair) / `chown(uid=None, gid=None, *, follow_symlinks=True)` —
+  `None` or `-1` leaves a field unchanged, `int` is an id, `str` a name; an
+  all-unchanged call returns without touching the backend.
+- **`io.BinaryOpen`** — `_open(mode="r", buffering=-1) -> binary IO` (stub).
+  `open(mode="r", buffering=-1, encoding=None, errors=None, newline=None)`
+  validates the mode like builtin `open()` (`ValueError`) and passes
+  `_open()` a canonical `r`/`w`/`x`/`a` plus optional `+` (never `b`/`t`);
+  text mode wraps in `TextIOWrapper` and closes the handle if wrapping fails.
+  An `_open()` that cannot honor a mode raises `NotImplementedError`. Derives
+  `read_bytes()`, `read_text(encoding=None, errors=None, newline=None)`,
+  `write_bytes(data)`, `write_text(data, encoding=None, errors=None,
+  newline=None)`, `copy(target, *, progress=None,
+  chunk_size=shutil.COPY_BUFSIZE)` (`progress(bytes_copied, total_size |
+  None)`; an empty file reports once).
+- **`checksum.NativeChecksum`** — opt-in (not on `Path`):
+  `checksum(algorithm="md5") -> str` MUST raise `NotImplementedError` whenever
+  it cannot return a genuine content digest under exactly that algorithm
+  (never a different algorithm, never an ETag-like value); callers catch only
+  `NotImplementedError`. `supported_checksums() -> frozenset[str]` (default
+  empty) is advisory and never raises.
 
-## URIs (`pathlib_next.uri`)
+## URIs (`pathlib_next.uri`, `uri` extra)
 
-Only importable if `uritools` is installed (the `uri` extra or any scheme
-extra that depends on it).
+- **`Uri(*uris, **options)`** — pure RFC 3986 URI, parsed lazily. Arguments
+  (`str`, `bytes`, `Uri`, `pathlib`/`pathlib_next` paths, `os.PathLike`) join
+  right to left like `joinpath` (an absolute one restarts); this is not RFC
+  3986 reference resolution and `..` is not resolved during a join. An
+  absolute local path becomes `file:`; a relative one joins like a
+  `PurePath`.
+  - Properties: `source -> Source`, `path -> str` (percent-decoded),
+    `query -> Query` (**percent-encoded as received**, sent unchanged),
+    `fragment -> str`, `parts -> (source, path, query, fragment)` (not path
+    segments; use `segments`), `normalized_path`, `segments`, `parent`
+    (`http://h/a` → `http://h/`; a trailing `/` is kept, so
+    `Uri("http://h/d/").name == ""`).
+  - Methods: `as_uri(sanitize=False)`, `with_source()`, `with_path()`,
+    `with_segments()`, `with_query(str | mapping | pairs)` (a `str` is taken as
+    already encoded), `with_fragment()`; `with_name`/`with_suffix`/`with_stem`
+    keep query and fragment. `is_absolute()` (path starts with `/`),
+    `is_relative_to(other)`, `relative_to(other, *, walk_up=False)`
+    (`s3://b`/`http://h` count as the root), `is_local()`
+    (`Source.is_local()`), `as_posix()` (`user@host:path` when a host is
+    present).
+  - `str()`/`repr()` drop the password (`sftp://u:pw@h/p` → `sftp://u@h/p`);
+    `as_uri(sanitize=False)` keeps it. Non-ASCII hosts render as IDNA.
+  - `==`/`hash` use the URI text; equal to another `Uri` or a URI string,
+    never to a non-URI `Pathname`.
+  - `__fspath__()` — the path for a `file:` URI on this machine (a named host
+    on Windows is a UNC path) or for a scheme with `_host_filesystem_path =
+    True` (`sftp:`, whose path is meaningful on **its** host); otherwise
+    `NotImplementedError`. `host_fspath()` — the latter only, never local.
+- **`UriPath(*uris, schemesmap=None, findclass=False, backend=None,
+  **options)`** — `Uri` + `Path`. The bare class (or `findclass=True`)
+  returns the subclass registered for the scheme, or plain `UriPath` for an
+  unknown scheme (its I/O raises `NotImplementedError`). Resolution: classes
+  already imported → entry point in group `pathlib_next.schemes` → built-in
+  `pathlib_next.uri.schemes.*` module. An explicit `schemesmap` is the only
+  map consulted.
+  - Registering: `__SCHEMES = ("myscheme",)` in the class body (name-mangled:
+    redeclare per class; the class name must not start with `_`). Defining or
+    importing the subclass is enough, including after the first dispatch.
+  - `backend` — per-instance connection state from `_initbackend()` (base:
+    `None`), created on first use and inherited by derived paths.
+    `with_backend(backend)` returns a copy using `backend`. A backend is only
+    shared within one endpoint (scheme, userinfo, host, port): a join,
+    `with_source()` or `UriPath(base, url)` onto another endpoint builds a
+    fresh one, so credentials and sessions never follow.
+  - Listing: implement `_listdir() -> Iterator[str]` or override
+    `_scandir()`; `iterdir()` wraps each name with the entry's stat as a
+    single-use hint (the child's first `stat()` returns it, later calls
+    re-fetch).
+  - `/` and `joinpath()` choose the result class from the scheme.
+  - `rename()`/`symlink_to()` take a `str` as an already-decoded path (`?`,
+    `#`, `%`, `:` are filename characters); a relative `rename()` target is a
+    sibling of `self`. A target on another endpoint (or another archive or
+    Azure container) raises `NotImplementedError`, so `move()` copies and
+    deletes. `copy()`/`move()` parse a `str` target as a URI.
+- **`Source(scheme, userinfo, host, port)`** (`uri.source`) — `NamedTuple`,
+  falsy when all fields are empty. `as_str(sanitize=True)`; `str()`/`repr()`
+  redact the password (the fields keep it). `Source.from_str(source,
+  strict=True)` (`ValueError` for a path/query/fragment when strict),
+  `parsed_userinfo() -> (user, password)` (`""` when absent),
+  `get_scheme_cls(schemesmap=None) -> type[UriPath]`, `is_local()` —
+  `localhost`/empty host or an address of this machine (IP literal, or any
+  A/AAAA answer via `netimps`); cached per `Source` (`lru_cache(256)`), does
+  DNS on a miss.
+- **`Query(query, *, encoding="utf-8", separator="&")`** (`uri.query`) —
+  `str` subclass holding the encoded query; built from a `str` (taken as
+  encoded), a mapping (a sequence value repeats the key) or `(key, value)`
+  pairs. `decode() -> list[tuple[str, str | None]]`, iteration yields the
+  decoded pairs, `to_dict(*, single=False)`.
 
-- **`Uri(Pathname)`** — a pure (no I/O), RFC 3986 URI, lazily parsed into
-  `source`/`path`/`query`/`fragment` on first access. `Uri(*uris,
-  **options)` — multiple constructor args are joined pathlib-`joinpath`-style
-  (right to left, stopping at the first absolute segment) — this is **not**
-  RFC 3986 reference resolution, and `..` is never resolved during join (see
-  `docs/divergences.md`). Properties: `source -> Source`, `path -> str`,
-  `query -> str` (**as received, still percent-encoded**, and sent
-  unchanged; `Query(query).to_dict()`/`decode()` decode names and values),
-  `fragment -> str`, `parts -> (source, path, query, fragment)` (URI
-  components, not path segments — use `segments`), `normalized_path` (posixpath-normalized `path`), `segments`,
-  `suffix`, `stem`, `parent`. Methods: `as_uri(sanitize=False)` (sanitize
-  strips password from userinfo before formatting), `with_source(source)`,
-  `with_segments(*segments)`, `with_path(path)`, `with_query(query)`,
-  `with_fragment(fragment)`, `is_absolute()`, `is_relative_to(other)`
-  (a `str` `other` is parsed standalone as `Uri(other)`, matching
-  `relative_to()`; an `other` with no authority is compatible with any
-  `self.source`, so `Uri("http://h/a/b").is_relative_to("/a")` is `True`),
-  `relative_to(other, *, walk_up=False)`, `is_local()` (delegates to
-  `Source.is_local()` — does a DNS lookup, cached per `Source`),
-  `as_posix()` (`user@host:path` / `host:path` form when a source is
-  present). `__fspath__()` succeeds for a `file:`-scheme URI pointing at
-  this machine, and for any scheme with `_host_filesystem_path = True`
-  (currently `sftp:` — returns `.path`, meaningful on that URI's own host,
-  not the local one); otherwise raises `NotImplementedError`. `host_fspath()`
-  is the unambiguous accessor for "path on the URI's own host" — same
-  `_host_filesystem_path` gate, but never falls back to local-path
-  semantics. See `docs/divergences.md`.
-  Destination/target normalization (used by every scheme's `rename()` and
-  by `symlink_to()`): `_from_decoded_path(path)` builds a same-type URI
-  whose `.path` is `path` **verbatim** — an already-decoded path string,
-  not URI syntax, so `?`, `#`, `%` and `:` in it are ordinary filename
-  characters and only dot segments are normalized.
-  `_rename_target(target)` is what `rename()` calls: a `Uri` passes
-  through untouched, a `str` goes through `_from_decoded_path()` and, if
-  relative, is joined onto `self.parent` (sibling rename — a URI has no
-  cwd). It then requires `_same_location(result)` — the same endpoint
-  (scheme, userinfo, host, port; `""` and `None` alike) or a sourceless
-  relative path; `ArchiveUri` also requires the same archive and `AzPath`
-  the same container — and otherwise raises `NotImplementedError`, so
-  `rename()` never renames onto another host/bucket/archive/scheme and
-  `move()` falls back to copy + delete. `_symlink_target(target)`
-  (overriding `Path`'s) is the same minus the parent anchoring, so a
-  relative link target stays relative.
-  `copy()`/`move()` deliberately still parse a `str` destination as a URI
-  — that is what makes a cross-scheme `copy("s3://bucket/key")` work.
-- **`UriPath(Uri, Path)`** — `Uri` + `Path` (I/O) + scheme dispatch.
-  `UriPath(*uris, **options)` (the bare class) parses the URI and returns an
-  instance of the concrete subclass registered for its scheme via
-  `__SCHEMES` (name-mangled per class — declare `__SCHEMES = ("http",
-  "https")` in the subclass body, not as a module-level or dynamically
-  assigned attribute, and never give a `__SCHEMES`-registered class a
-  leading underscore in its name, or the name-mangled lookup silently
-  misses). If the scheme isn't loaded yet, resolution tries a
-  `pathlib_next.schemes` entry point first, then imports the matching
-  builtin `uri/schemes/*` module — importing any module that defines a
-  `UriPath` subclass registers it. `backend` property — per-instance
-  connection/session state, lazily created via `_initbackend()` (override
-  in a scheme subclass; base returns `None`); `with_backend(backend)`
-  returns a new instance sharing the given backend. A backend is shared
-  only within one endpoint: joining an absolute URI for another host
-  (`base / "http://other/x"`), `UriPath(base, url)`, `with_source()` and
-  derived paths with a different authority get a fresh backend from
-  `_initbackend()`, so session credentials and tokens never follow. `_listdir() ->
-  Iterator[str]` (not implemented by default) / `_scandir()` (derives from
-  `_listdir()` + one `stat()` per child unless overridden directly — prefer
-  overriding `_scandir()` when the listing call already returns
-  type/size/mtime metadata, e.g. WebDAV PROPFIND, FTP MLSD, SFTP
-  `listdir_attr`, an S3 list page). `iterdir()` is provided (drives
-  `_scandir()`); implement `_listdir()` or `_scandir()`, not `iterdir()`
-  itself.
-- **`Source`** (`uri.source`, re-exported at `uri.Source` via `uri/__init__`
-  imports) — `NamedTuple(scheme, userinfo, host, port)`; falsy when every
-  field is empty/`None`. `as_str(sanitize=True) -> str` composes an
-  authority string (`scheme://userinfo@host:port`); `sanitize=True` (the
-  default) drops the password from `userinfo`, `sanitize=False` is the
-  full, credentialed round trip — same name/kwarg as `Uri.as_uri()`, so
-  both classes work the same way. `__str__()` is `as_str(sanitize=True)`;
-  `__repr__()` redacts the same way (`NamedTuple`'s default would render
-  every field, including the password, verbatim — see
-  `docs/divergences.md`). The actual data (`.userinfo`, `parsed_userinfo()`,
-  `["userinfo"]`) is unaffected by any of this, only display is sanitized.
-  `Source.from_str(source, strict=True) -> Source` (`strict=True` raises
-  `ValueError` if `source` carries a path/query/fragment).
-  `parsed_userinfo() -> (user, password)`.
-  `get_scheme_cls(schemesmap=None) -> type[UriPath]` — resolves (and lazily
-  loads) the scheme class. `is_local()` — IP-literal `host` (`str` or
-  `_IPAddress`) skips resolution via `netimps.try_parse()`; otherwise
-  `netimps.resolve(host, "a")` + `resolve(host, "aaaa")` (default backend
-  chain: dnspython, then the OS resolver via `getaddrinfo()` — hosts file,
-  NSS, DNS, OS cache — then `nslookup`; `host` is local if ANY resolved
-  address is; empty result -> not local, never an exception for a
-  genuinely non-resolving name). `netimps.is_local_address()` then decides
-  membership per address (real interface enumeration via
-  `netimps.get_interfaces()`, not DNS-based guessing). `lru_cache
-  (maxsize=256)`d per `Source` value; never call on a hot path uncached.
-  Requires `netimps>=0.2.0` (part of the `uri` extra; `resolve()`'s
-  OS-resolver-chain support landed in 0.2.0 — earlier versions were
-  dnspython-only).
-- **`Query(str)`** (`uri.query`) — a URI query string, buildable from a
-  `str`, a sequence of `(key, value)` pairs, or a mapping (`value` may be a
-  sequence to repeat the key). `Query(query, *, encoding="utf-8",
-  separator="&")`. `decode() -> list[tuple[str, str | None]]`,
-  `__iter__()` (iterates decoded pairs), `to_dict(*, single=False) ->
-  dict[str, list[str | None]]` (or `dict[str, str | None]` when
-  `single=True`, last value wins).
+## Built-in schemes (`pathlib_next.uri.schemes`)
 
-Built-in scheme modules live under `uri/schemes/` — see the table in the
-<https://github.com/jose-pr/pathlib-next>. `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"` /
-`"asyncssh"` / `"auto"`, default `"auto"`) selects the `sftp:` backend;
-precedence is an explicit class attribute > this env var > auto-detect
-(prefers asyncssh if importable).
+Every class is dispatched by `UriPath(...)`; `pathlib_next.uri.schemes`
+re-exports `FileUri`, `DataUri`, `HttpPath`, `DavPath`, `FtpPath`, `SftpPath`,
+`S3Path`, `GsPath`, `AzPath`, `GitHubPath`, `GitLabPath`, `GitPath`, `ZipUri`,
+`TarUri` lazily (a name whose extra is missing is absent). Backends are passed
+as `UriPath(uri, backend=...)` or `path.with_backend(...)`. Unsupported
+operations raise `NotImplementedError`. Network errors map to pathlib types
+(`FileNotFoundError`, `PermissionError`, `FileExistsError`,
+`IsADirectoryError`, `NotADirectoryError`, `OSError(ENOTEMPTY)`), timeouts to
+`TimeoutError`, anything else to `OSError`; transport exceptions are not
+chained (their text can carry credentials).
 
-Transport defaults (each overridable in code only, never by env var):
-`sftp:` verifies host keys on both backends — `SftpBackend(connect_opts=None,
-hostkeypolicy=None, ssh_config=..., *, known_hosts=<~/.ssh/known_hosts +
-ssh_config UserKnownHostsFile>, timeout=30.0)` (policy default
-`paramiko.RejectPolicy()`; opt-out `SftpBackend(opts, paramiko.AutoAddPolicy(),
-known_hosts=None)`), `AsyncsshSftpBackend(connect_opts=None, ..., timeout=60.0)`
-(opt-out `connect_opts={"known_hosts": None}`; `timeout` bounds single
-requests, not tree operations or transfers); both have `close()`. The paramiko
-backend expands ssh_config `Include` and raises `NotImplementedError` for
-`ProxyJump`. `http(s):`/`dav(s):`/`github:`/`gitlab:` send
-`timeout=(10, 60)` unless given one (`with_session(..., timeout=...)`,
-`RepoBackend(timeout=...)`); URL userinfo goes out as `auth=`, not in the
-request URL, and translated errors do not chain the `requests` exception.
-`github:`/`gitlab:`/`git:` take the token from the userinfo password slot
-(`x-access-token:TOKEN@host`) or a bare `TOKEN@host`, and redact the whole
-userinfo from `str()`/`repr()`/`as_uri(sanitize=True)`. `ftps:`
-(`FtpBackend(timeout=30.0, ssl_context=None, verify=True)`) verifies
-certificates by default and reuses the TLS session for data connections.
-`utils.LRU(func, maxsize=128, on_evict=None)` calls `on_evict(key, value)` for
-entries it drops (`discard(*args)` removes one). `GsBackend(**client_kwargs)` passes its keyword arguments to
-`google.cloud.storage.Client` unchanged (for an emulator:
-`client_options={"api_endpoint": url}, use_auth_w_custom_endpoint=False`);
-it never sets `STORAGE_EMULATOR_HOST`. S3/GCS/Azure keys drop one trailing
-`/`, so `s3://b/dir/` names the directory `dir`.
+- **`FileUri`** (`file:`; `schemes.file`) — `file:///abs`, `file:rel`,
+  `file://localhost/C:/x`. `filepath -> LocalPath`; all I/O delegates to it
+  (listing reuses `LocalPath`'s scandir). `rename()` accepts local targets
+  only and returns a `FileUri`. No `symlink_to()`/`readlink()`.
+- **`DataUri`** (`data:`; `schemes.data`) — RFC 2397
+  `data:[<mediatype>][;base64],<data>`. `mediatype` property (default
+  `text/plain;charset=US-ASCII`). Read-only single file: `open("r")` only,
+  `stat().st_size` is the decoded size, listing → `NotADirectoryError`.
+- **`HttpPath`** (`http:`/`https:`; `http` extra; `schemes.http`)
+  - `with_session(session, write_method="PUT", append_mode="rewrite",
+    **requests_args) -> HttpPath` — installs `HttpBackend(session,
+    requests_args, write_method, append_mode)` (a `NamedTuple` with
+    `request(method, uri, **kwargs)`); `requests_args` (`headers=`, `auth=`,
+    `verify=`, `timeout=`, ...) go to every request, request-specific
+    headers merge over them.
+  - Timeout: `DEFAULT_TIMEOUT = (10, 60)` (connect, read) unless given;
+    `timeout=None` waits forever.
+  - URL userinfo is sent as Basic `auth=` (not in the URL) unless
+    `requests_args`/`session.auth` set auth; it takes priority over `~/.netrc`.
+  - `stat(*, follow_symlinks=True, walk_up_last_modified=False)` — `HEAD`
+    (`GET` on 405); a final URL ending in `/` is a directory; `st_size` from
+    `Content-Length`, `st_mtime` from `Last-Modified` (UTC), or from the
+    parent's index when `walk_up_last_modified=True`.
+  - Listing scrapes an Apache/nginx-style HTML index; `.`/`..` rows are never
+    children; a non-HTML response → `NotADirectoryError` (an HTML file lists
+    as empty). Cannot always tell a file from an index page.
+  - `open("r")` streams `GET` with `Accept-Encoding: identity`. `"w"`/`"x"`
+    buffer and send `write_method` on close (`"x"` checks then writes, not
+    atomic). `"a"`: `append_mode="rewrite"` (GET + full re-upload, not atomic)
+    or `"patch"` (`PATCH` with `Content-Range` from `stat()`; a refusal raises
+    `PermissionError` for 401/403/405/501, `OSError(EIO)` for other statuses).
+  - `unlink()` sends `DELETE` and refuses a directory (`IsADirectoryError`,
+    judged by `stat()`); `rmdir()` requires an empty directory. No `mkdir()`,
+    `rename()`, `chmod()`.
+  - Status mapping: 404/410 → `FileNotFoundError`, 401/403/405/501 →
+    `PermissionError`, 409 → `FileExistsError` (`FileNotFoundError` for
+    writes), other → `OSError(EIO)` with the status.
+- **`DavPath(HttpPath)`** (`dav:`/`davs:`, sent as `http:`/`https:`; `http`
+  extra; `schemes.dav`) — same backend and `with_session()`. `stat()`/
+  listing via `PROPFIND`. `open("r")` on a collection → `IsADirectoryError`;
+  `"w"`/`"x"` `PUT` on close; `"a"` unsupported. `mkdir()` = `MKCOL`
+  (missing parent → `FileNotFoundError`). `unlink()` refuses a collection;
+  `rmdir()` checks emptiness first; `rm(recursive=True)` is one recursive
+  `DELETE` (failed members of a 207 raise). `rename()` = `MOVE` with
+  `Overwrite: F` (existing target → `FileExistsError`), no credentials in
+  `Destination`. 423 → `PermissionError`. No `chmod()`.
+- **`FtpPath`** (`ftp:`/`ftps:`; `uri` extra; `schemes.ftp`)
+  - `FtpBackend(timeout=30.0, ssl_context=None, verify=True)` — `timeout`
+    bounds connect, replies and transfers (`None` = forever). `ftps:` is
+    explicit TLS with `PROT P`; the certificate and host name are verified
+    with `ssl.create_default_context()`; `ssl_context` (e.g.
+    `ssl.create_default_context(cafile=...)`) wins over `verify`;
+    `verify=False` accepts any certificate. Data connections reuse the TLS
+    session. No user in the URI → anonymous login.
+  - `BaseFtpBackend.client(source, tls) -> ftplib.FTP` — override to supply
+    connections.
+  - Paths without `backend=` share one default `FtpBackend()`. Connections
+    are cached per (backend, source, tls, thread) (LRU of 128, closed on
+    eviction), probed with `NOOP` and replaced when dead.
+  - Listing/stat use `MLSD` (UTC `modify`; mode from `unix.mode` or the
+    `perm` fact); servers without it fall back to `NLST`/`SIZE`.
+  - Reads download the whole file into memory; `"w"`/`"x"`/`"a"` (`APPE`)/
+    `"r+"` buffer in memory and upload on close (`"x"` checks then writes).
+  - `rename()` on the same server. `chmod()` via `SITE CHMOD`
+    (`NotImplementedError` when the server lacks it or
+    `follow_symlinks=False`).
+- **`SftpPath`** (`sftp:`; `sftp` or `sftp-async` extra; `schemes.sftp`)
+  - `SftpPath(*uris, backend=None, ssh_config=<default>)` — `ssh_config`:
+    default `~/.ssh/config`, `None` for none, a path or iterable of paths;
+    inherited by derived paths.
+  - Backend selection, highest first: `backend=` → subclass attribute
+    `_default_backend_cls` → env `PATHLIB_NEXT_SFTP_BACKEND`
+    (`auto`|`asyncssh`|`paramiko`; a named backend that is not installed
+    raises `ImportError`) → auto (asyncssh if importable, else paramiko).
+  - **`SftpBackend(connect_opts=None, hostkeypolicy=None,
+    ssh_config=<default>, *, known_hosts=<default>, timeout=30.0)`**
+    (paramiko). Host keys are verified: `known_hosts` default is
+    `~/.ssh/known_hosts` plus ssh_config `UserKnownHostsFile` (`None` loads
+    none; a path or list loads exactly those), `hostkeypolicy` default
+    `paramiko.RejectPolicy()`; a changed key always fails. Opt-out:
+    `SftpBackend(opts, paramiko.AutoAddPolicy(), known_hosts=None)`.
+    `timeout` fills paramiko's connect/banner/auth/channel timeouts
+    (`connect_opts` values win; `None` leaves them unset); requests on an open
+    connection are unbounded. ssh_config: `HostName`, `Port`, `User`,
+    `IdentityFile`, `ProxyCommand`, `Include`; `ProxyJump` →
+    `NotImplementedError` unless `connect_opts["sock"]` is given. Connections
+    cached per (backend, source, thread), replaced when dropped.
+  - **`AsyncsshSftpBackend(connect_opts=None, *, max_concurrency=None,
+    sftp_version=4, ssh_config=<default>, timeout=60.0)`**. asyncssh verifies
+    host keys against `known_hosts`/ssh_config; opt-out
+    `connect_opts={"known_hosts": None}`. `timeout` bounds single requests
+    (a timed-out request is cancelled and raises `TimeoutError`); recursive
+    `copy()`/`rm()` and streamed reads/writes are unbounded (use asyncssh's
+    `connect_timeout`/`keepalive_interval`). One connection per (backend,
+    source), served by one shared background event loop thread; not
+    fork-safe (rebuilt after `fork()`). A sync `Path` call made on that loop
+    thread (inside a callback running there) raises `RuntimeError`.
+    `max_concurrency` (`None` → `DEFAULT_MAX_CONCURRENCY = 16`) bounds
+    requests in flight and files open during recursive `copy()` (target on
+    the same host only) and `rm()`.
+  - Both backends: `close()` closes every cached connection (the backend stays
+    usable); `default(ssh_config=...)` classmethod.
+    `BaseSftpBackend.client(source)` is the override point
+    (`supports_lchmod`, `supports_hardlink`, `checksum()`,
+    `supported_checksums()`).
+  - `readlink() -> SftpPath` (verbatim target) and `symlink_to()` on both
+    backends; `hardlink_to(target)` and `chmod(follow_symlinks=False)` on
+    asyncssh only (paramiko → `NotImplementedError`); `chown()` with numeric
+    ids only.
+    `rename()` replaces an existing target via `posix-rename@openssh.com`
+    where supported, else `FileExistsError`. `checksum()`/
+    `supported_checksums()` (`NativeChecksum`): paramiko probes the
+    `check-file-handle` extension (OpenSSH lacks it); asyncssh never has it;
+    every failure is `NotImplementedError`. `__fspath__()`/`host_fspath()`
+    return `.path`.
+- **`S3Path`** (`s3://bucket/key`; `s3` extra; `schemes.s3`) — `bucket`,
+  `key` (one trailing `/` dropped: `s3://b/dir/` is `dir`).
+  `S3Backend(**client_kwargs)` → one lazily built, thread-shared
+  `boto3.client("s3", **client_kwargs)` (default: boto3's own credential and
+  endpoint configuration); `BaseS3Backend.client()` is the override point.
+  - Directories are key prefixes: `mkdir()` writes a zero-byte `key/` marker,
+    `rmdir()` needs an empty prefix, a key that is both an object and a prefix
+    is the object (in `stat()` and listings). No hierarchy enforcement (writes
+    below a missing "directory" succeed).
+  - Reads stream; `"w"`/`"x"`/`"r+"` spool and upload on close; `"x"` is a
+    conditional put (check-then-put above 5 GiB); `"a"` unsupported.
+    `st_mtime` from `LastModified`.
+  - `rename()`: server-side copy + delete in the same bucket; a prefix
+    directory → `NotImplementedError` (`move()` copies). `rm(recursive=True)`
+    batch-deletes; at the bucket root → `PermissionError`. No `chmod()`.
+- **`GsPath`** (`gs://bucket/key`; `gs` extra; `schemes.gs`) — `bucket_name`,
+  `key`. `GsBackend(**client_kwargs)` → `google.cloud.storage.Client(
+  **client_kwargs)` unchanged (emulator: `client_options={"api_endpoint":
+  url}, use_auth_w_custom_endpoint=False`, or set `STORAGE_EMULATOR_HOST`
+  yourself); `BaseGsBackend.client()`. Same prefix model and rename rules as
+  `S3Path` (same bucket); reads load the whole object; `"x"` uses
+  `if_generation_match=0`; `"a"` unsupported; `st_mtime` from `updated`.
+- **`AzPath`** (`az://account/container/key`; `az` extra; `schemes.az`) —
+  `account`, `container`, `key` (one trailing `/` dropped, interior `//`
+  kept). `AzBackend(account=None, **client_kwargs)`: `connection_string=` →
+  `BlobServiceClient.from_connection_string(...)`; otherwise kwargs go to
+  `BlobServiceClient` and `account` alone derives
+  `account_url="https://<account>.blob.core.windows.net"` with
+  `azure-identity`'s `DefaultAzureCredential` unless `credential=` is passed.
+  Without `backend=`, one shared backend per URI account is used, which needs
+  `azure-identity` (installed by the `az` extra; `ImportError` otherwise). Same
+  prefix model as `S3Path`; `rename()` within one container; `"x"` sends
+  `If-None-Match: *`; `"a"` unsupported; `st_mtime` from `last_modified`.
+- **`GitHubPath`** (`github://[TOKEN@]host/owner/repo/path?ref=REF`; `http`
+  extra; `schemes.github`) — read-only; `open()` other than `"r"` and every
+  write method raise `NotImplementedError`.
+  - Properties: `owner`, `repo`, `repo_path`, `ref` (`None` = default
+    branch); `?ref=` is carried to every child.
+  - `RepoBackend(token=None, session=None, api_base=None, **requests_args)`
+    (`schemes._gitrepo`): `Authorization: Bearer <token>`, timeout default
+    `(10, 60)`, `cache` dict; `api_base` overrides the API root;
+    `BaseRepoBackend.request(method, url, **kwargs)` is the override point.
+    Without `backend=`, the token is the userinfo password
+    (`x-access-token:TOKEN@`) or else the bare user (`TOKEN@`).
+  - `str()`, `repr()` and `as_uri(sanitize=True)` drop the whole userinfo.
+  - API root `https://api.github.com` for `github.com`, else
+    `https://host[:port]/api/v3`. Contents API listings (a directory at the
+    1,000-entry cap is re-read through the Git Trees API); file bodies use
+    the raw media type; symlink/submodule entries read as files;
+    `st_mtime` is `0`.
+  - Rate limits (403/429 with limit headers, any 429) → `OSError(EAGAIN)`.
+- **`GitLabPath`** (`gitlab://[TOKEN@]host[:port]/owner/repo/path`, or
+  `.../group/sub/project/-/path` — a `-` segment at position 3 or later is
+  the separator; `schemes.gitlab`) — same backend, properties and read-only
+  contract; API root `https://host[:port]/api/v4` (`gitlab.com` by
+  default). Without `?ref=` the default branch is fetched once
+  (`GET /projects/:id`) and cached in `backend.cache`. Tree listings are
+  paginated (100 per page); file entries carry no stat hint (a `stat()` per
+  file); `st_mtime` is `0`.
+- **`GitPath`** (`git:`; `schemes.git`) — `git://github.com/...` constructs a
+  `GitHubPath`, `git://gitlab.com/...` a `GitLabPath`; any other host →
+  `ValueError`. `git+github:` (`GitHubGitPath`) and `git+gitlab:`
+  (`GitLabGitPath`) pin the provider for any host.
+- **Archives** (`schemes.archive`): `ZipUri` (`zip:`), `TarUri` (`tar:`),
+  `ArchiveUri` (`archive:`, detects the format from the outer name
+  `.zip`/`.jar` vs `.tar`/`.tgz`/`.tar.*`, else a `PK` magic sniff),
+  `ArchiveZipUri` (`archive+zip:`), `ArchiveTarUri` (`archive+tar:`).
+  - Syntax `<scheme>:<archive-uri>!/<member>`; `<archive-uri>` must carry a
+    scheme (`ValueError` otherwise) and may be any URI, including another
+    archive (each leading archive scheme consumes one `!/`; nested archives
+    are read-only). A member name containing `!/` is written `%21/`.
+    `name`/`parent`/`glob()` work on the member path; `as_uri()`
+    percent-encodes it.
+  - One shared handle per archive (keyed by the real local path, or the outer
+    URI), released when no path references it. A non-local outer is read into
+    memory.
+  - Members named with `..`, an absolute path or a drive are never listed.
+    Exception types are POSIX on every platform.
+  - Writes: zip only, and only with a local `file:` outer (else
+    `NotImplementedError`). `"w"`/`"x"`/`"r+"`, `mkdir()`, `unlink()`,
+    `rmdir()`, `rename()` (same archive; replaces like POSIX `rename`);
+    parents must exist; `"a"` unsupported. Every mutation replaces the archive
+    atomically (temp file + `os.replace`) and keeps other members' metadata,
+    the comment and any prefix bytes. `tar:` (plain, gz, bz2, xz) is
+    read-only; `./` member prefixes are dropped.
 
-## Testing helpers (`pathlib_next.testing`)
+## CLI (`uripath`, `pathlib_next.tools.uripath`)
 
-Not imported by `pathlib_next/__init__.py` (needs `pytest`, a test-only
-dependency) — import explicitly: `from pathlib_next.testing import
-PathContract`.
+Console script `uripath` = `pathlib_next.tools.uripath:main`.
+`main(argv=None, *, stdin=None, stdout=None, stderr=None) -> int` (streams are
+binary; defaults are the process streams); `build_parser() ->
+argparse.ArgumentParser`. An argument with `://`, or with a scheme some class
+registers (`data:`, `zip:`, ...), is a `UriPath`; everything else (including
+`C:/x` and `notes:draft`) is a `LocalPath`. `-` is stdin/stdout where bytes
+are read or written. Without the `uri` extra local paths still work and a URI
+argument reports the extra to install.
 
-- **`PurePathContract`** — pure-path tests (name/suffix/stem, parent/
-  parents, joinpath/`/`, match). Requires only a `root` fixture.
-- **`ReadPathContract(PurePathContract)`** — read-only I/O tests (exists/
-  is_dir/is_file, read_text/read_bytes, iterdir, stat). `root` fixture must
-  point at a directory pre-populated with the standard fixture tree
-  (`a.txt`, `b.py`, `.hidden.txt`, `sub/c.py`, `sub/nested/d.py`,
-  `empty_dir/`).
-- **`PathContract(ReadPathContract)`** — full read/write contract (mkdir,
-  write_text/write_bytes, unlink, rmdir, rm(recursive=True), copy, move,
-  touch(exist_ok=False), mkdir(parents=True)). `root` fixture must be
-  writable.
+| Subcommand | Arguments and flags |
+| --- | --- |
+| `read PATH` | Copy `PATH`'s bytes to stdout in chunks. |
+| `write PATH [DATA] [--encoding utf-8]` | Write `DATA` encoded, or stdin's bytes when omitted. |
+| `rm PATH [-r/--recursive] [--missing-ok] [--ignore-error]` | `Path.rm()`. |
+| `cp SOURCE TARGET [-r/--recursive] [--overwrite] [--no-follow-symlinks] [--no-preserve-metadata]` | `Path.copy()`; with `-`, streams (an existing target needs `--overwrite`; no `-r`). |
+| `sync SOURCE TARGET [--dry-run] [--remove-missing] [--size-only] [-v/--verbose] [--no-follow-symlinks]` | `PathSyncer` with content comparison; `--size-only` compares sizes. `--dry-run` prints `would copy SRC -> DST`/`would remove`/`would mkdir`/`would replace`/`would symlink`; `-v` prints the changes made. |
 
-Subclass one of these with your own `root` fixture to verify a custom
-`Path`/`UriPath` implementation against the shared contract.
+Errors print `uripath: <Type>: <message>` to stderr and return 1; a closed
+stdout returns 141, Ctrl-C 130.
+
+## Testing helpers (`pathlib_next.testing`, needs `pytest`)
+
+- **`FIXTURE_TREE`** — `{"a.txt": "a", "b.py": "b", ".hidden.txt": "hidden",
+  "sub": None, "sub/c.py": "c", "sub/nested": None, "sub/nested/d.py": "d",
+  "empty_dir": None}` (`None` = directory).
+- **`populate_fixture_tree(root) -> root`** — builds `FIXTURE_TREE` under an
+  existing empty directory through the path's own `mkdir()`/`write_text()`
+  (any `Path`, or a stdlib `pathlib.Path`).
+- **`PurePathContract`** — name/suffix/stem, parents, join, `match()`; needs a
+  `root` fixture only.
+- **`ReadPathContract(PurePathContract)`** — exists/types, reads and read
+  modes, `iterdir()`, `stat()`, `glob()`/`rglob()`, `walk()`, with pathlib's
+  exception types. Capability attributes: `supports_listing`,
+  `supports_empty_directories`, `distinguishes_file_types`.
+- **`PathContract(ReadPathContract)`** — `mkdir()`, writes and write/append/
+  exclusive modes, `unlink()`, `rmdir()`, `rm()`, `copy()` (recursive),
+  `move()`, `rename()`, `touch()`. Capability attributes: `supports_rename`,
+  `supports_append`, `supports_exclusive_create`,
+  `enforces_directory_hierarchy`.
+- Both I/O contracts need `root` to be a **fresh, function-scoped** directory
+  populated with `populate_fixture_tree()`; two contract classes must not
+  share one. Capability attributes default to `True`; setting one `False`
+  makes the tests it covers skip. `DIRECTORY_ERRORS = (IsADirectoryError,
+  PermissionError)` and `NOT_EMPTY_ERRNOS = (ENOTEMPTY, EEXIST)` are the
+  accepted platform variants.
+
+```python
+import pytest
+from pathlib_next import LocalPath as MyPath  # your Path subclass
+from pathlib_next.testing import PathContract, populate_fixture_tree
+
+class TestMyPath(PathContract):
+    @pytest.fixture
+    def root(self, tmp_path):
+        return populate_fixture_tree(MyPath(tmp_path))
+```
 
 ## Utilities (`pathlib_next.utils`)
 
-- **`glob.glob(path, *, dironly=False, root_dir=None, recursive=False,
-  include_hidden=False, case_sensitive=None) -> Iterable[path-like]`** — the
-  engine behind `Path.glob()`/`rglob()`; works over anything exposing
-  `iterdir()`/`is_dir()`/`name`/`parents`/`has_glob_pattern()`. The
-  module-level function keeps stdlib `glob`'s default of excluding dotfiles
-  unless `include_hidden=True` (`Path.glob()` includes them).
-  **`glob.parse_pattern(pattern)`** / **`glob.select(...)`** — the
-  parsed-pattern selector `Path.glob()` uses; **`glob.NonRelativePatternError`**.
-  **`glob.full_match(segments, pattern, case_sensitive) -> bool`** —
-  pathlib 3.13 `full_match()` semantics, `"**"` matches zero or more
-  segments, linear in pattern and path length. **`glob.RECURSIVE`** = `"**"`.
+- **`glob`** — `glob.glob(path, *, dironly=False, root_dir=None,
+  recursive=False, include_hidden=False, case_sensitive=None)`: the pattern
+  is itself a path (`UriPath("file:/x/**/*.py")`); like stdlib `glob`, hidden
+  names need `include_hidden=True`. `glob.parse_pattern(pattern) ->
+  (parts, trailing_sep)` (`ValueError`/`NonRelativePatternError`),
+  `glob.select(base, parts, *, dironly=False, recursive=True,
+  include_hidden=True, case_sensitive=None)` (the engine behind
+  `Path.glob()`), `glob.full_match(segments, pattern, case_sensitive)`,
+  `glob.NonRelativePatternError(NotImplementedError, ValueError)`,
+  `glob.RECURSIVE = "**"`.
 - **`sync.PathSyncer(checksum=None, /, remove_missing=False,
   follow_symlinks=True, symlink_mode="preserve", hook=None,
-  ignore_error=False, quick_check=True)`** — one-way checksum-driven tree
-  sync between any two `Path` implementations. `checksum=None` (the
-  default) resolves to a policy that prefers each side's
-  `protocols.checksum.NativeChecksum.checksum()` (no network transfer
-  needed just to decide whether a copy is needed) over streaming, but only
-  trusts a native digest from one side if the OTHER side can also produce a
-  digest under the same algorithm (native or streamed) — otherwise BOTH
-  sides fall back to streaming (`utils.checksum.md5`/`stream`), never a
-  native-vs-streamed comparison under a mismatched algorithm. A
-  caller-supplied `checksum` callable disables this entirely and is invoked
-  exactly as before (once per side, compared with `==`). `quick_check=True`
-  (default) adds a metadata-only pre-check (`st_size` + `st_mtime`, already
-  cached, no extra round trip) for any pair where at least one side is
-  non-local (`Uri.is_local()`/DNS-lookup-failure-safe; a side without
-  `is_local()` at all is treated as local) — both matching skips the
-  checksum call entirely; either differing always falls through to a real
-  checksum (never concludes "changed" from metadata alone). Local-to-local
-  pairs never engage this pre-check regardless of the flag's value.
-  `quick_check=False` disables the pre-check entirely.
-  `.sync(source, target, /, dry_run=False, ignore_error=False)`
-  copies/creates in `target` whatever differs from `source`;
-  `remove_missing=True` also removes `target` entries absent from `source`.
-  `follow_symlinks=True` (default) resolves through a symlink source during
-  traversal exactly like content sync (unchanged). With
-  `follow_symlinks=False`, a symlink source is reported as such and
-  `symlink_mode` decides what happens: `"preserve"` (default) creates a
-  matching symlink on `target` using the exact raw, unresolved target
-  string `readlink()` returned — dangling links and relative targets
-  included, never validated or resolved against `source`'s parent;
-  `"reject"` raises `NotImplementedError` instead (the sole behavior before
-  this kwarg existed). If `target`'s implementation has no `symlink_to()`
-  at all (every backend except `LocalPath` and `SftpPath` — see
-  `docs/divergences.md`), `"preserve"` mode also raises
-  `NotImplementedError`, through the same `ignore_error`/`hook()` flow as
-  every other branch, not a silent skip. Safety checks, each reported
-  through `ignore_error`: a root `source` that does not exist raises
-  `FileNotFoundError` (a child vanishing mid-sync is still removed under
-  `remove_missing`); a `source`/`target` pair of the same implementation and
-  backend where one contains the other raises `ValueError`; a child name that
-  would not stay one component inside `target` (`..`, or `\`/`:` on a
-  Windows target) raises `ValueError`. A listing entry with an unknown stat
-  is re-stat'd, never treated as missing. A symlink found inside `target`
-  (below the root) is replaced by the real entry, never written, listed or
-  deleted through. `hook`/`.log()`/subclassing
-  `.log()` are the progress/logging seams; `SyncEvent` enum names the
-  events fired (`SyncEvent.Symlink` covers symlink creation, replacement,
-  and the not-implemented/error path alike; `SyncEvent.Compare` reports a
-  failure while comparing a file pair; `SyncEvent.Skipped` fires for FIFOs,
-  sockets, devices and entries without a file type, which are never
-  synced). `ignore_error` is asked once per error, with the failing entry's
-  own paths; a changed file is written to a hidden temporary sibling and
-  renamed over the target where the target backend supports `rename()`.
-  **`sync.PathAndStat`** — a `Path` + cached `stat()` (`None` if missing);
-  `is_*` attribute access delegates to the cached stat, returning a
-  false-returning callable when the path doesn't exist.
-- **`stat.FileStat(FileStatLike)`** — `FileStat(st_mode=None, st_size=0,
-  st_mtime=0, is_dir=False)`, slotted, for backends without a real
-  `os.stat_result` (`MemPath`, `HttpPath`, ...). `FileStat.from_stat(stat)`
-  copies recognized fields from any stat-like object (passes an existing
-  `FileStat` through unchanged). `FileStat.from_path(path, *,
-  follow_symlink=True) -> FileStat | None` (`None` on `FileNotFoundError`).
-  `is_dir()`/`is_file()`/etc. are **methods**, not properties — `if
-  st.is_dir` (no parens) is always truthy.
-- **`checksum.md5(path, chunk_size=65536) -> str`** /
-  **`checksum.sha256(path, chunk_size=65536) -> str`** — streaming file
-  checksums over any `Path`. **`checksum.stream(path, algorithm="md5",
-  chunk_size=65536) -> str`** — the generic (runtime `algorithm`) form of
-  the above, used by `PathSyncer`'s streaming fallback. **`checksum.native(
-  path, algorithm="md5") -> str | None`** — tries `path.checksum(algorithm)`
-  (`protocols.checksum.NativeChecksum`); returns `None` (never raises) if
-  `path` doesn't implement the protocol at all, or raises
-  `NotImplementedError` for `algorithm`.
-- **`archive.make_archive(src, format, target)`** (`format` is `"zip"` or
-  `"tar"`) / **`archive.unpack_archive(archive, dest)`** (format
-  auto-detected from `archive.name`, falling back to magic-byte sniffing) —
-  stream-first, so `src`/`target`/`archive`/`dest` can be any `Path`
-  implementation, not just local files. `unpack_archive` skips members that
-  would land outside `dest` (a `..` part, or on a Windows-flavoured `dest` a
-  drive such as `D:x` or `C:..`).
-- **`is_safe_child_name(name, *, windows=False) -> bool`** /
-  **`is_windows_flavoured(path) -> bool`** — whether an untrusted name (a
-  remote listing entry, an archive member) is a single component that stays
-  inside its parent; `windows=True` also rejects `\`, `:` and names that
-  are empty or `.`/`..` after Windows strips trailing dots/spaces.
-- **`LRU(func, maxsize=128)`** — thread-safe memoizing cache wrapping
-  `func`, itself callable; `.invalidate(*args)` evicts and recomputes one
-  entry; `.maxsize` is a settable property that evicts down to the new size.
-- **`notimplemented(method)`** — decorator marking a protocol method;
-  raises `NotImplementedError` naming the method when called. Callers that
-  want a graceful fallback catch `NotImplementedError` (e.g. `move()` falls
-  back to copy+unlink when `rename` isn't implemented).
-- **`sizeof_fmt(num) -> str`** — human-readable byte size (`"1.5K"`, ...).
-  **`parsedate(date) -> float`** — UTC epoch seconds from an HTTP date
-  string (RFC 1123/850/asctime; a zone offset is honoured, no zone means
-  UTC), a `time.struct_time`/`tuple` (UTC unless it carries an offset) or a
-  number (returned as is); unparseable or `None` input returns `0`, not
-  "now".
+  ignore_error=False, quick_check=True)`** — one-way tree sync between any two
+  `Path` implementations.
+  - `.sync(source, target, /, dry_run=False, ignore_error=None)` — `None` uses
+    the constructor policy; a bool or callable overrides it for this call.
+  - `checksum=None`: a native digest when both sides share an algorithm
+    (`NativeChecksum`), else a streamed md5 on both sides; a callable
+    `checksum(entry: PathAndStat)` is compared with `==`.
+  - `quick_check=True`: when either side is non-local (`is_local()`), equal
+    `st_size` and `st_mtime` skip the checksum; `st_mtime == 0` never matches;
+    a mismatch still checksums.
+  - `hook(source: PathAndStat, target: PathAndStat, event: SyncEvent,
+    dry_run: bool)` is called for every event (structural ones included) with
+    the call's `dry_run`.
+  - `ignore_error`: bool or `callable(error, source, target, event) -> bool`,
+    offered once per error; a tolerated error is logged at WARNING on logger
+    `pathlib_next.sync` and reported to `hook` as `SyncEvent.Error`.
+    `.log(msg, *args)` (INFO on the same logger) is overridable.
+  - Safety, all through `ignore_error`: a missing root `source` →
+    `FileNotFoundError`; overlapping `source`/`target` (same implementation
+    and backend) → `ValueError`; a child name that would leave `target`
+    (`..`, or `\`/`:` on a Windows target) → `ValueError`; a symlink inside
+    `target` is replaced, never followed. Listing entries with unknown stats
+    are re-stat'd.
+  - `remove_missing=True` deletes target entries absent from the source. With
+    `False`, a non-empty target directory whose source became a file or link
+    is kept (`IsADirectoryError`, event `TypeMismatch`).
+  - `follow_symlinks=False` + `symlink_mode="preserve"` recreates source links
+    with the raw `readlink()` text (target must implement `symlink_to()`, else
+    `NotImplementedError` through `ignore_error`); `"reject"` raises
+    `NotImplementedError`.
+  - Changed files are written to a hidden temporary sibling and renamed over
+    the target where the target supports `rename()`. FIFOs, sockets and
+    devices are skipped. A dry run makes the same decisions without changes.
+  - **`SyncEvent`** members: `Copy`, `RemovedMissing`, `Synced`,
+    `CreatedDirectory`, `SyncStart`, `TypeMismatch`, `CheckTargetChild`,
+    `CheckTargetChildren`, `SyncChild`, `SyncChildren`, `Symlink`, `Compare`
+    (a comparison failed; only passed to `ignore_error`), `Skipped` (not a
+    file, directory or link), `Error` (an error was tolerated).
+  - **`sync.PathAndStat(path, *, follow_symlink=True)`** — `path` plus cached
+    `stat` (`FileStat | None`); `from_stat(path, stat)`, `exists()`,
+    `refresh(follow_symlink=True)`; `is_*` attributes delegate to the stat
+    (always-`False` callables when missing).
+- **`stat.FileStat(st_mode=None, st_size=0, st_mtime=0, is_dir=False)`** —
+  slotted stat for non-`os` backends. Without `st_mode`, a placeholder
+  (`S_IFREG|0o444` / `S_IFDIR|0o555`) with `mode_known=False`.
+  `from_stat(stat)` (a `FileStat` passes through; `None` fields become 0),
+  `from_path(path, *, follow_symlink=True) -> FileStat | None` (`None` only
+  on `FileNotFoundError`), `settime(value)`, `setmode(value, isdir=None)`,
+  `items()`. `is_dir()`/`is_file()`/... are **methods**.
+- **`checksum`** — `md5(path, chunk_size=65536)`, `sha256(path,
+  chunk_size=65536)`, `stream(path, algorithm="md5", chunk_size=65536)`
+  (streamed through `open("rb")`, `usedforsecurity=False`),
+  `native(path, algorithm="md5") -> str | None` (`None` when the protocol is
+  missing or raises `NotImplementedError`). `md5`/`sha256` are also
+  importable from `pathlib_next.utils`.
+- **`archive`** — `make_archive(src, format, target)` (`format` `"zip"` or
+  `"tar"`, else `ValueError`; `src` file or directory of any `Path`; built in
+  a temporary buffer, written to `target` only when complete; zip64 always)
+  and `unpack_archive(archive, dest)` (format from the name, else magic
+  bytes; creates `dest`; non-seekable streams are buffered; members that
+  would leave `dest` are skipped; tar hard links and links to regular files
+  are extracted as copies, other links skipped with `UserWarning`). Also
+  importable from `pathlib_next.utils`.
+- **`is_safe_child_name(name, *, windows=False) -> bool`** — `False` for a
+  non-`str`, `""`, `.`, `..`, or a name containing `/` or NUL; with
+  `windows=True` also `\`, `:`, and names that are empty or dot-only after
+  trailing dots/spaces are stripped. **`is_windows_flavoured(path) -> bool`**
+  — `True` for a `PureWindowsPath` or a path whose `filepath` is one.
+- **`LRU(func, maxsize=128, on_evict=None)`** — thread-safe memoizing cache,
+  called like `func`. `on_evict(key_tuple, value)` runs for every dropped
+  value (overflow, `maxsize` shrink, `invalidate`/`discard`, a losing
+  concurrent miss), outside the lock, exceptions suppressed. `discard(*args)
+  -> bool`, `invalidate(*args)` (discard + recompute), settable `maxsize`.
+- **`as_mode(mode) -> int`** — `int` passes through; `str` is octal (optional
+  `0o`), any non-octal digit → `ValueError`.
+- **`as_owner(uid, gid) -> (int | None, int | None)`** — `-1` → `None`;
+  `str` names pass through. **`UNCHANGED = None`**.
+- **`as_error_handler(ignore_error, *, default=False) -> callable`** — a
+  callable passes through untouched (arity is the call site's: `rm` `(error,
+  path)`, `copy` `(error)`, `PathSyncer` `(error, source, target, event)`);
+  a bool (or `None` → `default`) becomes a constant-returning callable.
+- **`notimplemented(method)`** — decorator; calling raises
+  `NotImplementedError("Method not implemented: <name>")`.
+- **`sizeof_fmt(num) -> str`** — `1536` → `"1.5K"`.
+- **`parsedate(date) -> float | int`** — UTC epoch seconds from an HTTP date
+  string (zone offset applied, none = UTC), a `struct_time`/tuple (UTC minus
+  any offset), or a number (returned unchanged); `None` or unparseable → `0`.
