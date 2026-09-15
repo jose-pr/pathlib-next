@@ -376,7 +376,9 @@ class SftpPath(UriPath):
             # correctly for a genuinely missing file/parent. True on both
             # backends against a real-world (v3) server.
             if "x" in mode and self.exists():
-                raise FileExistsError(self) from error
+                raise FileExistsError(
+                    _errno.EEXIST, _os.strerror(_errno.EEXIST), str(self)
+                ) from error
             translated = self._file_error(error)
             if translated is None:
                 raise
@@ -389,7 +391,9 @@ class SftpPath(UriPath):
             # Same SFTPv3 status-code gap as _open() above: mkdir on an
             # existing path also comes back as a generic failure.
             if self.exists():
-                raise FileExistsError(self) from error
+                raise FileExistsError(
+                    _errno.EEXIST, _os.strerror(_errno.EEXIST), str(self)
+                ) from error
             raise
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
@@ -692,9 +696,13 @@ class SftpPath(UriPath):
 
         if target.exists():
             if not target.is_dir():
-                raise FileExistsError(target)
+                raise FileExistsError(
+                    _errno.EEXIST, _os.strerror(_errno.EEXIST), str(target)
+                )
             if not overwrite:
-                raise FileExistsError(target)
+                raise FileExistsError(
+                    _errno.EEXIST, _os.strerror(_errno.EEXIST), str(target)
+                )
         else:
             target.mkdir()
 

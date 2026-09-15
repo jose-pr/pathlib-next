@@ -14,6 +14,7 @@ from ..source import _compose_uri
 from .http import (
     _IDENTITY_ENCODING,
     HttpPath,
+    _path_error,
     _response_reader,
     _split_userinfo,
     _translate_http_errors,
@@ -31,22 +32,40 @@ _PROPFIND_BODY = b"""<?xml version="1.0" encoding="utf-8"?>
 </D:propfind>"""
 
 
+def _found_props(elem) -> "list":
+    """The `<D:prop>` elements of every successful `<D:propstat>` of a
+    `<D:response>`. RFC 4918 groups properties into one propstat per status
+    (200 for found, 404 for missing) in no fixed order, so reading only the
+    first one could read the 404 group; a propstat with no status counts."""
+    props = []
+    for propstat in elem.findall("D:propstat", _NS):
+        code = _status_code(propstat.findtext("D:status", namespaces=_NS))
+        prop = propstat.find("D:prop", _NS)
+        if prop is not None and (code is None or 200 <= code < 300):
+            props.append(prop)
+    return props
+
+
+def _find_prop(props, name: str):
+    for prop in props:
+        found = prop.find(name, _NS)
+        if found is not None:
+            return found
+    return None
+
+
 def _parse_response(elem) -> "tuple[str, bool, int, str]":
     href = elem.findtext("D:href", namespaces=_NS) or ""
-    prop = elem.find("D:propstat/D:prop", _NS)
-    resourcetype = prop.find("D:resourcetype", _NS) if prop is not None else None
+    props = _found_props(elem)
+    resourcetype = _find_prop(props, "D:resourcetype")
     is_dir = (
         resourcetype is not None and resourcetype.find("D:collection", _NS) is not None
     )
-    size_text = (
-        prop.findtext("D:getcontentlength", namespaces=_NS)
-        if prop is not None
-        else None
-    )
+    size_elem = _find_prop(props, "D:getcontentlength")
+    size_text = size_elem.text if size_elem is not None else None
     size = int(size_text) if size_text else 0
-    lm = (
-        prop.findtext("D:getlastmodified", namespaces=_NS) if prop is not None else None
-    )
+    lm_elem = _find_prop(props, "D:getlastmodified")
+    lm = lm_elem.text if lm_elem is not None else None
     # Still percent-encoded: decoding before `urlsplit()` would read a
     # literal "#" or "?" in a name as URL syntax.
     return href, is_dir, size, lm
@@ -174,6 +193,9 @@ class DavPath(HttpPath):
             error = statuses.get(resp.status_code)
             if error is not None:
                 resp.close()
+                if isinstance(error, type):
+                    # `(errno, strerror, filename)`, as pathlib raises it.
+                    raise _path_error(error, self)
                 raise error(self)
             if resp.status_code == 207 and method in ("DELETE", "MOVE"):
                 _raise_for_multistatus(resp, self)
@@ -367,8 +389,8 @@ class DavPath(HttpPath):
             headers={"Destination": dest, "Overwrite": "F"},
             statuses={
                 # 409: the destination's parent collection is missing.
-                409: lambda _self: FileNotFoundError(target),
-                412: lambda _self: FileExistsError(target),
+                409: lambda _self: _path_error(FileNotFoundError, target),
+                412: lambda _self: _path_error(FileExistsError, target),
             },
         )
         # pathlib returns the new path.

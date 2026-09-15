@@ -154,6 +154,18 @@ def _reply_code(error: BaseException) -> str:
     return str(error)[:3]
 
 
+def _is_child_entry(name: str, facts: dict) -> bool:
+    """Whether an MLSD entry names a child of the listed directory. The
+    `cdir`/`pdir` entries describe the directory itself and its parent, and
+    may carry any name -- RFC 3659's own example lists `tmp` and `/tmp` --
+    so they are skipped by type, not only as `.`/`..`; a name with a `/` is
+    not a child name either."""
+    kind = str(facts.get("type", "")).lower()
+    return (
+        kind not in ("cdir", "pdir") and name not in ("", ".", "..") and "/" not in name
+    )
+
+
 def _parse_mlsd_time(value: str) -> int:
     # MLSD "modify" fact: YYYYMMDDHHMMSS[.sss], always UTC (RFC 3659) --
     # timegm, not datetime.timestamp(), which reads a naive time as local.
@@ -346,14 +358,15 @@ class FtpPath(UriPath):
         parent = self.path.rsplit("/", 1)[0] or "/"
         try:
             for name, facts in self._call("mlsd", parent):
-                if name == self.name:
+                if name == self.name and _is_child_entry(name, facts):
                     return facts
         except _ftplib.error_perm:
             return None
         return None
 
     def _facts_to_filestat(self, facts: dict) -> FileStat:
-        kind = facts.get("type", "file")
+        # Fact values are case-insensitive (RFC 3659 7.5.1).
+        kind = str(facts.get("type", "file")).lower()
         size = int(facts.get("size", 0) or 0)
         modify = facts.get("modify")
         mtime = _parse_mlsd_time(modify) if modify else 0
@@ -385,8 +398,19 @@ class FtpPath(UriPath):
             listing = [
                 (name, self._facts_to_filestat(facts))
                 for name, facts in self._call("mlsd", self.path)
-                if name not in (".", "..")
+                if _is_child_entry(name, facts)
             ]
+            if (
+                len(listing) == 1
+                and listing[0][0] == self.name
+                and not listing[0][1].is_dir()
+            ):
+                # RFC 3659 has MLSD of a file refused (501), but a server
+                # that lists the file itself instead looks the same as a
+                # directory holding one same-named file: only a stat tells.
+                mismatch = self._not_a_directory(self._fresh_stat())
+                if mismatch is not None:
+                    raise mismatch
         except _ftplib.error_perm as error:
             if _reply_code(error) not in _UNSUPPORTED_REPLIES:
                 # A missing path, a file, or a refused listing.
@@ -398,7 +422,7 @@ class FtpPath(UriPath):
             listing = [
                 (base, None)
                 for base in (name.rsplit("/", 1)[-1] for name in names)
-                if base not in (".", "..")
+                if base and base not in (".", "..")
             ]
             if len(listing) <= 1:
                 # Servers answer NLST of a missing path with an empty list,

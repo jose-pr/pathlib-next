@@ -477,3 +477,56 @@ def test_rename_prefix_directory_falls_back_in_move():
         "dir3/sub/b": b"b",
         "k": b"k",
     }
+
+
+# --- objstore-listing-hides-object-prefix-collision -----------------------------
+
+
+def test_key_that_is_object_and_prefix_lists_as_the_object():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update(
+        {"src/logs": b"FILE-CONTENT", "src/logs/2026.txt": b"child", "src/d/x": b"x"}
+    )
+    listing = dict(_gs("gs://bucket/src", backend)._scandir())
+    assert sorted(listing) == ["d", "logs"]
+    assert not listing["logs"].is_dir()
+    assert listing["logs"].st_size == len(b"FILE-CONTENT")
+    assert listing["d"].is_dir()
+    assert not _gs("gs://bucket/src/logs", backend).stat().is_dir()
+
+
+# --- objstore-gs-az-root-always-exists ------------------------------------------
+
+
+class _MissingBucket(_FakeBucket):
+    def list_blobs(self, prefix="", delimiter=None, **_kwargs):
+        raise _Missing("bucket not found")
+
+
+def test_missing_bucket_root_does_not_exist():
+    backend = _FakeBackend()
+    backend.client_obj.bucket_obj = _MissingBucket()
+    root = _gs("gs://typo-bucket/", backend)
+    with pytest.raises(FileNotFoundError):
+        root.stat()
+    assert not root.exists()
+    assert not root.is_dir()
+
+
+def test_existing_bucket_root_is_a_directory_even_when_empty():
+    backend = _FakeBackend()
+    root = _gs("gs://bucket", backend)
+    assert root.stat().is_dir()
+    assert backend.client_obj.bucket_obj.list_calls == [""]
+
+
+def test_bucket_root_permission_error_is_not_a_directory():
+    class _Forbidding(_FakeBucket):
+        def list_blobs(self, prefix="", delimiter=None, **_kwargs):
+            raise _Forbidden("no list permission")
+
+    backend = _FakeBackend()
+    backend.client_obj.bucket_obj = _Forbidding()
+    with pytest.raises(PermissionError):
+        _gs("gs://bucket/", backend).stat()

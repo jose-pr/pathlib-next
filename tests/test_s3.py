@@ -413,3 +413,42 @@ def test_trailing_slash_mkdir_then_rmdir_moto(moto_s3):
     assert p.is_dir()
     p.rmdir()
     assert _moto_keys(moto_s3) == []
+
+
+# --- objstore-listing-hides-object-prefix-collision -----------------------------
+
+
+def test_key_that_is_object_and_prefix_lists_as_the_object(moto_s3):
+    from pathlib_next.mempath import MemPath
+
+    moto_s3.put_object(Bucket="bkt", Key="src/logs", Body=b"FILE-CONTENT")
+    moto_s3.put_object(Bucket="bkt", Key="src/logs/2026.txt", Body=b"child")
+    moto_s3.put_object(Bucket="bkt", Key="src/other/x.txt", Body=b"x")
+    src = S3Path("s3://bkt/src")
+    listing = dict(src._scandir())
+    assert sorted(listing) == ["logs", "other"]
+    # Agrees with stat()'s exact-object precedence.
+    assert not listing["logs"].is_dir()
+    assert listing["logs"].st_size == len(b"FILE-CONTENT")
+    assert not S3Path("s3://bkt/src/logs").stat().is_dir()
+    dst = MemPath("/dst")
+    src.copy(dst, recursive=True)
+    assert (dst / "logs").read_bytes() == b"FILE-CONTENT"
+    assert (dst / "other" / "x.txt").read_bytes() == b"x"
+
+
+# --- objstore-open-read-returns-writable-buffer (regression) ------------------
+
+
+def test_open_rb_is_read_only_and_rplus_writes_land(moto_s3):
+    import io
+
+    moto_s3.put_object(Bucket="bkt", Key="f.txt", Body=b"F")
+    p = S3Path("s3://bkt/f.txt")
+    with p.open("rb") as f:
+        assert not f.writable()
+        with pytest.raises(io.UnsupportedOperation):
+            f.write(b"zz")
+    with p.open("r+b") as f:
+        f.write(b"N")
+    assert p.read_bytes() == b"N"

@@ -339,9 +339,18 @@ class S3Path(UriPath):
             for page in paginator.paginate(
                 Bucket=self.bucket, Prefix=prefix, Delimiter="/"
             ):
+                # A key that is both an object and a prefix (`x` and `x/y`)
+                # lists as the object, agreeing with stat()'s exact-object
+                # precedence; the subtree under it is not listed. Keys sort
+                # `x` before `x/`, so an earlier page never holds the prefix.
+                objects = {
+                    obj["Key"][len(prefix) :] for obj in page.get("Contents", [])
+                }
                 for common in page.get("CommonPrefixes", []):
                     empty = False
                     name = common["Prefix"][len(prefix) :].rstrip("/")
+                    if name in objects:
+                        continue
                     if name and name not in seen:
                         seen.add(name)
                         yield name, FileStat(is_dir=True)

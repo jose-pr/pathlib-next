@@ -2,18 +2,44 @@ from __future__ import annotations
 
 import contextlib as _contextlib
 import errno as _errno
+import io as _io
 import typing as _ty
 
 import requests as _req
 
 from ... import utils as _utils
-from .. import Source, UriPath
+from .. import Source, UriPath, _same_authority
 from ..source import _compose_host
 
 DEFAULT_TIMEOUT = (10, 60)
 """`(connect, read)` timeout, in seconds, `RepoBackend` sends with every
 request unless the caller supplies `timeout` (`RepoBackend(timeout=...)` or
 per request); `timeout=None` restores requests' unbounded wait."""
+
+
+def _rate_limit_error(response, path_obj) -> "OSError | None":
+    """The EAGAIN `OSError` (a `BlockingIOError`) for a rate-limited reply,
+    else None. Both hosts signal a primary limit with 403 or 429 and a
+    `(X-)RateLimit-Remaining: 0` header, and a secondary limit with 403 or
+    429 and a `Retry-After` header; a bare 429 is a limit too. Checked
+    before the generic mapping, which read a secondary-limit 403 as
+    PermissionError and a 429 as EIO."""
+    if response is None or response.status_code not in (403, 429):
+        return None
+    headers = response.headers
+    remaining = headers.get("X-RateLimit-Remaining", headers.get("RateLimit-Remaining"))
+    retry_after = headers.get("Retry-After")
+    if response.status_code == 403 and remaining != "0" and retry_after is None:
+        return None
+    if retry_after is not None:
+        when = f"retry after {retry_after}s"
+    else:
+        reset = headers.get("X-RateLimit-Reset", headers.get("RateLimit-Reset", "?"))
+        when = f"resets at {reset}"
+    return OSError(
+        _errno.EAGAIN,
+        f"API rate limit exceeded (HTTP {response.status_code}) for {path_obj} ({when})",
+    )
 
 
 @_contextlib.contextmanager
@@ -28,6 +54,9 @@ def _translate_repo_errors(path_obj):
         response = e.response
         status = response.status_code if response is not None else None
         reason = getattr(response, "reason", None) or ""
+        limited = _rate_limit_error(response, path_obj)
+        if limited is not None:
+            raise limited from None
         if status == 404:
             raise FileNotFoundError(path_obj) from None
         elif status in (401, 403):
@@ -174,6 +203,43 @@ class _RepoApiPath(UriPath):
         from ..query import Query
 
         return Query(self.query or "").to_dict(single=True).get("ref") or None
+
+    def _backend_cache(self) -> "dict | None":
+        """The backend's memoization dict, or None for a custom
+        `BaseRepoBackend` that has none (memoization is then skipped)."""
+        cache = getattr(self.backend, "cache", None)
+        return cache if isinstance(cache, dict) else None
+
+    @staticmethod
+    def _check_read_mode(mode: str) -> None:
+        # `open()` hands `_open()` a canonical mode ("r", "r+", "w", ...);
+        # anything but plain "r" would write, and writes are unsupported.
+        if mode.replace("b", "").replace("t", "") != "r":
+            raise NotImplementedError(f"open(mode={mode!r}): read-only scheme")
+
+    @staticmethod
+    def _reader(data: bytes) -> _ty.BinaryIO:
+        # Read-only like a local file opened "rb": a write raises
+        # io.UnsupportedOperation instead of landing in a detached buffer.
+        return _io.BufferedReader(_io.BytesIO(data))
+
+    def with_source(self, source: Source):
+        if source and source.scheme == "git" and "git" not in type(self)._schemes():
+            # `git:` re-dispatches by host; the base implementation would
+            # construct `git:` with no host, which always raised ValueError.
+            from .git._base import GitPath
+
+            provider_cls = GitPath._provider_cls(source)
+            self._check_inherited_backend()
+            same = isinstance(self, provider_cls) and _same_authority(
+                source, self.source
+            )
+            inst = UriPath.__new__(
+                provider_cls, backend=self._backend if same else None
+            )
+            inst._init(source, self.path, self.query, self.fragment)
+            return inst
+        return super().with_source(source)
 
     def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
         # The base implementation always resets query/fragment to "" for a

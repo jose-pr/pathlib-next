@@ -19,26 +19,32 @@ class GitPath(UriPath):
     __slots__ = ()
 
     @staticmethod
-    def _normalize_host(host: str | None) -> str:
-        return (host or "").lower()
+    def _normalize_host(host) -> str:
+        # `str()`: an IP-literal host is an `ipaddress` object, not a str.
+        return str(host or "").lower()
+
+    @classmethod
+    def _provider_cls(cls, source, path="", query="", fragment=""):
+        """The provider class `git:` selects for `source`'s host; ValueError
+        for a host it cannot auto-detect."""
+        host = cls._normalize_host(source.host)
+        if host in ("github.com", "www.github.com"):
+            return GitHubPath
+        if host in ("gitlab.com", "www.gitlab.com"):
+            return GitLabPath
+        # Redacted like the git-hosting schemes: the userinfo can be a
+        # bare token, which `Uri`'s own repr keeps.
+        shown = GitHubPath._format_parsed_parts(
+            source, path, query, fragment, sanitize=True
+        )
+        raise ValueError(
+            f"git: can only auto-detect github.com and gitlab.com; "
+            f"use github:, gitlab:, git+github:, or git+gitlab: for {shown!r}"
+        )
 
     def __new__(cls, *args, **kwargs):
         uri = Uri(*args, **kwargs)
-        host = cls._normalize_host(uri.source.host)
-        if host in ("github.com", "www.github.com"):
-            provider_cls = GitHubPath
-        elif host in ("gitlab.com", "www.gitlab.com"):
-            provider_cls = GitLabPath
-        else:
-            # Redacted like the git-hosting schemes: the userinfo can be a
-            # bare token, which `Uri`'s own repr keeps.
-            shown = GitHubPath._format_parsed_parts(
-                uri.source, uri.path, uri.query, uri.fragment, sanitize=True
-            )
-            raise ValueError(
-                f"git: can only auto-detect github.com and gitlab.com; "
-                f"use github:, gitlab:, git+github:, or git+gitlab: for {shown!r}"
-            )
+        provider_cls = cls._provider_cls(uri.source, uri.path, uri.query, uri.fragment)
         inst = UriPath.__new__(provider_cls, *args, **kwargs)
         inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
         return inst

@@ -341,9 +341,10 @@ def test_listdir_retries_with_trailing_slash_on_404(monkeypatch):
     )
 
     def mock_request(self, method, url, **kwargs):
+        # `url=`: a listing is scoped by the URL that answered it.
         if url.endswith("/"):
-            return _MockHttpResponse(200, listing_html)
-        return _MockHttpResponse(404)
+            return _MockHttpResponse(200, listing_html, url=url)
+        return _MockHttpResponse(404, url=url)
 
     monkeypatch.setattr(requests.Session, "request", mock_request)
 

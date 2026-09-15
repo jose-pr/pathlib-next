@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import shutil
 import sys
 import typing as _ty
@@ -9,7 +11,7 @@ from .. import LocalPath
 from ..utils.sync import PathSyncer, SyncEvent
 
 try:
-    from ..uri import UriPath
+    from ..uri import Source, UriPath
 except ImportError as _error:
     # The `uri` extra is optional: local paths and `-` still work without
     # it, and a URI argument reports what to install (see `_path()`).
@@ -21,17 +23,37 @@ else:
 _CHUNK_SIZE = 1024 * 1024
 
 
+# RFC 3986 scheme, then the colon.
+_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+
+#: Exit status after the reader of stdout went away (128 + SIGPIPE), as a
+#: POSIX tool killed by SIGPIPE reports it; and after Ctrl-C (128 + SIGINT).
+_EXIT_BROKEN_PIPE = 141
+_EXIT_INTERRUPTED = 130
+
+
 def _looks_like_uri(value: str) -> bool:
+    """Whether a command-line argument is a URI rather than a local path.
+    Needs an RFC 3986 scheme prefix; without `://` the scheme must also be
+    one a class registers (`data:`, `zip:`, ...), so POSIX file names such
+    as `12:30.txt` or `notes:draft` stay local paths. `./name` always is."""
+    match = _SCHEME_RE.match(value)
+    if match is None:
+        return False
+    if match.end() == 2:
+        # A drive letter (`C:/x`, `C:x`), not a one-letter scheme.
+        return False
     if "://" in value:
         return True
-    colon = value.find(":")
-    if colon <= 0:
-        return False
-    slash_positions = [pos for pos in (value.find("/"), value.find("\\")) if pos >= 0]
-    first_slash = min(slash_positions) if slash_positions else len(value)
-    if colon > first_slash:
-        return False
-    return not (colon == 1 and value[0].isalpha())
+    if UriPath is None:
+        # Cannot tell which schemes exist; `_path()` names the extra.
+        return True
+    scheme = value[: match.end() - 1].lower()
+    try:
+        return Source(scheme, None, None, None).get_scheme_cls() is not UriPath
+    except Exception:
+        # A scheme plugin that fails to load: `_path()` reports it.
+        return True
 
 
 def _path(value: str):
@@ -49,28 +71,57 @@ def _stdin(stdin):
     return stdin if stdin is not None else sys.stdin.buffer
 
 
+class _StdoutClosed(Exception):
+    """The reader of stdout went away (`uripath read big | head`)."""
+
+
+class _StdoutWriter:
+    """Writes to stdout, turning a BrokenPipeError there -- and only there,
+    not one from a remote connection -- into `_StdoutClosed`."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def write(self, data):
+        try:
+            return self._raw.write(data)
+        except BrokenPipeError as error:
+            raise _StdoutClosed() from error
+
+    def flush(self):
+        try:
+            self._raw.flush()
+        except BrokenPipeError as error:
+            raise _StdoutClosed() from error
+
+
 def _stdout(stdout):
-    return stdout if stdout is not None else sys.stdout.buffer
+    return _StdoutWriter(stdout if stdout is not None else sys.stdout.buffer)
 
 
-def _copy_stream(source: str, target: str, *, stdin=None, stdout=None) -> None:
+def _copy_stream(
+    source: str, target: str, *, stdin=None, stdout=None, exclusive=False
+) -> None:
     """Copy `source` to `target` in chunks; either may be `-` (stdin or
-    stdout). Never holds the whole object in memory."""
+    stdout). Never holds the whole object in memory. `exclusive`: refuse an
+    existing target (FileExistsError), as `cp` without `--overwrite` does."""
     if source == "-":
         reader = _stdin(stdin)
-        _write_stream(reader, target, stdout=stdout)
+        _write_stream(reader, target, stdout=stdout, exclusive=exclusive)
         return
     with _path(source).open("rb") as reader:
-        _write_stream(reader, target, stdout=stdout)
+        _write_stream(reader, target, stdout=stdout, exclusive=exclusive)
 
 
-def _write_stream(reader, target: str, *, stdout=None) -> None:
+def _write_stream(reader, target: str, *, stdout=None, exclusive=False) -> None:
     if target == "-":
         writer = _stdout(stdout)
         shutil.copyfileobj(reader, writer, _CHUNK_SIZE)
         writer.flush()
         return
-    with _path(target).open("wb") as writer:
+    with _path(target).open("xb" if exclusive else "wb") as writer:
         shutil.copyfileobj(reader, writer, _CHUNK_SIZE)
 
 
@@ -104,7 +155,17 @@ def _cmd_rm(args, *, stdin=None, stdout=None) -> int:
 
 def _cmd_cp(args, *, stdin=None, stdout=None) -> int:
     if args.source == "-" or args.target == "-":
-        _copy_stream(args.source, args.target, stdin=stdin, stdout=stdout)
+        if args.recursive:
+            raise ValueError("--recursive cannot copy from or to '-'")
+        # Without --overwrite an existing target is refused, as for a file
+        # source (an exclusive create: no check-then-write race).
+        _copy_stream(
+            args.source,
+            args.target,
+            stdin=stdin,
+            stdout=stdout,
+            exclusive=not args.overwrite,
+        )
         return 0
 
     _path(args.source).copy(
@@ -242,10 +303,27 @@ def main(
     args = parser.parse_args(argv)
     try:
         return args.func(args, stdin=stdin, stdout=stdout)
+    except _StdoutClosed:
+        # Quiet, like a POSIX tool killed by SIGPIPE. The real stdout is
+        # pointed at devnull so the interpreter's exit flush cannot fail too.
+        if stdout is None:
+            _discard_stdout()
+        return _EXIT_BROKEN_PIPE
+    except KeyboardInterrupt:
+        return _EXIT_INTERRUPTED
     except Exception as error:
         stream = stderr if stderr is not None else sys.stderr
         print(f"uripath: {type(error).__name__}: {error}", file=stream)
         return 1
+
+
+def _discard_stdout() -> None:
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 if __name__ == "__main__":

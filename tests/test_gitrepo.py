@@ -417,3 +417,282 @@ def test_github_listing_past_contents_cap_is_complete(github_api_server, fixture
     assert not listing["w1000.txt"].is_dir()
     nested = dict(_github(github_api_server, "sub/nested")._scandir())
     assert nested["wide"].is_dir()
+
+
+# --- gittools-gitlab-wrong-kind-errors ---------------------------------------
+
+
+@pytest.fixture
+def gitlab_empty_listing_server(serve_http):
+    """A GitLab API whose tree endpoint answers an empty 200 for any path
+    that is not a directory (a file or a missing path), as the module's
+    stat() allows for, instead of the conftest fake's 404."""
+    import urllib.parse
+
+    project = "/api/v4/projects/acme%2Fwidgets"
+    files = {"a.txt": b"A", "pkgs/m.py": b"M"}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            split = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(split.query)
+            if split.path == project:
+                return self._json(200, {"default_branch": "main"})
+            if split.path == f"{project}/repository/tree":
+                path = qs.get("path", [""])[0]
+                prefix = f"{path}/" if path else ""
+                names = sorted(
+                    {
+                        name[len(prefix) :].split("/", 1)[0]
+                        for name in files
+                        if name.startswith(prefix)
+                    }
+                )
+                return self._json(
+                    200,
+                    [
+                        {
+                            "name": name,
+                            "type": "blob" if f"{prefix}{name}" in files else "tree",
+                        }
+                        for name in names
+                    ],
+                )
+            files_prefix = f"{project}/repository/files/"
+            if split.path.startswith(files_prefix):
+                rest = split.path[len(files_prefix) :]
+                raw = rest.endswith("/raw")
+                name = urllib.parse.unquote(rest[: -len("/raw")] if raw else rest)
+                if name not in files:
+                    return self._json(404, {"message": "404 File Not Found"})
+                if raw:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(files[name])))
+                    self.end_headers()
+                    self.wfile.write(files[name])
+                    return
+                return self._json(200, {"size": len(files[name])})
+            self._json(404, {})
+
+        def _json(self, status, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    with serve_http(_Handler) as base_url:
+        yield base_url, "acme", "widgets"
+
+
+def test_gitlab_iterdir_on_a_file_with_empty_listing_raises(
+    gitlab_empty_listing_server,
+):
+    with pytest.raises(NotADirectoryError) as excinfo:
+        list(_gitlab(gitlab_empty_listing_server, "a.txt").iterdir())
+    assert excinfo.value.errno == errno.ENOTDIR
+
+
+def test_gitlab_iterdir_on_a_missing_path_with_empty_listing_raises(
+    gitlab_empty_listing_server,
+):
+    with pytest.raises(FileNotFoundError):
+        list(_gitlab(gitlab_empty_listing_server, "typo_dir").iterdir())
+
+
+def test_gitlab_iterdir_of_a_directory_still_lists(gitlab_empty_listing_server):
+    root = _gitlab(gitlab_empty_listing_server)
+    assert sorted(c.name for c in root.iterdir()) == ["a.txt", "pkgs"]
+    pkgs = _gitlab(gitlab_empty_listing_server, "pkgs")
+    assert [c.name for c in pkgs.iterdir()] == ["m.py"]
+
+
+def test_gitlab_open_on_a_directory_raises_is_a_directory(gitlab_api_server):
+    with pytest.raises(IsADirectoryError):
+        _gitlab(gitlab_api_server, "sub").read_bytes()
+
+
+# --- gittools-rate-limit-mapping --------------------------------------------
+
+
+@pytest.fixture
+def rate_limit_server(serve_http):
+    """`/<status>/<header>=<value>/...` answers that status with those
+    headers, for any API path below it."""
+    import urllib.parse
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            parts = urllib.parse.urlsplit(self.path).path.strip("/").split("/")
+            self.send_response(int(parts[0]))
+            for part in parts[1:]:
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    self.send_header(key, value)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    with serve_http(_Handler) as base_url:
+        yield base_url
+
+
+@pytest.mark.parametrize(
+    "api, detail",
+    [
+        ("429/Retry-After=30", "retry after 30s"),
+        ("429/X-RateLimit-Remaining=0/X-RateLimit-Reset=99", "resets at 99"),
+        ("403/Retry-After=60", "retry after 60s"),
+        ("403/X-RateLimit-Remaining=0/X-RateLimit-Reset=7", "resets at 7"),
+        ("429", "resets at ?"),
+    ],
+)
+def test_github_primary_and_secondary_rate_limits_raise_eagain(
+    rate_limit_server, api, detail
+):
+    backend = RepoBackend(api_base=f"{rate_limit_server}/{api}")
+    p = GitHubPath("github://github.com/acme/widgets/a.txt", backend=backend)
+    with pytest.raises(BlockingIOError) as excinfo:
+        p.read_bytes()
+    assert excinfo.value.errno == errno.EAGAIN
+    assert "rate limit" in str(excinfo.value)
+    assert detail in str(excinfo.value)
+
+
+def test_gitlab_429_raises_eagain(rate_limit_server):
+    backend = RepoBackend(
+        api_base=f"{rate_limit_server}/429/RateLimit-Remaining=0/Retry-After=5"
+    )
+    p = GitLabPath("gitlab://gitlab.com/acme/widgets", backend=backend)
+    with pytest.raises(BlockingIOError) as excinfo:
+        p.stat()
+    assert excinfo.value.errno == errno.EAGAIN
+    assert "retry after 5s" in str(excinfo.value)
+
+
+def test_plain_403_is_still_permission_error(rate_limit_server):
+    backend = RepoBackend(api_base=f"{rate_limit_server}/403")
+    p = GitLabPath("gitlab://gitlab.com/acme/widgets", backend=backend)
+    with pytest.raises(PermissionError):
+        p.stat()
+
+
+# --- gittools-gitpath-dispatch-edges ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri", ["git://127.0.0.1/acme/widgets", "git://[::1]/acme/widgets"]
+)
+def test_git_scheme_ip_literal_host_raises_value_error(uri):
+    with pytest.raises(ValueError, match="git\\+github"):
+        UriPath(uri)
+
+
+def test_git_scheme_with_source_keeps_provider_and_backend():
+    from pathlib_next.uri import Source
+
+    backend = RepoBackend(token="t")
+    p = UriPath("git://github.com/acme/widgets/a.txt", backend=backend)
+    same = p.with_source(p.source)
+    assert type(same) is GitHubPath
+    assert same.as_uri() == p.as_uri()
+    assert same.backend is backend
+    moved = p.with_source(Source("git", None, "gitlab.com", None))
+    assert type(moved) is GitLabPath
+    assert moved.as_uri() == "git://gitlab.com/acme/widgets/a.txt"
+    assert moved.backend is not backend
+    with pytest.raises(ValueError):
+        p.with_source(Source("git", None, "git.example", None))
+
+
+# --- gittools-custom-backend-missing-cache --------------------------------
+
+
+def test_gitlab_custom_backend_without_cache_reads(gitlab_api_server, fixture_tree):
+    import requests
+
+    from pathlib_next.uri.schemes._gitrepo import BaseRepoBackend
+
+    base_url, owner, repo = gitlab_api_server
+
+    class _Plain(BaseRepoBackend):
+        # Only `request()`: no `cache`, no `api_base` slot of the base class.
+        def __init__(self):
+            self.api_base = f"{base_url}/api/v4"
+            self.urls = []
+
+        def request(self, method, url, **kwargs):
+            self.urls.append(url)
+            return requests.request(method, url, timeout=10, **kwargs)
+
+    backend = _Plain()
+    p = GitLabPath(f"gitlab://gitlab.com/{owner}/{repo}/a.txt", backend=backend)
+    assert p.read_bytes() == (fixture_tree / "a.txt").read_bytes()
+    assert p.read_bytes() == (fixture_tree / "a.txt").read_bytes()
+    # No memoization without a cache: the default branch is asked each time.
+    assert sum(url.endswith(f"/projects/{owner}%2F{repo}") for url in backend.urls) == 2
+
+
+# --- gittools-ref-query-double-decoded ---------------------------------------
+
+
+def test_ref_with_escaped_ampersand_reaches_the_api_whole():
+    import requests
+
+    from pathlib_next.uri.schemes._gitrepo import BaseRepoBackend
+
+    class _Recording(BaseRepoBackend):
+        def __init__(self):
+            self.params = []
+
+        def request(self, method, url, params=None, **kwargs):
+            self.params.append(params)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = b"branch content"
+            response.headers["Content-Type"] = "application/octet-stream"
+            return response
+
+    backend = _Recording()
+    p = GitHubPath(
+        "github://github.com/acme/widgets/a.txt?ref=feat%26x", backend=backend
+    )
+    assert p.ref == "feat&x"
+    assert p.read_bytes() == b"branch content"
+    assert backend.params == [{"ref": "feat&x"}]
+    assert p.as_uri() == "github://github.com/acme/widgets/a.txt?ref=feat%26x"
+
+
+# --- gittools-open-rplus-silently-writable ---------------------------------
+
+
+@pytest.mark.parametrize("mode", ["r+b", "w", "ab", "x"])
+def test_github_write_modes_raise_not_implemented(github_api_server, mode):
+    with pytest.raises(NotImplementedError):
+        _github(github_api_server, "a.txt").open(mode)
+
+
+@pytest.mark.parametrize("mode", ["r+b", "w", "ab", "x"])
+def test_gitlab_write_modes_raise_not_implemented(gitlab_api_server, mode):
+    with pytest.raises(NotImplementedError):
+        _gitlab(gitlab_api_server, "a.txt").open(mode)
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_read_stream_is_read_only(github_api_server, gitlab_api_server, provider):
+    import io
+
+    if provider == "github":
+        p = _github(github_api_server, "a.txt")
+    else:
+        p = _gitlab(gitlab_api_server, "a.txt")
+    with p.open("rb") as f:
+        assert not f.writable()
+        with pytest.raises(io.UnsupportedOperation):
+            f.write(b"patch")

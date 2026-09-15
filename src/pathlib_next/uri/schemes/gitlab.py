@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno as _errno
-import io as _io
 import itertools as _itertools
 import urllib.parse as _urlparse
 
@@ -114,13 +113,15 @@ class GitLabPath(_RepoApiPath):
         ref = self.ref
         if ref:
             return ref
-        cache = self.backend.cache
+        # A custom `BaseRepoBackend` may have no cache: no memoization then.
+        cache = self._backend_cache()
         key = ("gitlab_default_branch", self._api_base, self._project_id)
-        if key in cache:
+        if cache is not None and key in cache:
             return cache[key]
         resp = self._request("GET", f"{self._api_base}/projects/{self._project_id}")
         branch = resp.json()["default_branch"]
-        cache[key] = branch
+        if cache is not None:
+            cache[key] = branch
         return branch
 
     def _get_file_meta(self, path: str):
@@ -186,6 +187,15 @@ class GitLabPath(_RepoApiPath):
                 ) from None
             raise
         if first is None:
+            # Git has no empty directories, so an empty listing of a
+            # non-root path is a file or a missing path (a server may answer
+            # either with an empty 200): pathlib's iterdir() raises for both.
+            if self.repo_path:
+                self._stat_hint = None
+                if not self.stat().is_dir():
+                    raise NotADirectoryError(
+                        _errno.ENOTDIR, "Not a directory", str(self)
+                    )
             return
         for entry in _itertools.chain((first,), entries):
             is_dir = entry["type"] == "tree"
@@ -196,8 +206,7 @@ class GitLabPath(_RepoApiPath):
             yield name
 
     def _open(self, mode="r", buffering=-1):
-        if "r" not in mode:
-            raise NotImplementedError(f"open(mode={mode!r})")
+        self._check_read_mode(mode)
         path = self.repo_path
         if not path:
             raise IsADirectoryError(self)
@@ -218,4 +227,4 @@ class GitLabPath(_RepoApiPath):
                     _errno.EISDIR, "Is a directory", str(self)
                 ) from None
             raise
-        return _io.BytesIO(resp.content)
+        return self._reader(resp.content)

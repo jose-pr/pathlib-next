@@ -192,7 +192,13 @@ class GsPath(UriPath):
             return hint
         key = self.key
         if key == "":
-            # Root bucket always exists - don't try to reload
+            # The bucket root: ask the server, as s3: does with HeadBucket,
+            # so a mistyped bucket does not read as an existing directory.
+            # A one-item listing (NotFound for a missing bucket) needs only
+            # the object-list permission the rest of the path uses.
+            with _translate_errors(self):
+                for _ in self._bucket.list_blobs(max_results=1):
+                    break
             return FileStat(is_dir=True)
         # Only a not-found reply falls through to the prefix probe: a
         # transient or permission error read as "missing" let copy() replace
@@ -226,9 +232,15 @@ class GsPath(UriPath):
             # pathlib's iterdir() refuses. Only an empty listing pays this.
             if not self.stat().is_dir():
                 raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+        # A key that is both an object and a prefix (`x` and `x/y`) lists as
+        # the object, agreeing with stat()'s exact-object precedence; the
+        # subtree under it is not listed.
+        objects = {blob.name[len(prefix) :] for blob in blobs}
         # Common prefixes (directories)
         for common_prefix in prefixes:
             name = common_prefix[len(prefix) :].rstrip("/")
+            if name in objects:
+                continue
             if name and name not in seen:
                 seen.add(name)
                 yield name, FileStat(is_dir=True)

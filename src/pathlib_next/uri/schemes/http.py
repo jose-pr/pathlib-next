@@ -54,8 +54,28 @@ def _split_userinfo(url: str) -> "tuple[str, tuple[str, str] | None]":
     return url[:start] + hostport + url[end:], (auth if any(auth) else None)
 
 
+_ERRNOS = {
+    FileNotFoundError: _errno.ENOENT,
+    PermissionError: _errno.EACCES,
+    FileExistsError: _errno.EEXIST,
+    IsADirectoryError: _errno.EISDIR,
+    NotADirectoryError: _errno.ENOTDIR,
+}
+
+
+def _path_error(error_cls, path_obj) -> OSError:
+    """`error_cls` built as pathlib builds it -- `(errno, strerror,
+    filename)` -- so `e.errno` and `e.filename` are set."""
+    code = _ERRNOS.get(error_cls, _errno.EIO)
+    return error_cls(code, _os.strerror(code), str(path_obj))
+
+
 @_contextlib.contextmanager
-def _translate_http_errors(path_obj):
+def _translate_http_errors(path_obj, *, conflict=FileExistsError):
+    """Map a failed request to a pathlib exception for `path_obj`.
+    `conflict` is what a 409 means: for a write (PUT, MKCOL, MOVE) RFC 4918
+    uses 409 for a missing parent collection, so writers pass
+    FileNotFoundError."""
     # `from None`: a requests exception can carry a URL (a proxy URL from
     # the environment included) with credentials in it, and a chained cause
     # is printed by every formatted traceback and `logging.exception`. The
@@ -66,15 +86,17 @@ def _translate_http_errors(path_obj):
         response = e.response
         status = response.status_code if response is not None else None
         reason = getattr(response, "reason", None) or ""
-        if status == 404:
-            raise FileNotFoundError(path_obj) from None
+        if status in (404, 410):
+            raise _path_error(FileNotFoundError, path_obj) from None
         elif status in (401, 403):
-            raise PermissionError(path_obj) from None
+            raise _path_error(PermissionError, path_obj) from None
         elif status == 409:
-            raise FileExistsError(path_obj) from None
+            raise _path_error(conflict, path_obj) from None
         elif status in (405, 501):
             raise PermissionError(
-                f"Method not allowed for {path_obj} (HTTP {status})"
+                _errno.EACCES,
+                f"Method not allowed (HTTP {status})",
+                str(path_obj),
             ) from None
         else:
             raise OSError(
@@ -146,10 +168,44 @@ def _aherf2filename(a_href):
     return _urlparse.unquote(path.rstrip("/")).rsplit("/", 1)[-1] + isdir
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+# A listing is parsed only from an HTML reply (or one with no Content-Type).
+_LISTING_TYPES = ("text/html", "application/xhtml+xml")
+
+
+def _origin(split: _urlparse.SplitResult) -> "tuple[str, str, int | None]":
+    scheme = split.scheme.lower()
+    try:
+        port = split.port
+    except ValueError:
+        port = -1
+    return scheme, (split.hostname or ""), port or _DEFAULT_PORTS.get(scheme)
+
+
 class _DirectoryListingParser(_html_parser.HTMLParser):
-    def __init__(self):
+    """Scrapes an HTML directory index into `_FileEntry`s.
+
+    `base_url` is the URL the listing was fetched from (after redirects).
+    When given, an entry is kept only if its href, resolved against that URL
+    as a browser resolves it, names a direct child of the listed directory
+    on the same origin -- so a page's links elsewhere, and a reverse proxy
+    whose `<title>` names a different path than the request, are handled.
+    Without it, absolute hrefs are scoped by the "Index of ..." title."""
+
+    def __init__(self, base_url: "str | None" = None):
         super().__init__()
         self.listing = []
+        self.base_url = base_url
+        self._base_origin = None
+        self._base_segments = None
+        if base_url:
+            split = _urlparse.urlsplit(base_url)
+            self._base_origin = _origin(split)
+            self._base_segments = [
+                _urlparse.unquote(segment)
+                for segment in split.path.rstrip("/").split("/")
+            ]
 
         self.in_title = False
         self.in_pre = False
@@ -245,7 +301,24 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
         if self.in_a:
             self.current_a_text.append(data)
 
+    def _is_child_href(self, href) -> bool:
+        """Whether `href`, resolved against `base_url`, is a direct child of
+        the listed directory on the same scheme, host and port."""
+        split = _urlparse.urlsplit(_urlparse.urljoin(self.base_url, href))
+        if _origin(split) != self._base_origin:
+            return False
+        segments = [
+            _urlparse.unquote(segment) for segment in split.path.rstrip("/").split("/")
+        ]
+        base = self._base_segments
+        return (
+            len(segments) == len(base) + 1
+            and segments[:-1] == base
+            and segments[-1] != ""
+        )
+
     def _is_ancestor_href(self, href):
+        # With a `base_url`, anything but a direct child is skipped.
         # An absolute href is normally the "up a level" link -- Apache/
         # nginx don't always render it as "../" (e.g. "/files/" from
         # "/files/sub/"), and `_aherf2filename()` only looks at the href's
@@ -257,6 +330,8 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
         # listing. Scope the filter to hrefs outside the current listing's
         # own path instead (falls back to the old blanket behavior if the
         # listing had no parseable "Index of ..." <title>).
+        if self.base_url:
+            return not self._is_child_href(href)
         if not href.startswith("/"):
             return False
         if not self.cwd:
@@ -372,6 +447,8 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
                             continue
                         name_val = cell_text.strip()
                         if name_val == "Parent Directory" or cell_href == "../":
+                            break
+                        if self.base_url and not self._is_child_href(cell_href):
                             break
                         file_name = _aherf2filename(cell_href)
                         status = 1
@@ -530,7 +607,7 @@ class HttpWriteStream(_io.BytesIO):
             return
         data = self.getvalue()
         try:
-            with _translate_http_errors(self._path):
+            with _translate_http_errors(self._path, conflict=FileNotFoundError):
                 resp = self._path.backend.request(
                     self._path.backend.write_method,
                     self._path.as_uri(),
@@ -572,7 +649,7 @@ class HttpAppendStream(_io.BytesIO):
             return
         try:
             if self._path.backend.append_mode == "rewrite":
-                with _translate_http_errors(self._path):
+                with _translate_http_errors(self._path, conflict=FileNotFoundError):
                     data = self.getvalue()
                     resp = self._path.backend.request(
                         self._path.backend.write_method,
@@ -582,7 +659,7 @@ class HttpAppendStream(_io.BytesIO):
                     resp.raise_for_status()
             else:
                 # "patch" mode: send only new content via Content-Range
-                with _translate_http_errors(self._path):
+                with _translate_http_errors(self._path, conflict=FileNotFoundError):
                     new_data = self.getvalue()
                     if not new_data:
                         # `bytes N-(N-1)/*` is not a valid range: there is
@@ -666,19 +743,37 @@ class HttpPath(UriPath):
         # works with a single request. This retry only helps a
         # non-redirecting server/proxy that 404s the slash-less path.
         try:
-            with _translate_http_errors(self):
-                req = self.backend.request("GET", self)
-                req.raise_for_status()
+            req = self._get_listing(self)
         except FileNotFoundError:
             if self.path.endswith("/"):
                 raise
-            with _translate_http_errors(self):
-                req = self.backend.request("GET", self.with_path(self.path + "/"))
-                req.raise_for_status()
-        parser = _DirectoryListingParser()
-        parser.feed(req.text)
+            req = self._get_listing(self.with_path(self.path + "/"))
+        try:
+            content_type = req.headers.get("Content-Type") or ""
+            mime = content_type.split(";", 1)[0].strip().lower()
+            if mime and mime not in _LISTING_TYPES:
+                # A file: pathlib's iterdir() raises, and its body -- maybe
+                # gigabytes -- is never downloaded to look for links.
+                raise _path_error(NotADirectoryError, self)
+            text = req.text
+        finally:
+            req.close()
+        # Scoped by the URL actually answered (after redirects), not by the
+        # page's own <title>.
+        parser = _DirectoryListingParser(base_url=getattr(req, "url", None))
+        parser.feed(text)
         parser.close()
         return parser.listing
+
+    def _get_listing(self, uri) -> _req.Response:
+        with _translate_http_errors(self):
+            req = self.backend.request("GET", uri, stream=True)
+            try:
+                req.raise_for_status()
+            except BaseException:
+                req.close()
+                raise
+        return req
 
     def _scandir(self):
         # `_listdir()`'s single GET already carries type/size/mtime for

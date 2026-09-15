@@ -19,6 +19,8 @@ _SEP = "!/"
 _SCHEME_RE = _re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 _MEMBER_SEP_RE = _re.compile(r"[/\\]")
 _DRIVE_RE = _re.compile(r"^[a-zA-Z]:")
+# Every scheme an `ArchiveUri` class registers (see `archive/__init__.py`).
+_ARCHIVE_SCHEMES = ("zip", "tar", "archive", "archive+zip", "archive+tar")
 
 
 def _is_safe_member_name(name: str) -> bool:
@@ -37,13 +39,37 @@ def _is_safe_member_name(name: str) -> bool:
     )
 
 
+def _nesting_depth(archive_uri: str) -> int:
+    """How many archive schemes `archive_uri` starts with: 1 for the
+    `zip:file:///outer.zip!/inner.zip` of a nested archive, 0 otherwise."""
+    depth = 0
+    match = _SCHEME_RE.match(archive_uri)
+    while match and archive_uri[: match.end() - 1].lower() in _ARCHIVE_SCHEMES:
+        depth += 1
+        archive_uri = archive_uri[match.end() :]
+        match = _SCHEME_RE.match(archive_uri)
+    return depth
+
+
 def _split_archive_path(path: str) -> "tuple[str, str]":
     """Split `<archive-uri>!/<inner-path>` (Java-style separator, as used
     for JAR URLs / NIO ZipFileSystem) into its two halves. No separator (or
-    a bare trailing "!") means the archive root."""
-    if _SEP in path:
-        archive, inner = path.split(_SEP, 1)
-    elif path.endswith("!"):
+    a bare trailing "!") means the archive root.
+
+    A nested archive's `<archive-uri>` is itself an archive URI with a
+    separator of its own (`zip:file:///outer.zip!/inner.zip!/x.txt`): each
+    leading archive scheme consumes one separator, and the split is at the
+    next one. A member name containing `!/` is written `%21/`."""
+    start = 0
+    for _ in range(_nesting_depth(path)):
+        index = path.find(_SEP, start)
+        if index < 0:
+            break
+        start = index + len(_SEP)
+    index = path.find(_SEP, start)
+    if index >= 0:
+        archive, inner = path[:index], path[index + len(_SEP) :]
+    elif path.endswith("!") and len(path) - 1 >= start:
         archive, inner = path[:-1], ""
     else:
         archive, inner = path, ""
@@ -327,9 +353,16 @@ class ArchiveUri(UriPath):
             return super().as_uri(sanitize=sanitize)
         # Encoded so the string parses back to the same member: the inner
         # path's `%`, `?` and `#`, and a literal "!/" inside the outer URI.
-        outer_uri = self.backend.outer.as_uri(sanitize=sanitize)
-        outer_uri = outer_uri.replace(_SEP, "%21/")
+        outer = self.backend.outer
+        outer_uri = outer.as_uri(sanitize=sanitize)
+        if not isinstance(outer, ArchiveUri):
+            # A nested archive's outer keeps its own separator (it already
+            # encodes any other "!/"); see `_split_archive_path`.
+            outer_uri = outer_uri.replace(_SEP, "%21/")
         inner = _uritools.uriencode(self.path, _SAFE_PATH).decode()
+        # A "!/" inside a member name must never read as a separator once
+        # this URI is itself the outer of a nested archive.
+        inner = inner.replace(_SEP, "%21/")
         tail = self._format_parsed_parts(
             Source(None, None, None, None), "", self.query, self.fragment
         )

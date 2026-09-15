@@ -262,7 +262,19 @@ class AzPath(UriPath):
             return hint
         key = self.key
         if key == "":
-            # Root is always a container, which always exists
+            # A container root (or `az://account`, which holds containers):
+            # ask the server, as s3: does with HeadBucket, so a mistyped
+            # name does not read as an existing directory. A one-item
+            # listing needs only the permission the rest of the path uses.
+            with _translate_errors(self):
+                if self.container:
+                    listing = self._container.list_blobs(
+                        name_starts_with="", results_per_page=1
+                    )
+                else:
+                    listing = self._client.list_containers(results_per_page=1)
+                for _ in listing:
+                    break
             return FileStat(is_dir=True)
         # Only a not-found reply falls through to the prefix probe: a
         # transient or permission error read as "missing" let copy() replace

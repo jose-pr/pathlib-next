@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64 as _base64
 import errno as _errno
-import io as _io
 import urllib.parse as _urlparse
 
 from ...utils.stat import FileStat
@@ -66,15 +65,8 @@ class GitHubPath(_RepoApiPath):
                 params=self._params() if params is None else params,
                 headers=headers,
             )
-            if (
-                resp.status_code == 403
-                and resp.headers.get("X-RateLimit-Remaining") == "0"
-            ):
-                reset = resp.headers.get("X-RateLimit-Reset", "?")
-                raise OSError(
-                    _errno.EAGAIN,
-                    f"GitHub API rate limit exceeded for {self} (resets at {reset})",
-                )
+            # A rate-limited reply (403/429) becomes EAGAIN in
+            # `_translate_repo_errors`.
             resp.raise_for_status()
         return resp
 
@@ -108,12 +100,14 @@ class GitHubPath(_RepoApiPath):
         raise FileNotFoundError(self)
 
     def _default_branch(self) -> str:
-        cache = getattr(self.backend, "cache", {})
+        cache = self._backend_cache()
         key = ("github_default_branch", self._repo_url)
-        if key not in cache:
-            data = self._request(url=self._repo_url, params={}).json()
-            cache[key] = data["default_branch"]
-        return cache[key]
+        if cache is not None and key in cache:
+            return cache[key]
+        branch = self._request(url=self._repo_url, params={}).json()["default_branch"]
+        if cache is not None:
+            cache[key] = branch
+        return branch
 
     def _tree_entries(self, sha: str) -> "list[dict]":
         url = f"{self._repo_url}/git/trees/{_urlparse.quote(sha)}"
@@ -145,8 +139,7 @@ class GitHubPath(_RepoApiPath):
             yield name
 
     def _open(self, mode="r", buffering=-1):
-        if "r" not in mode:
-            raise NotImplementedError(f"open(mode={mode!r})")
+        self._check_read_mode(mode)
         resp = self._request(headers={"Accept": self._RAW_ACCEPT})
         content_type = resp.headers.get("Content-Type", "")
         if content_type.startswith("application/json"):
@@ -156,6 +149,6 @@ class GitHubPath(_RepoApiPath):
             if isinstance(data, list):
                 raise IsADirectoryError(self)
             if data.get("encoding") == "base64" and data.get("content") is not None:
-                return _io.BytesIO(_base64.b64decode(data["content"]))
+                return self._reader(_base64.b64decode(data["content"]))
             raise OSError(_errno.EIO, f"Unsupported content response for {self}")
-        return _io.BytesIO(resp.content)
+        return self._reader(resp.content)

@@ -159,27 +159,63 @@ def _run(coro, timeout: "float | None" = _UNSET_TIMEOUT):
 # handler actually fires instead of an unrelated SFTPError propagating.
 
 
-def _translate(error: "_asyncssh.SFTPError") -> Exception:
+def _translate(
+    error: "_asyncssh.SFTPError",
+    filename: "str | None" = None,
+    filename2: "str | None" = None,
+) -> Exception:
+    """The pathlib exception for an asyncssh `SFTPError`, built as pathlib
+    builds it -- `(errno, strerror, filename[, filename2])` -- so `errno`
+    and `filename` are set, as they are on the paramiko backend."""
     if isinstance(error, (_asyncssh.SFTPNoSuchFile, _asyncssh.SFTPNoSuchPath)):
-        return FileNotFoundError(str(error))
-    if isinstance(error, _asyncssh.SFTPFileAlreadyExists):
-        return FileExistsError(str(error))
-    if isinstance(error, _asyncssh.SFTPDirNotEmpty):
-        return OSError(_errno.ENOTEMPTY, str(error))
-    if isinstance(error, _asyncssh.SFTPPermissionDenied):
-        return PermissionError(str(error))
-    if isinstance(error, _asyncssh.SFTPOpUnsupported):
+        cls, code = FileNotFoundError, _errno.ENOENT
+    elif isinstance(error, _asyncssh.SFTPFileAlreadyExists):
+        cls, code = FileExistsError, _errno.EEXIST
+    elif isinstance(error, _asyncssh.SFTPDirNotEmpty):
+        cls, code = OSError, _errno.ENOTEMPTY
+    elif isinstance(error, _asyncssh.SFTPPermissionDenied):
+        cls, code = PermissionError, _errno.EACCES
+    elif isinstance(error, _asyncssh.SFTPOpUnsupported):
         return NotImplementedError(str(error))
-    return OSError(str(error))
+    else:
+        # A bare SFTPv3 failure has no errno, as on the paramiko backend:
+        # `SftpPath` reads `errno is None` as "consult the entry itself".
+        if filename is None:
+            return OSError(str(error))
+        return OSError(None, str(error), filename, None, filename2)
+    strerror = str(error) or _os.strerror(code)
+    if filename is None:
+        return cls(code, strerror)
+    if filename2 is None:
+        return cls(code, strerror, filename)
+    return cls(code, strerror, filename, None, filename2)
+
+
+def _path_error(cls, code: int, path) -> OSError:
+    return cls(code, _os.strerror(code), str(path))
+
+
+#: `_SyncSftpClient` methods whose second path argument is `filename2`.
+_TWO_PATH_METHODS = frozenset({"rename", "posix_rename", "symlink", "link"})
 
 
 def _reraise_sftp_errors(fn):
+    two_paths = fn.__name__ in _TWO_PATH_METHODS
+
     @_functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         except _asyncssh.SFTPError as error:
-            raise _translate(error) from error
+            # `(self, path, ...)` for a client method; a file method's
+            # arguments (a size, a buffer) name no path.
+            filename = args[1] if len(args) > 1 and isinstance(args[1], str) else None
+            filename2 = (
+                args[2]
+                if two_paths and len(args) > 2 and isinstance(args[2], str)
+                else None
+            )
+            raise _translate(error, filename, filename2) from error
 
     return wrapper
 
@@ -768,16 +804,16 @@ async def _concurrent_copy(
     if aclient is None:
         aclient = path._sftpclient._aclient
 
-    async def sftp_call(make_awaitable):
+    async def sftp_call(make_awaitable, filename=None):
         async with semaphore:
             try:
                 return await make_awaitable()
             except _asyncssh.SFTPError as error:
-                raise _translate(error) from error
+                raise _translate(error, filename) from error
 
     async def stat_path(current):
         stat_coro = aclient.stat if follow_symlinks else aclient.lstat
-        attrs = await sftp_call(lambda: stat_coro(current.path))
+        attrs = await sftp_call(lambda: stat_coro(current.path), current.path)
         return FileStat.from_stat(_StatAdapter(attrs))
 
     async def exists_stat(current):
@@ -787,7 +823,7 @@ async def _concurrent_copy(
             return None
 
     async def read_dir(current):
-        names = await sftp_call(lambda: aclient.readdir(current.path))
+        names = await sftp_call(lambda: aclient.readdir(current.path), current.path)
         return [
             current
             / (
@@ -800,37 +836,47 @@ async def _concurrent_copy(
         ]
 
     async def mkdir(current):
-        await sftp_call(lambda: aclient.mkdir(current.path, _asyncssh.SFTPAttrs()))
+        await sftp_call(
+            lambda: aclient.mkdir(current.path, _asyncssh.SFTPAttrs()), current.path
+        )
 
     async def unlink(current):
-        await sftp_call(lambda: aclient.remove(current.path))
+        await sftp_call(lambda: aclient.remove(current.path), current.path)
 
     async def chmod(current, mode):
-        await sftp_call(lambda: aclient.chmod(current.path, mode))
+        await sftp_call(lambda: aclient.chmod(current.path, mode), current.path)
 
     async def copy_file(src, dst):
         existing = await exists_stat(dst)
         if existing is not None:
             if existing.is_dir():
-                raise IsADirectoryError(dst)
+                raise _path_error(IsADirectoryError, _errno.EISDIR, dst)
             if not overwrite:
-                raise FileExistsError(dst)
+                raise _path_error(FileExistsError, _errno.EEXIST, dst)
             await unlink(dst)
 
         async with file_semaphore:
-            src_file = await sftp_call(lambda: _aopen(aclient, src.path, "rb"))
+            src_file = await sftp_call(
+                lambda: _aopen(aclient, src.path, "rb"), src.path
+            )
             try:
-                dst_file = await sftp_call(lambda: _aopen(aclient, dst.path, "wb"))
+                dst_file = await sftp_call(
+                    lambda: _aopen(aclient, dst.path, "wb"), dst.path
+                )
                 try:
                     while True:
-                        chunk = await sftp_call(lambda: src_file.read(1024 * 1024))
+                        chunk = await sftp_call(
+                            lambda: src_file.read(1024 * 1024), src.path
+                        )
                         if not chunk:
                             break
-                        await sftp_call(lambda chunk=chunk: dst_file.write(chunk))
+                        await sftp_call(
+                            lambda chunk=chunk: dst_file.write(chunk), dst.path
+                        )
                 finally:
-                    await sftp_call(lambda: dst_file.close())
+                    await sftp_call(lambda: dst_file.close(), dst.path)
             finally:
-                await sftp_call(lambda: src_file.close())
+                await sftp_call(lambda: src_file.close(), src.path)
 
     async def copy_with_sync_fallback(src, dst):
         async with semaphore:
@@ -854,9 +900,9 @@ async def _concurrent_copy(
             existing = await exists_stat(dst)
             if existing is not None:
                 if not existing.is_dir():
-                    raise FileExistsError(dst)
+                    raise _path_error(FileExistsError, _errno.EEXIST, dst)
                 if not overwrite:
-                    raise FileExistsError(dst)
+                    raise _path_error(FileExistsError, _errno.EEXIST, dst)
             else:
                 await mkdir(dst)
 
@@ -935,19 +981,19 @@ async def _concurrent_rm(
             return False
         return bool(await _asyncio.to_thread(on_error, error, current))
 
-    async def sftp_call(make_awaitable):
+    async def sftp_call(make_awaitable, filename=None):
         async with semaphore:
             try:
                 return await make_awaitable()
             except _asyncssh.SFTPError as error:
-                raise _translate(error) from error
+                raise _translate(error, filename) from error
 
     async def stat_path(current):
-        attrs = await sftp_call(lambda: aclient.lstat(current.path))
+        attrs = await sftp_call(lambda: aclient.lstat(current.path), current.path)
         return FileStat.from_stat(_StatAdapter(attrs))
 
     async def read_dir(current):
-        names = await sftp_call(lambda: aclient.readdir(current.path))
+        names = await sftp_call(lambda: aclient.readdir(current.path), current.path)
         return [
             current
             / (
@@ -960,10 +1006,10 @@ async def _concurrent_rm(
         ]
 
     async def remove_file(current):
-        await sftp_call(lambda: aclient.remove(current.path))
+        await sftp_call(lambda: aclient.remove(current.path), current.path)
 
     async def remove_dir(current):
-        await sftp_call(lambda: aclient.rmdir(current.path))
+        await sftp_call(lambda: aclient.rmdir(current.path), current.path)
 
     async def wait_fail_fast(tasks):
         pending = set(tasks)

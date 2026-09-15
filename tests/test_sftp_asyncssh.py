@@ -982,3 +982,79 @@ def test_concurrent_copy_symlink_child_uses_sync_fallback_real_server(asyncssh_t
     assert (root / "linked_copy" / "link.py").readlink().path == "/sub/c.py"
     assert copied.read_bytes() == b"c"
     assert (local / "linked_copy" / "nested" / "d.py").read_bytes() == b"d"
+
+
+# --- sftp-translate-drops-errno-filename -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error, expected_type, code",
+    [
+        (asyncssh.SFTPNoSuchFile("No such file"), FileNotFoundError, "ENOENT"),
+        (asyncssh.SFTPNoSuchPath("No such path"), FileNotFoundError, "ENOENT"),
+        (asyncssh.SFTPFileAlreadyExists("exists"), FileExistsError, "EEXIST"),
+        (asyncssh.SFTPPermissionDenied("denied"), PermissionError, "EACCES"),
+        (asyncssh.SFTPDirNotEmpty("not empty"), OSError, "ENOTEMPTY"),
+    ],
+)
+def test_translate_sets_errno_and_filename(error, expected_type, code):
+    import errno
+
+    result = backend_mod._translate(error, "/srv/a.txt")
+    assert type(result) is expected_type
+    assert result.errno == getattr(errno, code)
+    assert result.filename == "/srv/a.txt"
+    assert result.strerror == str(error)
+
+
+def test_translate_bare_failure_keeps_errno_unset_but_names_the_path():
+    # SFTPv3 has no ENOTEMPTY/EISDIR status: `SftpPath` reads a missing
+    # errno as "consult the entry", exactly as on the paramiko backend.
+    result = backend_mod._translate(asyncssh.SFTPFailure("failure"), "/srv/d")
+    assert type(result) is OSError
+    assert result.errno is None
+    assert result.filename == "/srv/d"
+    assert result.strerror == "failure"
+    assert "/srv/d" in str(result)
+    assert backend_mod._translate(asyncssh.SFTPFailure("failure")).errno is None
+
+
+def test_client_method_errors_name_their_paths():
+    class _AClient:
+        async def stat(self, path):
+            raise asyncssh.SFTPNoSuchFile("No such file")
+
+        async def rename(self, old, new):
+            raise asyncssh.SFTPPermissionDenied("denied")
+
+    import errno
+
+    client = backend_mod._SyncSftpClient(_AClient())
+    with pytest.raises(FileNotFoundError) as missing:
+        client.stat("/srv/missing.txt")
+    assert missing.value.errno == errno.ENOENT
+    assert missing.value.filename == "/srv/missing.txt"
+    with pytest.raises(PermissionError) as denied:
+        client.rename("/srv/a", "/srv/b")
+    assert (denied.value.filename, denied.value.filename2) == ("/srv/a", "/srv/b")
+
+
+def test_asyncssh_backend_errors_carry_errno_and_filename(sftp_server):
+    import errno
+
+    from pathlib_next.uri.schemes.sftp import SftpPath
+    from pathlib_next.uri.schemes.sftp._asyncssh import AsyncsshSftpBackend
+
+    backend = AsyncsshSftpBackend()
+    root = SftpPath(sftp_server, backend=backend)
+    try:
+        with pytest.raises(FileNotFoundError) as missing:
+            (root / "missing.txt").read_bytes()
+        assert missing.value.errno == errno.ENOENT
+        assert missing.value.filename == (root / "missing.txt").path
+        with pytest.raises(FileExistsError) as exists:
+            (root / "sub").mkdir()
+        assert exists.value.errno == errno.EEXIST
+        assert exists.value.filename == str(root / "sub")
+    finally:
+        backend_mod._CACHE.invalidate((backend, root.source))

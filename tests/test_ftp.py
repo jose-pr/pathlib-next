@@ -388,3 +388,59 @@ def test_rename_str_destination_is_a_literal_path(name):
     p = _ftp("ftp://host/mnt/a.txt", backend=backend)
     p.rename(name)
     assert backend._client.rename_calls == [("/mnt/a.txt", f"/mnt/{name}")]
+
+
+# --- listing yields only children -------------------------------------------
+# RFC 3659's own MLSD example names its cdir entries (`tmp`, `/tmp`); a
+# listing filtered on "."/".." alone yielded them as children, which the
+# type fact marked as directories to descend into.
+
+
+def test_mlsd_named_cdir_and_pdir_entries_are_not_children():
+    backend = _FakeBackend()
+    backend._client.mlsd_data["/tmp"] = [
+        ("tmp", {"type": "cdir"}),
+        ("/tmp", {"type": "CDir"}),
+        ("pub", {"type": "pdir"}),
+        ("capmux.tar.z", {"type": "file", "size": "1"}),
+        ("sub", {"type": "Dir"}),
+    ]
+    listing = dict(_ftp("ftp://host/tmp", backend=backend)._scandir())
+    assert sorted(listing) == ["capmux.tar.z", "sub"]
+    assert listing["sub"].is_dir()
+    assert not listing["capmux.tar.z"].is_dir()
+
+
+def test_stat_ignores_a_cdir_entry_named_like_the_child():
+    # Listing "/tmp" to stat "/tmp/tmp" must not find the cdir entry "tmp".
+    backend = _FakeBackend()
+    backend._client.mlsd_data["/tmp"] = [("tmp", {"type": "cdir"})]
+    with pytest.raises(FileNotFoundError):
+        _ftp("ftp://host/tmp/tmp", backend=backend).stat()
+
+
+def test_iterdir_on_a_file_via_nlst_raises_not_a_directory():
+    # NLST of a file answers with the file itself.
+    backend = _FakeBackend()
+    backend._client.mlsd_unsupported = True
+    backend._client.nlst_data["/d/f.txt"] = ["/d/f.txt"]
+    backend._client.size_data["/d/f.txt"] = 5
+    with pytest.raises(NotADirectoryError):
+        list(_ftp("ftp://host/d/f.txt", backend=backend).iterdir())
+
+
+def test_iterdir_on_a_file_whose_mlsd_lists_itself_raises_not_a_directory():
+    backend = _FakeBackend()
+    backend._client.mlsd_data["/d/f.txt"] = [("f.txt", {"type": "file"})]
+    backend._client.mlsd_data["/d"] = [("f.txt", {"type": "file", "size": "5"})]
+    with pytest.raises(NotADirectoryError):
+        list(_ftp("ftp://host/d/f.txt", backend=backend).iterdir())
+
+
+def test_directory_holding_one_same_named_file_still_lists():
+    backend = _FakeBackend()
+    backend._client.mlsd_data["/d/x"] = [("x", {"type": "file"})]
+    backend._client.mlsd_data["/d"] = [("x", {"type": "dir"})]
+    assert [p.path for p in _ftp("ftp://host/d/x", backend=backend).iterdir()] == [
+        "/d/x/x"
+    ]

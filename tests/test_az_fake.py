@@ -109,7 +109,7 @@ class _FakeContainer:
     def get_blob_client(self, name):
         return _FakeBlobClient(self, name)
 
-    def list_blobs(self, name_starts_with=""):
+    def list_blobs(self, name_starts_with="", **_kwargs):
         self.list_calls.append(name_starts_with)
         for name in sorted(self.objects):
             if name.startswith(name_starts_with):
@@ -545,3 +545,75 @@ def test_rm_recursive_one_failing_blob_does_not_leave_the_rest(bulk, batch_rejec
     )
     assert container.objects == {"dir/a.txt": b"a"}
     assert calls == ["dir/a.txt"]
+
+
+# --- objstore-listing-hides-object-prefix-collision -----------------------------
+
+
+def test_key_that_is_object_and_prefix_lists_as_the_object(fake_blob_module):
+    backend, _container = _container_with(
+        **{"src/logs": b"FILE-CONTENT", "src/logs/2026.txt": b"child", "src/d/x": b"x"}
+    )
+    listing = dict(_az("az://account/container/src", backend)._scandir())
+    assert sorted(listing) == ["d", "logs"]
+    assert not listing["logs"].is_dir()
+    assert listing["d"].is_dir()
+    assert not _az("az://account/container/src/logs", backend).stat().is_dir()
+
+
+# --- objstore-gs-az-root-always-exists ------------------------------------------
+
+
+def test_missing_container_root_does_not_exist():
+    backend, container = _container_with()
+
+    def missing(name_starts_with="", **_kwargs):
+        raise _Missing("ContainerNotFound")
+
+    container.list_blobs = missing
+    root = _az("az://account/typo-container", backend)
+    with pytest.raises(FileNotFoundError):
+        root.stat()
+    assert not root.exists()
+
+
+def test_existing_container_root_is_a_directory_even_when_empty():
+    backend, container = _container_with()
+    assert _az("az://account/container/", backend).stat().is_dir()
+    assert container.list_calls == [""]
+
+
+def test_account_level_path_asks_for_containers():
+    backend, _container = _container_with()
+    calls = []
+
+    def list_containers(**kwargs):
+        calls.append(kwargs)
+        raise _Missing("account not found")
+
+    backend.client_obj.list_containers = list_containers
+    account = _az("az://account/container/x", backend).parents[-1]
+    assert account.container == ""
+    with pytest.raises(FileNotFoundError):
+        account.stat()
+    assert not account.exists()
+    assert calls
+
+    backend.client_obj.list_containers = lambda **kwargs: iter(["container"])
+    assert account.is_dir()
+
+
+# --- objstore-az-rm-batch-fallback-aborts (regression) ---------------------------
+
+
+def test_rejected_batch_falls_back_per_blob_with_each_blobs_error():
+    backend, container = _container_with(**{f"dir/f{i}.txt": b"x" for i in range(5)})
+    container.batch_rejected = True
+    container.delete_raises["dir/f0.txt"] = _LeaseIdMissing("lease held")
+    seen = []
+    _az("az://account/container/dir", backend).rm(
+        recursive=True,
+        ignore_error=lambda err, path: seen.append(type(err).__name__) or True,
+    )
+    assert sorted(container.objects) == ["dir/f0.txt"]
+    assert seen == ["OSError"]
