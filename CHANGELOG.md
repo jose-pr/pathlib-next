@@ -357,6 +357,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the `License ::` classifier, and adds `Typing :: Typed`,
   `Development Status :: 4 - Beta` and Python 3.9-3.14 classifiers. Building
   from source needs `hatchling>=1.27`.
+- **The `az` extra installs `azure-identity`**, which an `AzPath` without
+  `backend=` needs for its default credential.
 - **`pathlib_next.testing` contracts are stricter**: 48 `PathContract` tests
   (was 20) covering pathlib error types, glob, walk, rename, open modes and
   recursive copy. A backend that cannot meet a rule sets a capability
