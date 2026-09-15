@@ -72,7 +72,11 @@ class _FakeS3Client:
             raise _client_error("NoSuchKey")
         return {"Body": io.BytesIO(self.objects[Key])}
 
-    def put_object(self, Bucket, Key, Body):
+    def put_object(self, Bucket, Key, Body, IfNoneMatch=None):
+        if IfNoneMatch == "*" and Key in self.objects:
+            raise _client_error("PreconditionFailed")
+        if hasattr(Body, "read"):
+            Body = Body.read()
         self.objects[Key] = Body if isinstance(Body, bytes) else bytes(Body)
 
     def delete_object(self, Bucket, Key):

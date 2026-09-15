@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import datetime as _dt
+import calendar as _calendar
+import contextlib as _contextlib
+import errno as _errno
 import ftplib as _ftplib
 import io as _io
 import ssl as _ssl
+import stat as _stat
 import threading as _thread
+import time as _time
 import typing as _ty
 
 import netimps as _netimps
@@ -120,33 +124,108 @@ def _create_ftpclient(
     return backend.client(source, tls)
 
 
-_CACHED_CLIENTS = _utils.LRU(_create_ftpclient, maxsize=128)
+def _close_ftpclient(key: tuple, client: "_ftplib.FTP") -> None:
+    # Only the calling thread's own connections are closed here: an LRU
+    # overflow can evict another thread's entry while that thread is in the
+    # middle of a transfer on it. Those are dropped from the cache and close
+    # when their last user lets go of them.
+    if key[3] == _thread.get_ident():
+        client.close()
+
+
+# Keyed by (backend, source, tls, thread): ftplib clients are not
+# thread-safe. Evicted and discarded clients of the calling thread are
+# closed (`_close_ftpclient`), not left logged in.
+_CACHED_CLIENTS = _utils.LRU(_create_ftpclient, maxsize=128, on_evict=_close_ftpclient)
+
+_DEFAULT_BACKEND = FtpBackend()
+"""The backend every `FtpPath` built without `backend=` shares, so separately
+constructed paths to one server reuse one connection per thread instead of
+opening (and keeping) one each."""
+
+# Reply codes meaning "command not implemented" (RFC 959): the server lacks
+# the command, as opposed to refusing it for this path.
+_UNSUPPORTED_REPLIES = ("500", "502", "504")
+
+_PERMISSION_WORDS = ("permission", "privilege", "denied", "not allowed", "access")
+
+
+def _reply_code(error: BaseException) -> str:
+    return str(error)[:3]
 
 
 def _parse_mlsd_time(value: str) -> int:
-    # MLSD "modify" fact: YYYYMMDDHHMMSS[.sss], always UTC (RFC 3659).
+    # MLSD "modify" fact: YYYYMMDDHHMMSS[.sss], always UTC (RFC 3659) --
+    # timegm, not datetime.timestamp(), which reads a naive time as local.
     try:
-        return int(_dt.datetime.strptime(value[:14], "%Y%m%d%H%M%S").timestamp())
+        return _calendar.timegm(_time.strptime(value[:14], "%Y%m%d%H%M%S"))
     except ValueError:
         return 0
+
+
+def _facts_mode(facts: dict, is_dir: bool) -> "int | None":
+    """`st_mode` from MLSD facts: `unix.mode` verbatim when the server sends
+    it, else the RFC 3659 `perm` fact (the login user's rights) as
+    read/write bits. None when neither fact is present."""
+    kind = _stat.S_IFDIR if is_dir else _stat.S_IFREG
+    unix_mode = facts.get("unix.mode")
+    if unix_mode:
+        try:
+            return kind | (int(unix_mode, 8) & 0o7777)
+        except ValueError:
+            pass
+    perm = facts.get("perm")
+    if perm is None:
+        return None
+    perm = set(perm.lower())
+    if is_dir:
+        bits = (0o555 if perm & set("el") else 0) | (0o200 if perm & set("cmp") else 0)
+    else:
+        bits = (0o444 if "r" in perm else 0) | (0o200 if perm & set("aw") else 0)
+    return kind | bits
 
 
 class _FtpWriteStream(_io.BytesIO):
     """Buffers the whole write in memory, uploads on close() via
     STOR/APPE. Simple and works with any ftplib client, at the cost of
-    holding the full file content in memory for the duration of the write."""
+    holding the full file content in memory for the duration of the write.
 
-    def __init__(self, client: "_ftplib.FTP", path: str, append: bool = False):
-        super().__init__()
-        self._client = client
+    The connection is looked up at close(), not captured at open(): a write
+    that outlasts the server's idle timeout still lands, on a reconnected
+    session. With `initial` (`open("r+")`) the buffer starts with the
+    file's content at position 0 and is uploaded only if it was modified."""
+
+    def __init__(
+        self, path: "FtpPath", append: bool = False, initial: "bytes | None" = None
+    ):
+        super().__init__(b"" if initial is None else initial)
         self._path = path
         self._cmd = "APPE" if append else "STOR"
+        self._dirty = initial is None
+
+    def write(self, data):
+        self._dirty = True
+        return super().write(data)
+
+    def writelines(self, lines):
+        self._dirty = True
+        return super().writelines(lines)
+
+    def truncate(self, size=None):
+        self._dirty = True
+        return super().truncate(size)
 
     def close(self):
-        if not self.closed:
-            self.seek(0)
-            self._client.storbinary(f"{self._cmd} {self._path}", self)
-        super().close()
+        if self.closed:
+            return
+        try:
+            if self._dirty:
+                self.seek(0)
+                self._path._store(self._cmd, self)
+        finally:
+            # Closed even when the upload fails, so `IOBase.__del__` does not
+            # retry it (over newer content) at garbage collection.
+            super().close()
 
 
 class FtpPath(UriPath):
@@ -164,7 +243,7 @@ class FtpPath(UriPath):
         backend: BaseFtpBackend
 
     def _initbackend(self):
-        return FtpBackend()
+        return _DEFAULT_BACKEND
 
     @property
     def _tls(self):
@@ -176,18 +255,97 @@ class FtpPath(UriPath):
         client = _CACHED_CLIENTS(self.backend, self.source, self._tls, thread_id)
         try:
             client.voidcmd("NOOP")
-        except (OSError, EOFError, _ftplib.error_temp, _ftplib.error_proto):
+        except (
+            OSError,
+            EOFError,
+            _ftplib.error_temp,
+            _ftplib.error_proto,
+            _ftplib.error_reply,
+        ):
+            # Replaced and closed (`_close_ftpclient`), not abandoned.
             client = _CACHED_CLIENTS.invalidate(
                 self.backend, self.source, self._tls, thread_id
             )
         return client
 
+    @_contextlib.contextmanager
+    def _wire(self):
+        """The calling thread's live client, for one command or transfer.
+
+        A complete error reply (`error_perm`/`error_temp`) leaves the control
+        channel in step and passes through for the caller to translate.
+        Anything else raised while the client is in use -- a dropped
+        connection, an unexpected reply, a KeyboardInterrupt or decode error
+        in the middle of a transfer whose final reply is still queued --
+        leaves it out of step, so the client is dropped from the cache and
+        closed; the next operation reconnects. Protocol errors and EOF are
+        re-raised as ConnectionError."""
+        key = (self.backend, self.source, self._tls, _thread.get_ident())
+        try:
+            client = self._ftpclient
+        except _ftplib.error_perm as error:
+            # A refused login is not a refusal for this path: it must not
+            # reach `_translate()`'s probes and read as "no such file".
+            raise PermissionError(
+                _errno.EACCES, f"FTP login refused: {error}", str(self)
+            ) from error
+        except (_ftplib.Error, EOFError) as error:
+            raise ConnectionError(
+                _errno.ECONNREFUSED, f"FTP connection failed: {error!r}", str(self)
+            ) from error
+        try:
+            yield client
+        except (_ftplib.error_perm, _ftplib.error_temp):
+            raise
+        except BaseException as error:
+            with _CACHED_CLIENTS.lock:
+                cached = _CACHED_CLIENTS.cache.get(key) is client
+                if cached:
+                    _CACHED_CLIENTS.discard(*key)
+            if not cached:
+                client.close()
+            if isinstance(error, (_ftplib.Error, EOFError)):
+                raise ConnectionError(
+                    _errno.ECONNABORTED, f"FTP session failed: {error!r}", str(self)
+                ) from error
+            raise
+
+    def _call(self, method: str, *args):
+        """`client.<method>(*args)` through `_wire()`. Only `error_perm` is
+        left for the caller; a transient `error_temp` becomes OSError."""
+        try:
+            with self._wire() as client:
+                return getattr(client, method)(*args)
+        except _ftplib.error_temp as error:
+            raise OSError(_errno.EAGAIN, str(error), str(self)) from error
+
+    def _translate(self, error: "_ftplib.error_perm", wrong_type=None) -> OSError:
+        """OSError for a refused command on this path. A reply alone cannot
+        say why: a read-only login gets "550 Not enough privileges" for a
+        missing file too. So the path is stat'ed: missing is
+        FileNotFoundError; `wrong_type(stat)` may name a type mismatch
+        (IsADirectoryError, ...); anything else is PermissionError."""
+        try:
+            st = self._fresh_stat()
+        except FileNotFoundError:
+            return FileNotFoundError(
+                _errno.ENOENT, f"No such file or directory ({error})", str(self)
+            )
+        except OSError:
+            st = None
+        if st is not None and wrong_type is not None:
+            mismatch = wrong_type(st)
+            if mismatch is not None:
+                return mismatch
+        return PermissionError(_errno.EACCES, str(error), str(self))
+
     def _mlsd_entry(self):
         """This entry's MLSD facts from its parent's listing, or None if
-        not found or the server doesn't support MLSD."""
+        not found, the parent can't be listed, or the server doesn't
+        support MLSD."""
         parent = self.path.rsplit("/", 1)[0] or "/"
         try:
-            for name, facts in self._ftpclient.mlsd(parent):
+            for name, facts in self._call("mlsd", parent):
                 if name == self.name:
                     return facts
         except _ftplib.error_perm:
@@ -199,24 +357,56 @@ class FtpPath(UriPath):
         size = int(facts.get("size", 0) or 0)
         modify = facts.get("modify")
         mtime = _parse_mlsd_time(modify) if modify else 0
+        is_dir = kind in ("dir", "cdir", "pdir")
         return FileStat(
-            st_size=size, st_mtime=mtime, is_dir=kind in ("dir", "cdir", "pdir")
+            st_mode=_facts_mode(facts, is_dir),
+            st_size=size,
+            st_mtime=mtime,
+            is_dir=is_dir,
         )
+
+    def _not_a_directory(self, st) -> "OSError | None":
+        if st.is_dir():
+            return None
+        return NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+
+    def _is_a_directory(self, st) -> "OSError | None":
+        if not st.is_dir():
+            return None
+        return IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
 
     def _scandir(self):
         # MLSD's facts already carry type/size/modify for every child in
         # one round trip -- reuse them instead of `iterdir()` + a separate
         # stat per child. Falls back to NLST (names only, no metadata) on
-        # servers that don't support MLSD.
+        # servers that don't support MLSD. The listing is read whole before
+        # anything is yielded, so no transfer is left half-read.
         try:
-            for name, facts in self._ftpclient.mlsd(self.path):
-                if name not in (".", ".."):
-                    yield name, self._facts_to_filestat(facts)
-        except _ftplib.error_perm:
-            for name in self._ftpclient.nlst(self.path):
-                base = name.rsplit("/", 1)[-1]
-                if base not in (".", ".."):
-                    yield base, None
+            listing = [
+                (name, self._facts_to_filestat(facts))
+                for name, facts in self._call("mlsd", self.path)
+                if name not in (".", "..")
+            ]
+        except _ftplib.error_perm as error:
+            if _reply_code(error) not in _UNSUPPORTED_REPLIES:
+                # A missing path, a file, or a refused listing.
+                raise self._translate(error, self._not_a_directory) from error
+            try:
+                names = self._call("nlst", self.path)
+            except _ftplib.error_perm as error:
+                raise self._translate(error, self._not_a_directory) from error
+            listing = [
+                (base, None)
+                for base in (name.rsplit("/", 1)[-1] for name in names)
+                if base not in (".", "..")
+            ]
+            if len(listing) <= 1:
+                # Servers answer NLST of a missing path with an empty list,
+                # and of a file with the file's own name.
+                mismatch = self._not_a_directory(self._fresh_stat())
+                if mismatch is not None:
+                    raise mismatch
+        yield from listing
 
     def _listdir(self):
         for name, _stat in self._scandir():
@@ -226,85 +416,152 @@ class FtpPath(UriPath):
         hint = self._pop_stat_hint()
         if hint is not None:
             return hint
+        return self._fresh_stat()
+
+    def _fresh_stat(self) -> FileStat:
         # Special case: the FTP root '/' has no parent to MLSD and SIZE won't
         # work on a directory.  Confirm it exists via CWD.
         if self.path in ("/", ""):
             try:
-                self._ftpclient.cwd("/")
+                self._call("cwd", "/")
                 return FileStat(is_dir=True)
             except _ftplib.error_perm as error:
                 raise FileNotFoundError(self) from error
         facts = self._mlsd_entry()
         if facts is not None:
             return self._facts_to_filestat(facts)
-        # MLSD unsupported (or entry not found via it) -- SIZE only works
-        # for files, so this can't tell "missing" apart from "is a
-        # directory"; either way there's no file to report a size for.
+        # MLSD unsupported, the parent unlistable, or the entry not in it.
+        # SIZE answers for a file -- in binary mode: servers refuse it in
+        # the ASCII mode a fresh or listing session is in. CWD answers for
+        # a directory (every path here is absolute, so the changed working
+        # directory affects nothing).
         try:
-            size = self._ftpclient.size(self.path)
+            self._call("voidcmd", "TYPE I")
+            size = self._call("size", self.path)
+        except _ftplib.error_perm:
+            size = None
+        if size is not None:
+            return FileStat(st_size=size, is_dir=False)
+        try:
+            self._call("cwd", self.path)
         except _ftplib.error_perm as error:
             raise FileNotFoundError(self) from error
-        if size is None:
-            raise FileNotFoundError(self)
-        return FileStat(st_size=size, is_dir=False)
+        return FileStat(is_dir=True)
 
     def _open(self, mode="r", buffering=-1):
-        if "r" in mode:
+        if mode in ("r", "r+"):
             buf = _io.BytesIO()
             try:
-                self._ftpclient.retrbinary(f"RETR {self.path}", buf.write)
+                self._call("retrbinary", f"RETR {self.path}", buf.write)
             except _ftplib.error_perm as error:
-                raise FileNotFoundError(self) from error
+                raise self._translate(error, self._is_a_directory) from error
+            if mode == "r+":
+                # Read-modify-write: what is written is uploaded on close.
+                return _FtpWriteStream(self, initial=buf.getvalue())
             buf.seek(0)
-            return buf
+            # Read-only, like a local file opened "rb": a write raises
+            # instead of landing in a buffer nobody uploads.
+            return _io.BufferedReader(buf)
         if mode not in ("w", "x", "a"):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
-        return _FtpWriteStream(self._ftpclient, self.path, append=(mode == "a"))
+        return _FtpWriteStream(self, append=(mode == "a"))
+
+    def _store(self, cmd: str, fileobj) -> None:
+        """Upload `fileobj` with STOR/APPE on a live connection."""
+        try:
+            self._call("storbinary", f"{cmd} {self.path}", fileobj)
+        except _ftplib.error_perm as error:
+            raise self._create_error(error) from error
+
+    def _create_error(self, error: "_ftplib.error_perm") -> OSError:
+        """OSError for a refused STOR/MKD of this path: an existing
+        directory, a missing or non-directory parent, or a refusal."""
+        try:
+            if self._fresh_stat().is_dir():
+                return IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return PermissionError(_errno.EACCES, str(error), str(self))
+        parent = self.parent
+        if parent != self:
+            try:
+                parent_stat = parent._fresh_stat()
+            except FileNotFoundError:
+                return FileNotFoundError(
+                    _errno.ENOENT, f"No such file or directory ({error})", str(self)
+                )
+            except OSError:
+                parent_stat = None
+            if parent_stat is not None and not parent_stat.is_dir():
+                return NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+        return PermissionError(_errno.EACCES, str(error), str(self))
 
     def _mkdir(self, mode):
         try:
-            self._ftpclient.mkd(self.path)
+            self._call("mkd", self.path)
         except _ftplib.error_perm as error:
             if self.exists():
-                raise FileExistsError(self) from error
-            raise FileNotFoundError(self) from error
+                raise FileExistsError(
+                    _errno.EEXIST, "File exists", str(self)
+                ) from error
+            raise self._create_error(error) from error
 
     def unlink(self, missing_ok=False):
         try:
-            self._ftpclient.delete(self.path)
+            self._call("delete", self.path)
         except _ftplib.error_perm as error:
-            if missing_ok and not self.exists():
+            translated = self._translate(error, self._is_a_directory)
+            if missing_ok and isinstance(translated, FileNotFoundError):
                 return
-            raise FileNotFoundError(self) from error
+            raise translated from error
 
     def rmdir(self):
         try:
-            self._ftpclient.rmd(self.path)
+            self._call("rmd", self.path)
         except _ftplib.error_perm as error:
-            # 550 = directory not empty or does not exist
-            code = str(error)[:3]
-            if code == "550":
-                if self.exists():
-                    raise OSError(f"Directory not empty: {self}") from error
-                raise FileNotFoundError(self) from error
-            raise
+            raise self._translate(error, self._rmdir_mismatch(error)) from error
+
+    def _rmdir_mismatch(self, error: "_ftplib.error_perm"):
+        def mismatch(st) -> "OSError | None":
+            if not st.is_dir():
+                return NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+            if any(word in str(error).lower() for word in _PERMISSION_WORDS):
+                return None
+            try:
+                empty = next(iter(self._scandir()), None) is None
+            except OSError:
+                return None
+            if not empty:
+                return OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
+            return None
+
+        return mismatch
 
     def rename(self, target: "FtpPath | Uri | str"):
         # A plain str target is a sibling rename (relative to self's
         # parent), matching sftp.py's rename() semantics.
         target = self._rename_target(target)
-        self._ftpclient.rename(self.path, target.path)
+        try:
+            self._call("rename", self.path, target.path)
+        except _ftplib.error_perm as error:
+            raise self._translate(error) from error
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # SITE CHMOD is a non-standard FTP extension; pyftpdlib and many real
-        # servers do not support it.  Convert any server rejection (error_perm)
-        # to NotImplementedError so that path.py's copy() silently skips it.
+        # servers do not support it.  A server rejection of an existing path
+        # becomes NotImplementedError so that path.py's copy() silently skips
+        # it; a missing path is FileNotFoundError.
         if not follow_symlinks:
             raise NotImplementedError("chmod(follow_symlinks=False)")
         mode = _utils.as_mode(mode)
         try:
-            self._ftpclient.voidcmd(f"SITE CHMOD {mode:o} {self.path}")
-        except _ftplib.error_perm:
+            self._call("voidcmd", f"SITE CHMOD {mode:o} {self.path}")
+        except _ftplib.error_perm as error:
+            if _reply_code(error) not in _UNSUPPORTED_REPLIES:
+                translated = self._translate(error)
+                if isinstance(translated, FileNotFoundError):
+                    raise translated from error
             raise NotImplementedError("SITE CHMOD not supported by this server")

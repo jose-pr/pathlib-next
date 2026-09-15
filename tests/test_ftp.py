@@ -25,6 +25,15 @@ class _FakeFtpClient:
         self.rmd_calls = []
         self.rename_calls = []
         self.voidcmd_calls = []
+        self.dirs = {"/"}
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+    def cwd(self, path):
+        if path not in self.dirs:
+            raise ftplib.error_perm("550 No such file or directory.")
 
     def voidcmd(self, cmd):
         self.voidcmd_calls.append(cmd)
