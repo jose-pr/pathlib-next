@@ -38,6 +38,14 @@ class FileUri(UriPath):
     def _listdir(self):
         yield from _os.listdir(self.filepath)
 
+    def _scandir(self):
+        # LocalPath's scandir already carries each entry's lstat (one syscall
+        # per directory, not one per child).
+        yield from self.filepath._scandir()
+
+    def _is_junction_link(self) -> bool:
+        return self.filepath._is_junction_link()
+
     def stat(self, *, follow_symlinks=True):
         # LocalPath.stat() itself shims the 3.10+-only follow_symlinks= kwarg
         # for pathlib.Path (see fspath.py), so just delegate.

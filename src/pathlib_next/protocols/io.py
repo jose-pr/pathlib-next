@@ -106,9 +106,24 @@ class BinaryOpen(_ty.Protocol):
         default), behavior and bytes-on-wire are identical to before this
         was added (a plain `shutil.copyfileobj`).
         """
+        # The source is opened first: opening the target "wb" truncates or
+        # creates it, and doing that before knowing the source is readable
+        # turned a missing source into an emptied destination.
+        with self.open("rb") as input, target.open("wb") as output:
+            self._copy_stream(input, output, progress=progress, chunk_size=chunk_size)
+
+    def _copy_stream(
+        self,
+        input: _io.IOBase,
+        output: _io.IOBase,
+        *,
+        progress: "_ty.Callable[[int, _ty.Optional[int]], None]" = None,
+        chunk_size: int = _shutil.COPY_BUFSIZE,
+    ):
+        """Stream an already-open binary `input` into `output` (see `copy()`
+        for the `progress` contract; `self` supplies the total size)."""
         if progress is None:
-            with target.open("wb") as output, self.open("rb") as input:
-                _shutil.copyfileobj(input, output, chunk_size)
+            _shutil.copyfileobj(input, output, chunk_size)
             return
 
         total_size = None
@@ -118,8 +133,7 @@ class BinaryOpen(_ty.Protocol):
             total_size = None
 
         copied = 0
-        with target.open("wb") as output, self.open("rb") as input:
-            while chunk := input.read(chunk_size):
-                output.write(chunk)
-                copied += len(chunk)
-                progress(copied, total_size)
+        while chunk := input.read(chunk_size):
+            output.write(chunk)
+            copied += len(chunk)
+            progress(copied, total_size)

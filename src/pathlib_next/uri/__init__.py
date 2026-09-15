@@ -762,7 +762,10 @@ class UriPath(Uri, Path):
         for name in self._listdir():
             child = self._make_child_relpath(name)
             try:
-                stat = FileStat.from_path(child)
+                # Non-following, like Path._scandir(): rm(recursive=True) and
+                # walk() trust this stat, and a following one reported a
+                # directory symlink as a real directory to descend into.
+                stat = FileStat.from_path(child, follow_symlink=False)
             except OSError:
                 stat = None
             yield name, stat

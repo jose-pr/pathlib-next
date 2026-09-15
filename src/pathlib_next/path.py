@@ -8,6 +8,7 @@ operating systems.
 from __future__ import annotations
 
 import abc as _abc
+import errno as _errno
 import os as _os
 import re as _re
 import sys as _sys
@@ -675,7 +676,10 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     if child_stat is None:
                         child_stat = FileStat.from_path(child, follow_symlink=False)
                     if child_stat is not None and child_stat.is_dir():
-                        _remove_tree(child)
+                        if child._is_junction_link():
+                            child.rmdir()
+                        else:
+                            _remove_tree(child)
                     else:
                         child.unlink()
                 except Exception as error:
@@ -695,7 +699,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             if not missing_ok:
                 _handle(FileNotFoundError(self), self)
         elif stat.is_dir():
-            if recursive:
+            if recursive and not self._is_junction_link():
                 _remove_tree(self)
             else:
                 try:
@@ -707,6 +711,16 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 self.unlink()
             except Exception as error:
                 _handle(error, self)
+
+    def _is_junction_link(self) -> bool:
+        """Whether this path is a directory *link* that a non-following stat
+        still reports as a directory (a Windows junction).
+
+        `rm(recursive=True)` removes such an entry with `rmdir()` instead of
+        descending into it: its contents belong to the link's target, outside
+        the tree being removed. Default False; `LocalPath` answers for real.
+        """
+        return False
 
     @_utils.notimplemented
     def rename(self, target: "_ty.Self | str"):
@@ -865,21 +879,46 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         raise
             return
 
-        if target.exists():
+        if _same_file(src, target):
+            raise OSError(
+                _errno.EINVAL, "Source and target are the same file", str(target)
+            )
+        target_exists = target.exists()
+        if target_exists:
             if target.is_dir():
                 raise IsADirectoryError(target)
-            if overwrite:
-                target.unlink()
-            else:
+            if not overwrite:
                 raise FileExistsError(target)
-        if progress is None:
-            BinaryOpen.copy(src, target)
-        else:
-            BinaryOpen.copy(
-                src,
-                target,
-                progress=lambda copied, total: progress(src, copied, total),
-            )
+
+        # Open the source before the target is touched at all: a missing or
+        # unreadable source must leave an existing target intact and must not
+        # leave a new empty one behind.
+        with src.open("rb") as input:
+            if target_exists:
+                target.unlink()
+            created = False
+            try:
+                with target.open("wb") as output:
+                    created = True
+                    BinaryOpen._copy_stream(
+                        src,
+                        input,
+                        output,
+                        progress=(
+                            None
+                            if progress is None
+                            else lambda copied, total: progress(src, copied, total)
+                        ),
+                    )
+            except BaseException:
+                # A half-written target is not a copy of anything; do not
+                # leave it looking like one.
+                if created:
+                    try:
+                        target.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                raise
 
         if preserve_metadata:
             try:
@@ -894,11 +933,34 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             target = type(self)(target)
         src = self
 
-        if target.exists():
-            if overwrite:
-                target.rm(recursive=True, missing_ok=True)
-            else:
-                raise FileExistsError(target)
+        # Everything that can fail cheaply is checked before the target is
+        # touched: a missing source, or a file onto a directory, used to
+        # delete the target and only then raise.
+        src_stat = FileStat.from_path(src, follow_symlink=False)
+        if src_stat is None:
+            raise FileNotFoundError(
+                _errno.ENOENT, "No such file or directory", str(src)
+            )
+        # The same file under another spelling (a case-only rename on a
+        # case-insensitive filesystem, or `x.move(x)`) is renamed in place:
+        # removing the "existing" target would delete the source itself.
+        if not _same_file(src, target):
+            target_stat = FileStat.from_path(target, follow_symlink=False)
+            if target_stat is not None:
+                if not overwrite:
+                    raise FileExistsError(target)
+                if target_stat.is_dir() and not target_stat.is_symlink():
+                    if not src_stat.is_dir():
+                        raise IsADirectoryError(target)
+                    target.rm(recursive=True, missing_ok=True)
+                elif type(target) is type(src) and callable(
+                    getattr(src, "replace", None)
+                ):
+                    # Local paths: os.replace() swaps atomically and leaves
+                    # the target untouched if it fails (e.g. a locked source).
+                    return src.replace(target)
+                else:
+                    target.unlink(missing_ok=True)
 
         try:
             return src.rename(target)
@@ -911,6 +973,29 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         else:
             src.copy(target, overwrite=overwrite)
             src.unlink()
+
+
+def _same_file(src: Path, target: Path) -> bool:
+    """Whether `src` and `target` name the same file, conservatively.
+
+    `samefile()` is trusted only between paths of the same concrete type:
+    `LocalPath.samefile()` accepts any os.PathLike, so a remote target whose
+    `__fspath__()` happens to spell a local path would otherwise "match".
+    Where `samefile()` is unavailable (no st_dev/st_ino), equal paths on the
+    same backend are the same file.
+    """
+    if type(src) is not type(target):
+        return False
+    try:
+        return bool(src.samefile(target))
+    except (NotImplementedError, OSError, TypeError, ValueError):
+        pass
+    if getattr(src, "_backend", None) is not getattr(target, "_backend", None):
+        return False
+    try:
+        return src == target
+    except Exception:
+        return False
 
 
 PathLike = _ty.Union[str, Path]

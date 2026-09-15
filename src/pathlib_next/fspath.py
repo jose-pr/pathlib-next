@@ -7,6 +7,7 @@ import pathlib as _path
 import posixpath as _posixpath
 import re as _re
 import shutil as _shutil
+import stat as _stat
 import sys as _sys
 import types as _types
 import typing as _ty
@@ -102,6 +103,21 @@ class LocalPath(
             except OSError:
                 stat = None
             yield entry.name, stat
+
+    def _is_junction_link(self) -> bool:
+        # lstat() reports a junction (IO_REPARSE_TAG_MOUNT_POINT) as a plain
+        # directory -- CPython only rewrites the mode to S_IFLNK for real
+        # symlinks -- so rm(recursive=True) used to walk into it and delete
+        # the junction target's files. shutil.rmtree guards the same case.
+        if _os.name != "nt":
+            return False
+        try:
+            st = _os.lstat(self)
+        except OSError:
+            return False
+        return getattr(st, "st_reparse_tag", 0) == getattr(
+            _stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003
+        )
 
     def walk(self, top_down=True, on_error=None, follow_symlinks=False):
         # 3.12+ stdlib `pathlib.Path.walk()` sits ahead of ours in the MRO

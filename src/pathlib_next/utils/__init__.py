@@ -4,6 +4,7 @@ import operator as _operator
 import time as _time
 import typing as _ty
 from email.utils import parsedate as _parsedate
+from pathlib import PureWindowsPath as _PureWindowsPath
 from threading import RLock
 
 try:
@@ -210,6 +211,46 @@ def as_owner(
         return None if value == -1 else value
 
     return _one(uid), _one(gid)
+
+
+def is_windows_flavoured(path: object) -> bool:
+    """Whether names joined onto `path` are interpreted with Windows rules.
+
+    True for a `pathlib.PureWindowsPath` (so `LocalPath` on Windows) and for
+    a path whose `filepath` is one (`FileUri` on Windows). Everything else --
+    `MemPath`, remote schemes, POSIX local paths -- treats `\\` and `:` as
+    ordinary filename characters.
+    """
+    if isinstance(path, _PureWindowsPath):
+        return True
+    try:
+        filepath = getattr(path, "filepath", None)
+    except Exception:
+        return False
+    return isinstance(filepath, _PureWindowsPath)
+
+
+def is_safe_child_name(name: object, *, windows: bool = False) -> bool:
+    """Whether `name` is a single path component that stays inside its parent.
+
+    Use this before joining a name that came from somewhere untrusted (a
+    remote listing, an archive member, a sync source) onto a destination.
+    Always rejected: a non-`str`, `""`, `"."`, `".."`, and any name
+    containing `/` or NUL. With `windows=True` (see `is_windows_flavoured`)
+    also rejected: `\\`, `:` (a drive prefix such as `D:x`, or an NTFS
+    alternate data stream), and names that are empty or `.`/`..` once
+    Windows strips trailing dots and spaces (`".. "`).
+    """
+    if not isinstance(name, str) or name in ("", ".", "..") or "/" in name:
+        return False
+    if "\0" in name:
+        return False
+    if windows:
+        if "\\" in name or ":" in name:
+            return False
+        if name.rstrip(" .") == "":
+            return False
+    return True
 
 
 from .checksum import md5 as md5, sha256 as sha256
