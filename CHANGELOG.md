@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`Path.copy()` destroyed or created the target when the source could not
+  be read.** It unlinked an existing target (with `overwrite=True`) and
+  opened the target for writing before opening the source, so a missing
+  file, a directory without `recursive=True`, or a source HTTP 404 left the
+  target empty, or left a new 0-byte file that made a retry fail with
+  `FileExistsError`. The source is now opened first, and a copy that fails
+  mid-stream removes its partial target.
+- **Copying or moving a file onto itself deleted it.** `f.copy(f,
+  overwrite=True)` (or onto a case-insensitive alias such as `F.TXT` on
+  Windows/macOS) emptied the file; a case-only rename with
+  `move(overwrite=True)` deleted it. `copy()` now raises
+  `OSError(EINVAL, "Source and target are the same file")`; `move()` renames
+  in place.
+- **`move(overwrite=True)` removed the target before checking the source.**
+  A missing source, or a file moved onto a directory, deleted the target
+  (including a whole tree) and only then raised. It now raises
+  `FileNotFoundError` / `IsADirectoryError` first and leaves the target
+  alone. A local file target is replaced atomically with `os.replace()`, so a
+  locked source on Windows no longer costs the target.
+- **`rm(recursive=True)` deleted files outside the tree through Windows
+  junctions and `file:` directory symlinks.** A junction reads as a
+  directory to a non-following stat, and `UriPath`'s default `_scandir()`
+  used a following stat, so both were descended into and their targets'
+  contents deleted. Both are now removed as links. `FileUri` listings also
+  reuse `LocalPath`'s scandir metadata (one call per directory).
+- **`PathSyncer.sync()` could delete or write outside its target.**
+  - A root source that does not exist now raises `FileNotFoundError`.
+    Before, with `remove_missing=True` it deleted the entire target (a typo,
+    an unmounted share, a 404); without it, it reported success. **Callers
+    that relied on syncing an absent source as a no-op must now catch the
+    error or pass `ignore_error`.**
+  - Overlapping source and target (one inside the other, same
+    implementation and backend) now raise `ValueError`. Before, the source
+    could be deleted, or copies nested until `RecursionError`.
+  - A child name that would leave the target (`..`, a name the parent-name
+    fallback turned into `..`, or `\`/`:` on a Windows target) now raises
+    `ValueError` through `ignore_error`. Before, such entries from an S3,
+    SFTP or archive listing were written, or removed, outside the target.
+  - Entries listed with an unknown stat (GitLab blobs, FTP without MLSD) are
+    now re-stat'd. Before, with `follow_symlinks=False` nothing was copied
+    and `remove_missing=True` deleted the existing mirror.
+  - A symlink inside the target is replaced by the real file or directory.
+    Before, sync listed, wrote and deleted through it, into whatever it
+    pointed at.
+- **`http:`/`dav:` listings yielded `.` and `..` as children.** wsgidav's
+  parent row (`<a href="..">`) became a file named `..`, and unlinking it
+  deleted the parent collection; a `./` entry made `walk()` loop forever; a
+  PROPFIND href `%2E%2E/` let a recursive copy write outside its destination.
+  Such names are no longer listed.
+- **`DavPath.unlink()` and `HttpPath.unlink()` deleted whole collections.**
+  They sent a bare `DELETE`, which WebDAV applies recursively; `unlink()` on
+  a directory, and `symlink_to(force=True)` over one, removed the tree. Both
+  now raise `IsADirectoryError` for a directory (`HttpPath` relies on its
+  HEAD-based directory check). `rm(recursive=True)` still deletes trees.
+- **`DavPath` read an HTTP error page as file content.** `open("rb")` /
+  `read_bytes()` / `copy()` on a missing or forbidden file returned the
+  server's 404/401/500 body. They now raise `FileNotFoundError` /
+  `PermissionError` / `OSError`.
+- **Reading a local `zip:` archive opened it for writing.** A read-only zip
+  was unreadable (`exists()` returned `False`), `exists()` on a missing
+  archive created it, and probing a file that is not a zip appended 22 bytes
+  to it. Reads now open the archive read-only; the first write into a
+  missing archive creates it. Probing a non-zip file now raises
+  `zipfile.BadZipFile`.
+- **Zip `unlink()`/`rename()`/overwrite reset every other member.** The
+  rewrite gave all members the current time, DEFLATE compression and mode
+  0600, and dropped the archive comment and any leading bytes (a zipapp
+  shebang); it also replaced a symlinked archive with a regular file. Member
+  metadata, the comment, the prefix bytes and the archive's file mode are
+  now kept, and a symlinked archive stays a symlink.
+- **Zip `rename()` onto an existing member created a duplicate name**, and a
+  later rewrite kept the old content. It now replaces the target (POSIX
+  semantics; see `docs/divergences.md`).
+- **Archive listings exposed traversal member names.** Members named with
+  `..`, an absolute path, `\`-separated traversal or a drive prefix are no
+  longer listed, so `iterdir()`/`walk()`/`copy(recursive=True)` cannot write
+  outside a destination through them.
+- **`utils.unpack_archive()` let crafted members escape `dest` on Windows**
+  (`D:evil.txt`, and the same-drive `C:../C:../x`). Such members, and any
+  member with a `..` part (previously extracted with the `..` dropped), are
+  now skipped.
+
+### Added
+- `utils.is_safe_child_name(name, *, windows=False)` and
+  `utils.is_windows_flavoured(path)`: check that an untrusted name stays a
+  single component inside its parent before joining it onto a destination.
+
 ## [0.9.3] - 2026-08-16
 
 ### Fixed

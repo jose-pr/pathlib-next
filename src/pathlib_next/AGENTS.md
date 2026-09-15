@@ -72,7 +72,10 @@ pathlib_next`.
     Callable[[Exception, Self], bool])` — extension, no direct pathlib
     equivalent. Removes a file or (with `recursive=True`) a directory tree;
     `ignore_error` (bool or predicate) controls whether an error during the
-    walk is swallowed (predicate return `True`) or re-raised.
+    walk is swallowed (predicate return `True`) or re-raised. Never descends
+    through a link: a directory symlink, or a Windows junction (the
+    `_is_junction_link()` hook, answered by `LocalPath`/`FileUri`), is
+    removed as an entry and its target's contents are left alone.
   - `rename(target)` — not implemented by default. On a `UriPath` a `str`
     `target` is an already-**decoded path**, not URI syntax, and a relative
     one is a sibling rename — see `Uri._rename_target()` under "URIs".
@@ -107,10 +110,19 @@ pathlib_next`.
     byte progress. `progress=None` (default) has no per-chunk overhead and
     is bytewise identical to before this kwarg existed. Not honored by
     `SftpPath`'s asyncssh concurrent fan-out (native transfer, out of
-    scope) — see `docs/divergences.md`.
+    scope) — see `docs/divergences.md`. A file copy opens the source before
+    touching the target, so a missing or unreadable source leaves an
+    existing target intact and creates nothing; a copy that fails
+    mid-stream removes the partial target; a copy onto the same file
+    (itself, or a case-insensitive alias) raises `OSError(EINVAL)`.
   - `move(target, *, overwrite=False)` — tries `rename()` first, falls back
     to `copy(recursive=True)` + `rm(recursive=True)`/`unlink()` when
-    `rename()` raises `NotImplementedError`.
+    `rename()` raises `NotImplementedError`. Checks before touching the
+    target: a missing source raises `FileNotFoundError`, a file onto a
+    directory raises `IsADirectoryError`, and a target that is the same file
+    (e.g. a case-only rename) is renamed in place rather than removed. With
+    `overwrite=True` a file target on a local path is replaced atomically
+    (`replace()`); elsewhere it is unlinked just before the rename.
 - **`PathLike`** — `Union[str, Path]`. **`PurePathLike`** — `Union[str,
   Pathname]`. **`FsPathLike`** — `Protocol` requiring `__fspath__() -> str`.
 
@@ -382,7 +394,16 @@ Subclass one of these with your own `root` fixture to verify a custom
   at all (every backend except `LocalPath` and `SftpPath` — see
   `docs/divergences.md`), `"preserve"` mode also raises
   `NotImplementedError`, through the same `ignore_error`/`hook()` flow as
-  every other branch, not a silent skip. `hook`/`.log()`/subclassing
+  every other branch, not a silent skip. Safety checks, each reported
+  through `ignore_error`: a root `source` that does not exist raises
+  `FileNotFoundError` (a child vanishing mid-sync is still removed under
+  `remove_missing`); a `source`/`target` pair of the same implementation and
+  backend where one contains the other raises `ValueError`; a child name that
+  would not stay one component inside `target` (`..`, or `\`/`:` on a
+  Windows target) raises `ValueError`. A listing entry with an unknown stat
+  is re-stat'd, never treated as missing. A symlink found inside `target`
+  (below the root) is replaced by the real entry, never written, listed or
+  deleted through. `hook`/`.log()`/subclassing
   `.log()` are the progress/logging seams; `SyncEvent` enum names the
   events fired (`SyncEvent.Symlink` covers symlink creation, replacement,
   and the not-implemented/error path alike).
@@ -410,7 +431,14 @@ Subclass one of these with your own `root` fixture to verify a custom
   `"tar"`) / **`archive.unpack_archive(archive, dest)`** (format
   auto-detected from `archive.name`, falling back to magic-byte sniffing) —
   stream-first, so `src`/`target`/`archive`/`dest` can be any `Path`
-  implementation, not just local files.
+  implementation, not just local files. `unpack_archive` skips members that
+  would land outside `dest` (a `..` part, or on a Windows-flavoured `dest` a
+  drive such as `D:x` or `C:..`).
+- **`is_safe_child_name(name, *, windows=False) -> bool`** /
+  **`is_windows_flavoured(path) -> bool`** — whether an untrusted name (a
+  remote listing entry, an archive member) is a single component that stays
+  inside its parent; `windows=True` also rejects `\`, `:` and names that
+  are empty or `.`/`..` after Windows strips trailing dots/spaces.
 - **`LRU(func, maxsize=128)`** — thread-safe memoizing cache wrapping
   `func`, itself callable; `.invalidate(*args)` evicts and recomputes one
   entry; `.maxsize` is a settable property that evicts down to the new size.
