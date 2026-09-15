@@ -79,12 +79,23 @@ class BinaryOpen(_ty.Protocol):
         mode = _canonical_mode(mode, buffering, encoding, errors, newline)
         fh = self._open(mode.replace("b", ""), buffering)
         if "b" not in mode:
-            # io.text_encoding is 3.10+; on 3.9 pass encoding through as-is
-            # (None means locale default, same effective behavior).
-            encoding = getattr(_io, "text_encoding", lambda e, stacklevel=1: e)(
-                encoding
-            )
-            fh = _io.TextIOWrapper(fh, encoding, errors, newline)
+            try:
+                # io.text_encoding is 3.10+; on 3.9 pass encoding through
+                # as-is (None means locale default, same effective behavior).
+                encoding = getattr(_io, "text_encoding", lambda e, stacklevel=1: e)(
+                    encoding
+                )
+                # buffering=1 is line buffering in text mode, as for open().
+                fh = _io.TextIOWrapper(
+                    fh, encoding, errors, newline, line_buffering=buffering == 1
+                )
+            except BaseException:
+                # An unknown encoding (LookupError) or newline (ValueError)
+                # fails after the backend handle is open; io.open closes its
+                # raw file on that path, and so must we -- a leaked write
+                # handle could otherwise commit an empty upload at GC time.
+                fh.close()
+                raise
         return fh
 
     def read_bytes(self) -> bytes:
@@ -140,8 +151,9 @@ class BinaryOpen(_ty.Protocol):
         `progress`, when given, is called after each chunk is written as
         `progress(bytes_copied, total_size)`: `bytes_copied` increases
         monotonically and equals `total_size` (if known) after the final
-        call. `total_size` is this object's `stat().st_size` when `self`
-        also implements the `Stat` protocol and `stat()` succeeds,
+        call; an empty file gets exactly one call, `progress(0, total_size)`.
+        `total_size` is this object's `stat().st_size` when `self` also
+        implements the `Stat` protocol and `stat()` succeeds,
         otherwise `None` -- `BinaryOpen` alone has no size concept.
         `chunk_size` controls how many bytes are read per iteration
         (default: `shutil.COPY_BUFSIZE`). With `progress=None` (the
@@ -179,3 +191,8 @@ class BinaryOpen(_ty.Protocol):
             output.write(chunk)
             copied += len(chunk)
             progress(copied, total_size)
+        if not copied:
+            # An empty file writes no chunk, but it is still a finished copy:
+            # report it once so a caller waiting for bytes_copied ==
+            # total_size is not left hanging on a zero-byte file.
+            progress(0, total_size)

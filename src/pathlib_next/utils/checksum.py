@@ -26,26 +26,12 @@ def native(path: "Path", algorithm: str = "md5") -> "str | None":
 
 def md5(path: Path, chunk_size: int = 65536) -> str:
     """Calculate MD5 checksum of the file at `path`."""
-    h = _hashlib.md5()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+    return stream(path, "md5", chunk_size)
 
 
 def sha256(path: Path, chunk_size: int = 65536) -> str:
     """Calculate SHA-256 checksum of the file at `path`."""
-    h = _hashlib.sha256()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+    return stream(path, "sha256", chunk_size)
 
 
 def stream(path: "Path", algorithm: str = "md5", chunk_size: int = 65536) -> str:
@@ -54,8 +40,12 @@ def stream(path: "Path", algorithm: str = "md5", chunk_size: int = 65536) -> str
     runtime parameter rather than fixed at the call site -- e.g.
     `PathSyncer`'s streaming fallback, which must match whatever algorithm
     a native checksum attempt was made under).
+
+    The digest compares content; it is not a security use, so it is created
+    with `usedforsecurity=False` -- on a FIPS-mode host `hashlib.md5()`
+    otherwise raises ValueError.
     """
-    h = _hashlib.new(algorithm)
+    h = _hashlib.new(algorithm, usedforsecurity=False)
     with path.open("rb") as f:
         while True:
             chunk = f.read(chunk_size)

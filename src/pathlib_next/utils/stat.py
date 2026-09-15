@@ -96,12 +96,17 @@ class FileStat(_FStat):
         so downstream code (e.g. `.is_dir()`) can rely on a uniform type.
         Passes an already-`FileStat` through unchanged. The copied mode
         counts as backend-reported (`mode_known`) unless the source says
-        otherwise or carries no mode at all (missing, `None` or `0`)."""
+        otherwise or carries no mode at all (missing, `None` or `0`).
+
+        A missing or `None` field becomes `0`: paramiko's `SFTPAttributes`
+        leaves every field the server did not send as `None`, which made
+        `is_dir()` and `repr()` raise TypeError."""
         if isinstance(stat, FileStat):
             return stat
         result = FileStat.__new__(FileStat)
         for prop in FileStat._FIELDS:
-            setattr(result, prop, getattr(stat, prop, 0))
+            value = getattr(stat, prop, None)
+            setattr(result, prop, 0 if value is None else value)
         result.mode_known = bool(getattr(stat, "mode_known", True)) and bool(
             result.st_mode
         )

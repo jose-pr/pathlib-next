@@ -237,7 +237,8 @@ def test_notadirectoryerror_names_the_offending_ancestor():
     MemPath("a/f.txt", backend=backend).write_text("x")
     with pytest.raises(NotADirectoryError) as excinfo:
         MemPath("a/f.txt/sub", backend=backend).stat()
-    assert str(excinfo.value.args[0]) == "a/f.txt"
+    assert excinfo.value.filename == "a/f.txt"
+    assert excinfo.value.errno == errno.ENOTDIR
 
 
 def test_iterdir_on_missing_path_raises_filenotfounderror():

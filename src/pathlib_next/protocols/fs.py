@@ -49,8 +49,11 @@ class Stat(_ty.Protocol):
             # through the symlink instead of stat'ing it directly.
             return self.stat(follow_symlinks=follow_symlinks).st_mode
         except (OSError, ValueError):
-            # pathlib.Path.exists()/is_dir()/etc. swallow OSError (including
-            # PermissionError) and report False rather than propagating it.
+            # Every OSError (PermissionError included) and ValueError reads
+            # as "no such entry", on every Python version. That is pathlib's
+            # rule from 3.13 on; 3.9-3.12 pathlib re-raises errors outside
+            # ENOENT/ENOTDIR/EBADF/ELOOP (e.g. EACCES), so there the generic
+            # exists() reports False where `pathlib.Path.exists()` raises.
             return None
 
     # Convenience functions for querying the stat results
@@ -60,18 +63,19 @@ class Stat(_ty.Protocol):
         """
         return self._st_mode(follow_symlinks=follow_symlinks) is not None
 
-    def is_dir(self):
+    def is_dir(self, *, follow_symlinks=True):
         """
-        Whether this path is a directory.
+        Whether this path is a directory. `follow_symlinks=False` reports a
+        symlink to a directory as not one (3.13 parity).
         """
-        return _stat.S_ISDIR(self._st_mode() or 0)
+        return _stat.S_ISDIR(self._st_mode(follow_symlinks=follow_symlinks) or 0)
 
-    def is_file(self):
+    def is_file(self, *, follow_symlinks=True):
         """
         Whether this path is a regular file (also True for symlinks pointing
-        to regular files).
+        to regular files unless `follow_symlinks=False`, 3.13 parity).
         """
-        return _stat.S_ISREG(self._st_mode() or 0)
+        return _stat.S_ISREG(self._st_mode(follow_symlinks=follow_symlinks) or 0)
 
     def is_symlink(self):
         """

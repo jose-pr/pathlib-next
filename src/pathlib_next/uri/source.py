@@ -173,7 +173,32 @@ def _compose_host(host: "str | _IPAddress") -> str:
     try:
         return f"[{_ip.IPv6Address(host).compressed}]"
     except ValueError:
-        return _uritools.uriencode(host.lower(), _SAFE_HOST, errors=_ERRORS).decode()
+        pass
+    host = host.lower()
+    if not host.isascii():
+        # RFC 3986 3.2.2: a non-ASCII registered name meant for DNS should be
+        # produced in its IDNA form, not percent-encoded. HTTP clients
+        # IDNA-encode only a non-ASCII host, so "b%c3%bccher.example" was
+        # sent verbatim and never resolved. A name the codec rejects (an
+        # empty or over-long label, a surrogate-escaped byte) keeps the
+        # percent-encoded form.
+        try:
+            return _idna_encode(host)
+        except UnicodeError:
+            pass
+    return _uritools.uriencode(host, _SAFE_HOST, errors=_ERRORS).decode()
+
+
+def _idna_encode(host: str) -> str:
+    """`host` in IDNA (ASCII) form: IDNA 2008 with UTS #46 mapping through
+    the `idna` package when installed (what `requests` itself uses), else
+    the stdlib IDNA 2003 codec. Raises UnicodeError for an invalid name."""
+    try:
+        import idna as _idna
+    except ImportError:
+        return host.encode("idna").decode("ascii")
+    # idna.IDNAError subclasses UnicodeError.
+    return _idna.encode(host, uts46=True).decode("ascii")
 
 
 def _compose_uri(
@@ -311,11 +336,16 @@ class Source(_ty.NamedTuple):
         return parts[0], parts[1]
 
     def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["UriPath"]] = None):
+        """The `UriPath` subclass registered for this scheme, or `UriPath`
+        itself. An explicit `schemesmap` is the complete set of classes to
+        choose from: a scheme missing from it gives `UriPath`, and neither
+        plugins nor the global registry are consulted."""
         from . import UriPath
 
         if self.scheme:
-            if schemesmap is None:
-                schemesmap = UriPath._schemesmap()
+            if schemesmap is not None:
+                return schemesmap.get(self.scheme, None) or UriPath
+            schemesmap = UriPath._schemesmap()
             _cls = schemesmap.get(self.scheme, None)
             if _cls is None:
                 # The map is rebuilt whenever a UriPath subclass is defined

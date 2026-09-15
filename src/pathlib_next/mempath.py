@@ -7,7 +7,7 @@ import time as _time
 from io import IOBase
 from urllib.parse import quote as _urlquote
 
-from .path import Path, Pathname
+from .path import Path, Pathname, _os_error
 from .utils.stat import FileStat
 
 
@@ -42,23 +42,68 @@ def _touch(content) -> None:
 
 class MemBytesIO(io.BytesIO):
     """A `BytesIO` that writes its buffer back into the backing
-    `bytearray` (`dest`) on close, so `MemPath` files persist across
-    `open()` calls."""
+    `bytearray` (`dest`) on `flush()` and close, so `MemPath` files persist
+    across `open()` calls. With `append=True` every write lands at the end,
+    like `O_APPEND`, whatever the current position."""
 
-    def __init__(self, dest: bytearray) -> None:
+    def __init__(self, dest: bytearray, *, append: bool = False) -> None:
         self._bytes = dest
+        self._append = append
         super().__init__()
+        if append:
+            super().write(dest)
 
-    def close(self) -> None:
+    def _publish(self) -> None:
         # getvalue(), not seek(0);read(): a caller that seeks before
         # closing (or opened in append mode, positioned at EOF) would
         # otherwise lose everything before the current position.
+        content = self.getvalue()
+        self._bytes.clear()
+        self._bytes.extend(content)
+        _touch(self._bytes)
+
+    def write(self, data) -> int:
+        if self._append and not self.closed:
+            self.seek(0, io.SEEK_END)
+        return super().write(data)
+
+    def writelines(self, lines) -> None:
+        # BytesIO.writelines bypasses an overridden write().
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        # A real file's flush makes the written bytes visible to readers.
+        super().flush()
+        self._publish()
+
+    def close(self) -> None:
         if not self.closed:
-            content = self.getvalue()
-            self._bytes.clear()
-            self._bytes.extend(content)
-            _touch(self._bytes)
+            self._publish()
         return super().close()
+
+
+class _MemReader(io.BytesIO):
+    """A read-only snapshot of a file's content: `open("rb")` on a real
+    file cannot be written, and a plain `BytesIO` accepted writes that went
+    nowhere."""
+
+    def writable(self) -> bool:
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+        return False
+
+    def write(self, data):
+        self.writable()
+        raise io.UnsupportedOperation("write")
+
+    def writelines(self, lines):
+        self.writable()
+        raise io.UnsupportedOperation("write")
+
+    def truncate(self, size=None):
+        self.writable()
+        raise io.UnsupportedOperation("truncate")
 
 
 class MemPath(Path):
@@ -180,7 +225,7 @@ class MemPath(Path):
         *ancestors, name = self.normalized
         for index, path in enumerate(ancestors):
             if path not in parent:
-                raise FileNotFoundError(self.parent)
+                raise _os_error(FileNotFoundError, _errno.ENOENT, self)
             parent = parent[path]
             if not isinstance(parent, dict):
                 # An ancestor segment names a file. Without this the next
@@ -190,25 +235,32 @@ class MemPath(Path):
                 # path merely routed through a file. NotADirectoryError is
                 # an OSError, which is what stdlib raises and what those
                 # guards already swallow.
-                raise NotADirectoryError(self.with_segments(*ancestors[: index + 1]))
+                raise _os_error(
+                    NotADirectoryError,
+                    _errno.ENOTDIR,
+                    self.with_segments(*ancestors[: index + 1]),
+                )
 
         return parent, name
 
     def _mkdir(self, mode: int):
         parent, name = self._parent_container()
-        if not name or name in parent:
-            raise FileExistsError(name)
-        parent[name] = {}
+        # setdefault is one atomic step: a separate check-then-set let two
+        # concurrent mkdir() calls both succeed, the second replacing a
+        # directory the first may already have populated.
+        new = {}
+        if not name or parent.setdefault(name, new) is not new:
+            raise _os_error(FileExistsError, _errno.EEXIST, self)
 
     def rmdir(self):
         parent, name = self._parent_container()
         if not name:
-            raise FileNotFoundError(self)
+            raise _os_error(FileNotFoundError, _errno.ENOENT, self)
         content = parent.get(name)
         if content is None:
-            raise FileNotFoundError(self)
+            raise _os_error(FileNotFoundError, _errno.ENOENT, self)
         elif not isinstance(content, dict):
-            raise NotADirectoryError(self)
+            raise _os_error(NotADirectoryError, _errno.ENOTDIR, self)
         elif len(content) != 0:
             # pathlib raises OSError(ENOTEMPTY); FileExistsError (EEXIST)
             # carried no errno and matched no caller's ENOTEMPTY check.
@@ -218,16 +270,15 @@ class MemPath(Path):
     def unlink(self, missing_ok=False):
         parent, name = self._parent_container()
         if not name:
-            if missing_ok:
-                return
-            raise FileNotFoundError(self)
+            # The root exists and is a directory: missing_ok does not apply.
+            raise _os_error(IsADirectoryError, _errno.EISDIR, self)
         content = parent.get(name)
         if content is None:
             if missing_ok:
                 return
-            raise FileNotFoundError(self)
+            raise _os_error(FileNotFoundError, _errno.ENOENT, self)
         elif isinstance(content, dict):
-            raise IsADirectoryError(self)
+            raise _os_error(IsADirectoryError, _errno.EISDIR, self)
         parent.pop(name)
 
     def stat(self, *, follow_symlinks=True):
@@ -236,7 +287,7 @@ class MemPath(Path):
             return FileStat(is_dir=True)
 
         if name not in parent:
-            raise FileNotFoundError(self)
+            raise _os_error(FileNotFoundError, _errno.ENOENT, self)
 
         content = parent[name]
         is_dir = isinstance(content, dict)
@@ -253,9 +304,9 @@ class MemPath(Path):
         parent, name = self._parent_container()
         content = parent.get(name) if name else parent
         if content is None:
-            raise FileNotFoundError(self)
+            raise _os_error(FileNotFoundError, _errno.ENOENT, self)
         if not isinstance(content, dict):
-            raise NotADirectoryError(self)
+            raise _os_error(NotADirectoryError, _errno.ENOTDIR, self)
         for c in list(content.keys()):
             yield self.with_segments(*self.segments, c)
 
@@ -267,41 +318,32 @@ class MemPath(Path):
             # An empty name is the virtual root, which stat() reports as a
             # directory. Without this guard "w"/"a" created a bogus ""
             # entry in the backend and "r" claimed FileNotFoundError.
-            raise IsADirectoryError(self)
+            raise _os_error(IsADirectoryError, _errno.EISDIR, self)
         if mode == "r":
             if name not in parent:
-                raise FileNotFoundError(self)
+                raise _os_error(FileNotFoundError, _errno.ENOENT, self)
             content = parent[name]
             if isinstance(content, dict):
-                raise IsADirectoryError(self)
-            return io.BytesIO(content)
-        elif mode == "w":
-            if isinstance(parent.get(name), dict):
-                # Truncating over a directory silently replaced the whole
-                # subtree with a file; stdlib raises IsADirectoryError.
-                raise IsADirectoryError(self)
-            content = parent.get(name)
-            if isinstance(content, bytearray):
-                # Truncate the same file, as "w" does on disk: its mtime
-                # then still advances past the previous write's.
-                content.clear()
-                _touch(content)
-            else:
-                content = MemFile()
-                parent[name] = content
-            return MemBytesIO(content)
-        elif mode == "x":
-            if name in parent:
-                raise FileExistsError(self)
-            content = MemFile()
-            parent[name] = content
-            return MemBytesIO(content)
-        elif mode == "a":
-            content = parent.setdefault(name, MemFile())
-            if isinstance(content, dict):
-                raise IsADirectoryError(self)
-            buf = MemBytesIO(content)
-            buf.write(content)
-            return buf
-        else:
+                raise _os_error(IsADirectoryError, _errno.EISDIR, self)
+            return _MemReader(content)
+        if mode not in ("w", "x", "a"):
             raise NotImplementedError(f"mode={mode!r}")
+        # Creation goes through setdefault, one atomic step: a separate
+        # "exists?" check followed by an assignment let two concurrent
+        # open("x") calls both succeed.
+        new = MemFile()
+        content = parent.setdefault(name, new)
+        if isinstance(content, dict):
+            # Truncating over a directory silently replaced the whole
+            # subtree with a file; stdlib raises IsADirectoryError.
+            raise _os_error(IsADirectoryError, _errno.EISDIR, self)
+        if mode == "x":
+            if content is not new:
+                raise _os_error(FileExistsError, _errno.EEXIST, self)
+            return MemBytesIO(content)
+        if mode == "w" and content is not new:
+            # Truncate the same file, as "w" does on disk: its mtime then
+            # still advances past the previous write's.
+            content.clear()
+            _touch(content)
+        return MemBytesIO(content, append=mode == "a")

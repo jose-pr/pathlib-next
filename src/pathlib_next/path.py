@@ -26,6 +26,51 @@ PN = _ty.TypeVar("PN", bound="Pathname")
 _P = _ty.TypeVar("_P")
 
 
+def _os_error(exc_type: type, code: int, path: object) -> OSError:
+    """`exc_type(code, strerror, str(path))` -- an OSError shaped like the
+    ones `os` raises. `FileNotFoundError(path)` left `errno` and `filename`
+    as None, so `e.errno == errno.ENOENT` never matched."""
+    return exc_type(code, _os.strerror(code), str(path))
+
+
+# A final component's suffix split, following the running interpreter's
+# pathlib: 3.14 treats a trailing "." as a suffix ("a." -> ".") and ignores
+# leading dots; earlier versions do neither.
+if _sys.version_info >= (3, 14):
+
+    def _name_suffix(name: str) -> str:
+        name = name.lstrip(".")
+        i = name.rfind(".")
+        return name[i:] if i != -1 else ""
+
+    def _name_stem(name: str) -> str:
+        i = name.rfind(".")
+        if i != -1:
+            stem = name[:i]
+            # The stem must contain at least one non-dot character.
+            if stem.lstrip("."):
+                return stem
+        return name
+
+    def _name_suffixes(name: str) -> "list[str]":
+        return ["." + ext for ext in name.lstrip(".").split(".")[1:]]
+
+else:
+
+    def _name_suffix(name: str) -> str:
+        i = name.rfind(".")
+        return name[i:] if 0 < i < len(name) - 1 else ""
+
+    def _name_stem(name: str) -> str:
+        i = name.rfind(".")
+        return name[:i] if 0 < i < len(name) - 1 else name
+
+    def _name_suffixes(name: str) -> "list[str]":
+        if name.endswith("."):
+            return []
+        return ["." + suffix for suffix in name.lstrip(".").split(".")[1:]]
+
+
 class FsPathLike(_ty.Protocol):
     """Anything implementing `__fspath__` -- registered with `os.PathLike`
     so `os.fspath()` and friends accept it."""
@@ -114,12 +159,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
         This includes the leading period. For example: '.txt'
         """
-        name = self.name
-        i = name.rfind(".")
-        if 0 < i < len(name) - 1:
-            return name[i:]
-        else:
-            return ""
+        return _name_suffix(self.name)
 
     @property
     def suffixes(self):
@@ -128,21 +168,12 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
         These include the leading periods. For example: ['.tar', '.gz']
         """
-        name = self.name
-        if name.endswith("."):
-            return []
-        name = name.lstrip(".")
-        return ["." + suffix for suffix in name.split(".")[1:]]
+        return _name_suffixes(self.name)
 
     @property
     def stem(self):
         """The final path component, minus its last suffix."""
-        name = self.name
-        i = name.rfind(".")
-        if 0 < i < len(name) - 1:
-            return name[:i]
-        else:
-            return name
+        return _name_stem(self.name)
 
     @property
     @_abc.abstractmethod
@@ -244,6 +275,17 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def __truediv__(self, key: _ty.Self | str) -> _ty.Self:
         try:
             return type(self)(self, key)
+        except (TypeError, NotImplementedError):
+            return NotImplemented
+
+    def __rtruediv__(self, key: str) -> _ty.Self:
+        """`"prefix" / path`, as pathlib supports. `self` is passed as an
+        object, so per-instance state it carries (a `MemPath` backend)
+        survives, and an absolute `self` restarts the join."""
+        if not isinstance(key, str):
+            return NotImplemented
+        try:
+            return type(self)(key, self)
         except (TypeError, NotImplementedError):
             return NotImplemented
 
@@ -554,10 +596,13 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         carry st_dev/st_ino) -- LocalPath gets a real implementation from
         pathlib.Path via MRO instead of this one.
         """
+        # with_segments(), never the bare constructor or `_coerce_target()`:
+        # a str is a path on this backend. `type(self)(str)` gave a MemPath
+        # a fresh, empty backend, and a URI parse drops this path's host.
         other = (
             other_path
             if isinstance(other_path, Path)
-            else self._coerce_target(other_path)
+            else self.with_segments(other_path)
         )
         st1 = self.stat()
         st2 = other.stat()
@@ -759,7 +804,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             pass
         else:
             if not exist_ok:
-                raise FileExistsError(self)
+                raise _os_error(FileExistsError, _errno.EEXIST, self)
             return
         try:
             with self.open("x"):
@@ -886,7 +931,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             return
         if stat is None:
             if not missing_ok:
-                _handle(FileNotFoundError(self), self)
+                _handle(_os_error(FileNotFoundError, _errno.ENOENT, self), self)
         elif stat.is_dir():
             if recursive and not self._is_junction_link():
                 _remove_tree(self)
@@ -902,7 +947,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 _handle(error, self)
 
     def _coerce_target(self, target: str) -> "Path":
-        """Turn a `str` destination (`copy()`, `move()`, `samefile()`) into a
+        """Turn a `str` destination (`copy()`, `move()`) into a
         path on the same backend. The default keeps per-instance state (a
         `MemPath`'s in-memory filesystem) via `with_segments()`; the bare
         constructor used before gave every str destination a fresh, empty

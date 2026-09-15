@@ -334,6 +334,28 @@ class LocalPath(
             return super().chmod(mode, follow_symlinks=follow_symlinks)
         return super().chmod(mode) if follow_symlinks else super().lchmod(mode)
 
+    if _sys.version_info < (3, 13):
+        # `is_dir()`/`is_file()` gained `follow_symlinks=` in 3.13, and the
+        # `Stat` protocol promises it; stdlib precedes `Stat` in this MRO.
+        # Following links keeps stdlib's own implementation; the
+        # non-following form is 3.13's (any OSError/ValueError is False).
+
+        def is_dir(self, *, follow_symlinks=True):
+            if follow_symlinks:
+                return super().is_dir()
+            try:
+                return _stat.S_ISDIR(self.stat(follow_symlinks=False).st_mode)
+            except (OSError, ValueError):
+                return False
+
+        def is_file(self, *, follow_symlinks=True):
+            if follow_symlinks:
+                return super().is_file()
+            try:
+                return _stat.S_ISREG(self.stat(follow_symlinks=False).st_mode)
+            except (OSError, ValueError):
+                return False
+
     def _chown(
         self,
         uid: int | str | None,

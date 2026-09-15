@@ -27,16 +27,24 @@ class DataUri(UriPath):
 
     @property
     def _is_base64(self) -> bool:
-        return self._header.rsplit(";", 1)[-1].strip().lower() == "base64"
+        # RFC 2397: the extension is ";base64". "data:base64,..." has none;
+        # there "base64" is the (malformed) media type, not an encoding.
+        params = self._header.rsplit(";", 1)
+        return len(params) == 2 and params[1].strip().lower() == "base64"
 
     @property
     def mediatype(self) -> str:
+        """The declared media type. Without a type/subtype, RFC 2397 implies
+        "text/plain": a bare header gives "text/plain;charset=US-ASCII",
+        and parameters alone (";charset=utf-8") are given that type."""
         header = self._header
-        if not header:
-            return _DEFAULT_MEDIATYPE
         if self._is_base64:
             header = header.rsplit(";", 1)[0]
-        return header or _DEFAULT_MEDIATYPE
+        if not header:
+            return _DEFAULT_MEDIATYPE
+        if header.startswith(";"):
+            return "text/plain" + header
+        return header
 
     def _content(self) -> bytes:
         header, sep, data = self.path.partition(",")
@@ -55,9 +63,11 @@ class DataUri(UriPath):
         return FileStat(st_size=len(self._content()), is_dir=False)
 
     def _open(self, mode="r", buffering=-1):
-        if "r" not in mode:
+        # Exactly "r": "r+" returned a writable buffer whose writes were
+        # silently discarded.
+        if mode != "r":
             raise NotImplementedError("data: URIs are read-only")
-        return _io.BytesIO(self._content())
+        return _io.BufferedReader(_io.BytesIO(self._content()))
 
     def _listdir(self):
         raise NotADirectoryError(self)

@@ -13,7 +13,7 @@ else:
     TypeAlias = _ty.Any
 
 from .. import utils as _utils
-from ..path import Path, Pathname
+from ..path import Path, Pathname, _name_stem, _name_suffix
 from ..utils.stat import FileStat
 from .query import Query
 from .source import (
@@ -61,6 +61,16 @@ def _segments_of(path: str) -> list[str]:
 
 def _uriencode(text: str, safe=""):
     return uritools.uriencode(text, safe=safe, errors=_ERRORS).decode()
+
+
+def _path_reference(posix: str) -> str:
+    """Encode a posix path as a URI reference that parses back to the same
+    path. A path starting with "//" (POSIX keeps exactly two leading
+    slashes) would otherwise parse as a network-path reference whose first
+    segment is a host; "/." in front of it is removed again as a dot
+    segment (RFC 3986 5.2.4)."""
+    encoded = _uriencode(posix, safe="/")
+    return "/." + encoded if encoded.startswith("//") else encoded
 
 
 class _RelativeLocalPath(str):
@@ -140,7 +150,7 @@ class Uri(Pathname):
                     uri = _RelativeLocalPath(_uriencode(uri.as_posix(), safe="/"))
                 _uris.append(uri)
             elif isinstance(uri, (_pathlib.PurePath, Pathname)):
-                _uris.append(f"{_uriencode(uri.as_posix(), safe='/')}")
+                _uris.append(_path_reference(uri.as_posix()))
             elif hasattr(uri, "as_uri"):
                 path = uri.as_uri
                 if callable(path):
@@ -165,7 +175,7 @@ class Uri(Pathname):
                 # Only __fspath__ is guaranteed here -- posix-normalize the
                 # string itself rather than assuming an as_posix() method.
                 posix = _pathlib.PurePath(path).as_posix()
-                _uris.append(f"{_uriencode(posix, safe='/')}")
+                _uris.append(_path_reference(posix))
         self._raw_uris = _uris
 
     @classmethod
@@ -279,7 +289,10 @@ class Uri(Pathname):
         # which already calls _init() once, then calls it again to
         # overwrite with the new source) -- do not turn this into a raise
         # without auditing every _init() call site first.
-        self._initiated = True
+        #
+        # `_initiated` is set LAST: the properties return the raw slots as
+        # soon as it is truthy, so a thread reading a lazily parsed Uri
+        # during another thread's first parse saw `path`/`source` as None.
         self._source = source
         self._path = path
         self._query = query
@@ -287,6 +300,7 @@ class Uri(Pathname):
         self._segments_cache = None
         self._suffix_cache = None
         self._stem_cache = None
+        self._initiated = True
 
     def _from_parsed_parts(
         self, source: Source, path: str, query: str, fragment: str, /, **kwargs
@@ -439,8 +453,15 @@ class Uri(Pathname):
 
     def as_uri(self, /, sanitize=False):
         if self._uri is None or sanitize:
+            path = self.path
+            if path.startswith("//") and not self._has_authority():
+                # Without an authority a "//" path would render as one
+                # ("file:////srv/x" is host "" and path "//srv/x"), which
+                # raised ValueError from str()/repr()/hash(). "/." keeps it
+                # a path and parses back to the same one.
+                path = "/." + path
             uri = self._format_parsed_parts(
-                self.source, self.path, self.query, self.fragment, sanitize=sanitize
+                self.source, path, self.query, self.fragment, sanitize=sanitize
             )
             if not sanitize:
                 self._uri = uri
@@ -540,23 +561,13 @@ class Uri(Pathname):
     @property
     def suffix(self) -> str:
         if self._suffix_cache is None:
-            name = self.name
-            i = name.rfind(".")
-            if 0 < i < len(name) - 1:
-                self._suffix_cache = name[i:]
-            else:
-                self._suffix_cache = ""
+            self._suffix_cache = _name_suffix(self.name)
         return self._suffix_cache
 
     @property
     def stem(self) -> str:
         if self._stem_cache is None:
-            name = self.name
-            i = name.rfind(".")
-            if 0 < i < len(name) - 1:
-                self._stem_cache = name[:i]
-            else:
-                self._stem_cache = name
+            self._stem_cache = _name_stem(self.name)
         return self._stem_cache
 
     @property
@@ -600,8 +611,9 @@ class Uri(Pathname):
         return self._normalized_path
 
     def is_absolute(self):
-        """True if the path is absolute."""
-        return bool(self.source) and self.path.startswith("/")
+        """True if the path is absolute: it starts with "/", with or without
+        a source (as `PurePosixPath("/a")` is absolute)."""
+        return self.path.startswith("/")
 
     def is_relative_to(self, other: UriLike):
         """Return True if the path is relative to another path or False."""
@@ -662,8 +674,12 @@ class Uri(Pathname):
         """Return True if the URI points to a local resource."""
         return self.source.is_local()
 
-    def __eq__(self, other: Pathname | str):
-        if isinstance(other, Pathname):
+    def __eq__(self, other: Uri | str):
+        # Only a Uri or a URI string, both of which hash as their URI text
+        # like __hash__. Another Pathname (MemPath, LocalPath) hashes by its
+        # own rule, so equal-but-differently-hashed pairs broke sets and
+        # dicts, and a relative LocalPath's as_uri() raised out of `==`.
+        if isinstance(other, Uri):
             uri = other.as_uri()
         elif isinstance(other, str):
             uri = other
@@ -673,6 +689,14 @@ class Uri(Pathname):
 
     def __hash__(self):
         return hash(self.as_uri())
+
+    def __rtruediv__(self, key: str):
+        """`"prefix" / uri`. The str is a decoded path joined in front of
+        this one, never URI syntax (so "C:/x" is not read as a scheme)."""
+        if not isinstance(key, str):
+            return NotImplemented
+        # A plain Uri: building the prefix must not touch `self.backend`.
+        return type(self)(Uri()._from_decoded_path(key), self)
 
     def as_posix(self):
         source = self.source
@@ -896,10 +920,20 @@ class UriPath(Uri, Path):
         return self._from_parsed_parts(*self.parts, backend=backend)
 
     def __truediv__(self, key: str | Uri | os.PathLike):
+        # Only converting `key` decides NotImplemented. Catching TypeError
+        # around the whole construction turned a bug inside a scheme's
+        # __new__/_init into "unsupported operand type(s) for /".
+        converted = Uri.__new__(Uri)
         try:
-            return type(self)(self, key, findclass=True)
+            converted.__init__(key)
         except (TypeError, NotImplementedError):
             return NotImplemented
+        return type(self)(self, *converted._raw_uris, findclass=True)
+
+    def __rtruediv__(self, key: str):
+        if not isinstance(key, str):
+            return NotImplemented
+        return type(self)(Uri()._from_decoded_path(key), self, findclass=True)
 
     def joinpath(self, *args: str | Uri | os.PathLike) -> "UriPath":
         """Combine this path with segments, choosing the result's class from
@@ -909,7 +943,9 @@ class UriPath(Uri, Path):
 
     def with_source(self, source: Source):
         cls = type(self)
-        if not source:
+        if not source or not source.scheme:
+            # Nothing to dispatch on (`source.scheme + ":"` raised TypeError
+            # for a host-only Source): a plain UriPath.
             inst = Uri.__new__(UriPath)
         elif source.scheme not in cls._schemes():
             inst = cls.__new__(cls, source.scheme + ":", findclass=True)

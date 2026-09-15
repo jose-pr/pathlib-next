@@ -30,6 +30,17 @@ class FileUri(UriPath):
             return parent.with_path(path + "/")
         return parent
 
+    def is_absolute(self):
+        """Also True for a Windows drive path ("C:/x"), which `_init()`
+        stores without the "/" a URI path gets in front of it. "C:" alone is
+        drive-relative, as for `PureWindowsPath`."""
+        path = self.path
+        if _os.name == "nt":
+            drive, sep, _ = path.partition("/")
+            if _is_drive(drive):
+                return bool(sep)
+        return super().is_absolute()
+
     def _init(
         self,
         source: Source,
