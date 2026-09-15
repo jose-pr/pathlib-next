@@ -1,3 +1,5 @@
+import errno
+
 import pytest
 
 from pathlib_next.mempath import MemPath, MemPathBackend
@@ -151,8 +153,10 @@ def test_rmdir_nonempty_raises():
     root = MemPath("/")
     (root / "d").mkdir()
     (root / "d" / "f.txt").write_text("x")
-    with pytest.raises(FileExistsError):
+    with pytest.raises(OSError) as info:
         (root / "d").rmdir()
+    assert info.value.errno == errno.ENOTEMPTY
+    assert not isinstance(info.value, FileExistsError)
 
 
 # --- 2026-08-16: open("w") over a directory destroyed the whole subtree ---

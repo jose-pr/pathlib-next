@@ -257,3 +257,153 @@ def test_chown_is_not_implemented_by_default():
     # unsupported operations.
     with pytest.raises(NotImplementedError):
         MemPath("/x").chown(1000, 1000)
+
+
+# --- rm(recursive=True) error handling inside a tree --------------------------
+# Every backend without its own rm() relies on these branches. Failures are
+# injected per path name through a MemPath subclass.
+
+
+class _FaultyMemPath(MemPath):
+    """MemPath whose operations raise PermissionError for chosen names
+    (class attributes, so children made via with_segments() share them)."""
+
+    fail_unlink = frozenset()
+    fail_rmdir = frozenset()
+    fail_scandir = frozenset()
+    fail_stat = frozenset()
+    unseeded_listing = False
+
+    def unlink(self, missing_ok=False):
+        if self.name in self.fail_unlink:
+            raise PermissionError(13, "unlink refused", str(self))
+        return super().unlink(missing_ok=missing_ok)
+
+    def rmdir(self):
+        if self.name in self.fail_rmdir:
+            raise PermissionError(13, "rmdir refused", str(self))
+        return super().rmdir()
+
+    def stat(self, *, follow_symlinks=True):
+        if self.name in self.fail_stat:
+            raise PermissionError(13, "stat refused", str(self))
+        return super().stat(follow_symlinks=follow_symlinks)
+
+    def _scandir(self):
+        if self.name in self.fail_scandir:
+            raise PermissionError(13, "listing refused", str(self))
+        for name, stat in super()._scandir():
+            yield name, (None if self.unseeded_listing else stat)
+
+
+def _faulty_tree(**faults):
+    cls = type("_Faulty", (_FaultyMemPath,), faults)
+    root = cls("/")
+    (root / "d").mkdir()
+    (root / "d" / "locked.txt").write_text("x")
+    (root / "d" / "other.txt").write_text("y")
+    (root / "d" / "sub").mkdir()
+    (root / "d" / "sub" / "z.txt").write_text("z")
+    return root
+
+
+def _calls_as_names(calls):
+    return [(type(error).__name__, str(path)) for error, path in calls]
+
+
+def test_rm_recursive_child_unlink_failure_reported_then_parent_rmdir():
+    import errno
+
+    root = _faulty_tree(fail_unlink=frozenset({"locked.txt"}))
+    calls = []
+    (root / "d").rm(
+        recursive=True, ignore_error=lambda e, p: calls.append((e, p)) or True
+    )
+    # The child's failure, then the parent's own ENOTEMPTY (the parent really
+    # was not removed): each failure once, with the path it happened on.
+    assert _calls_as_names(calls) == [
+        ("PermissionError", "/d/locked.txt"),
+        ("OSError", "/d"),
+    ]
+    assert calls[1][0].errno == errno.ENOTEMPTY
+    assert [p.name for p in (root / "d").iterdir()] == ["locked.txt"]
+
+
+def test_rm_recursive_child_failure_propagates_without_ignore_error():
+    root = _faulty_tree(fail_unlink=frozenset({"locked.txt"}))
+    with pytest.raises(PermissionError, match="unlink refused"):
+        (root / "d").rm(recursive=True)
+    assert (root / "d" / "locked.txt").exists()
+
+
+def test_rm_recursive_callback_returning_false_reraises():
+    root = _faulty_tree(fail_rmdir=frozenset({"sub"}))
+    seen = []
+    with pytest.raises(PermissionError, match="rmdir refused"):
+        (root / "d").rm(recursive=True, ignore_error=lambda e, p: seen.append(p))
+    # Consulted once: the declined error is not re-offered to the handler by
+    # each enclosing directory on its way out.
+    assert [str(p) for p in seen] == ["/d/sub"]
+
+
+def test_rm_recursive_listing_failure_is_reported_for_that_directory():
+    root = _faulty_tree(fail_scandir=frozenset({"sub"}))
+    calls = []
+    (root / "d").rm(
+        recursive=True, ignore_error=lambda e, p: calls.append((e, p)) or True
+    )
+    # The unlistable directory is reported and left alone (no rmdir attempt
+    # of its own); its parent then fails ENOTEMPTY.
+    assert _calls_as_names(calls) == [
+        ("PermissionError", "/d/sub"),
+        ("OSError", "/d"),
+    ]
+    assert (root / "d" / "sub" / "z.txt").read_text() == "z"
+    assert not (root / "d" / "other.txt").exists()
+
+
+def test_rm_recursive_stats_children_the_listing_did_not_seed():
+    root = _faulty_tree(unseeded_listing=True)
+    (root / "d").rm(recursive=True)
+    assert not (root / "d").exists()
+
+
+def test_rm_top_level_stat_failure_is_not_missing():
+    root = _faulty_tree(fail_stat=frozenset({"d"}))
+    with pytest.raises(PermissionError, match="stat refused"):
+        (root / "d").rm(recursive=True, missing_ok=True)
+    calls = []
+    (root / "d").rm(
+        recursive=True, ignore_error=lambda e, p: calls.append((e, p)) or True
+    )
+    assert _calls_as_names(calls) == [("PermissionError", "/d")]
+    assert (root / "d" / "sub" / "z.txt").exists()
+
+
+def test_rm_file_unlink_failure_goes_through_ignore_error():
+    root = _faulty_tree(fail_unlink=frozenset({"locked.txt"}))
+    with pytest.raises(PermissionError):
+        (root / "d" / "locked.txt").rm()
+    (root / "d" / "locked.txt").rm(ignore_error=True)
+    assert (root / "d" / "locked.txt").exists()
+
+
+def test_rm_recursive_accepts_os_direntry_listing(tmp_path):
+    # The adapter for a `_scandir()` yielding os.DirEntry objects (as the
+    # stdlib's own private `_scandir` does) instead of (name, stat) tuples.
+    import os
+
+    from pathlib_next import LocalPath
+
+    class _DirEntryLocalPath(LocalPath):
+        def _scandir(self):
+            with os.scandir(self) as entries:
+                yield from list(entries)
+
+    (tmp_path / "d" / "sub").mkdir(parents=True)
+    (tmp_path / "d" / "a.txt").write_text("a")
+    (tmp_path / "d" / "sub" / "b.txt").write_text("b")
+    target = _DirEntryLocalPath(tmp_path / "d")
+    assert not isinstance(next(iter(target._scandir())), tuple)
+    target.rm(recursive=True)
+    assert not (tmp_path / "d").exists()

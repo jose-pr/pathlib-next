@@ -45,11 +45,11 @@ def test_gs_stat_root(gs_server):
     assert stat.is_dir()
 
 
-def test_gs_list_empty(gs_server):
-    """List on empty bucket."""
+def test_gs_list_bucket_root(gs_server):
+    """List the bucket root, which holds fixture_tree."""
     path, _ = gs_server
-    children = list(path.iterdir())
-    assert len(children) > 0  # fixture_tree has files
+    children = {child.name for child in path.iterdir()}
+    assert children == {"a.txt", "b.py", ".hidden.txt", "sub", "empty_dir"}
 
 
 def test_gs_read_existing_file(gs_server, fixture_tree):

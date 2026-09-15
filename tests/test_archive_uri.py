@@ -112,6 +112,8 @@ def test_read_member_content(uri_fn, zip_archive, tar_archive):
     assert readme.is_file()
     assert not readme.is_dir()
     assert readme.exists()
+    expected = b"hello world" if uri_fn is _zip_uri else b"hello tar"
+    assert readme.read_bytes() == expected
 
 
 def test_zip_read_text(zip_archive):

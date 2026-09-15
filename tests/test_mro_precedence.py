@@ -232,7 +232,7 @@ def test_subclass_may_still_override_guarded_operations(tmp_path):
 
 def test_downstream_mixin_composition_keeps_precedence():
     """The real downstream shape: a behavior mixin combined with a pathname
-    mixin and `Path` (e.g. hostctl's `class X(_Mixin, PosixPathname, Path)`).
+    mixin and `Path` (e.g. a downstream `class X(_Mixin, PosixPathname, Path)`).
     The mixin does not define these operations, so pathlib_next must still
     win -- on every interpreter."""
 

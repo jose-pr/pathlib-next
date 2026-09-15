@@ -332,6 +332,8 @@ def test_str_drops_password_but_host_fspath_and_path_do_not():
 def test_sftp_backend_connect_and_client():
     import unittest.mock
 
+    import paramiko
+
     mock_ssh = unittest.mock.MagicMock()
     mock_transport = unittest.mock.MagicMock()
     mock_sftp = unittest.mock.MagicMock()
@@ -368,7 +370,7 @@ def test_sftp_backend_connect_and_client():
         # Test transport raising if None -- and the client is closed.
         mock_ssh.get_transport.return_value = None
         mock_ssh.close.reset_mock()
-        with pytest.raises(Exception):
+        with pytest.raises(paramiko.SSHException, match="no transport"):
             backend.transport(source)
         mock_ssh.close.assert_called_once()
 
@@ -1050,8 +1052,16 @@ def test_pathsyncer_uses_sftp_native_checksum_no_open_when_supported():
     assert target_backend.open_paths == []
 
 
-def test_pathsyncer_sftp_falls_back_to_streaming_when_backend_unsupported():
+def test_pathsyncer_sftp_falls_back_to_streaming_when_backend_unsupported(
+    monkeypatch,
+):
+    import netimps
+
     from pathlib_next.utils.sync import PathSyncer
+
+    # PathSyncer asks `is_local()` of "sftp://host", which resolves "host":
+    # answer "does not resolve" without a real DNS query.
+    monkeypatch.setattr(netimps, "resolve", lambda *args, **kwargs: [])
 
     # _FakeBackend (module-level fixture) has no checksum() override --
     # models a real server without check-file@openssh.com support (or the
@@ -1255,7 +1265,7 @@ def test_rename_path_object_destination_is_not_double_decoded(name):
     """A destination that is already a path OBJECT must reach the wire
     exactly once-decoded.
 
-    This is the double-encoding guard: consumers (pytruenas 0.4.4/0.4.5)
+    This is the double-encoding guard: downstream consumers
     percent-encode a decoded filesystem path and construct the path from
     the resulting URI. The fix must not add a second encode/decode round
     on top -- a literal "%20" in the name is the case that catches it.

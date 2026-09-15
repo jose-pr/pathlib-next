@@ -11,20 +11,15 @@ import pytest
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
-from pathlib_next.testing import PurePathContract, ReadPathContract, PathContract
+from pathlib_next.testing import (
+    PathContract,
+    PurePathContract,
+    ReadPathContract,
+    populate_fixture_tree,
+)
 from pathlib_next.uri.schemes.file import FileUri
 from pathlib_next.uri.schemes.data import DataUri
 from pathlib_next.uri.schemes.archive import ZipUri, TarUri
-
-
-def populate_mempath_from_local(local_path, mem_path):
-    for entry in local_path.iterdir():
-        mem_child = mem_path / entry.name
-        if entry.is_dir():
-            mem_child.mkdir()
-            populate_mempath_from_local(entry, mem_child)
-        else:
-            mem_child.write_bytes(entry.read_bytes())
 
 
 def make_zip_from_local(local_dir, zip_path):
@@ -62,25 +57,33 @@ def make_tar_from_local(local_dir, tar_path):
 
 
 # Writable, full RW contract backends
-BACKENDS = ["local", "mem", "fileuri"]
+class TestLocalContract(PathContract):
+    @pytest.fixture
+    def root(self, fixture_tree):
+        return pathlib_next.LocalPath(fixture_tree)
 
 
-class TestWritableContracts(PathContract):
-    @pytest.fixture(params=BACKENDS)
-    def root(self, request, fixture_tree):
-        if request.param == "local":
-            return pathlib_next.LocalPath(fixture_tree)
-        if request.param == "mem":
-            m = MemPath("/")
-            populate_mempath_from_local(fixture_tree, m)
-            return m
-        if request.param == "fileuri":
-            return FileUri(fixture_tree.as_uri())
-        raise AssertionError(request.param)
+class TestMemContract(PathContract):
+    # MemPath has no rename(); move() falls back to copy + delete.
+    supports_rename = False
+
+    @pytest.fixture
+    def root(self):
+        return populate_fixture_tree(MemPath("/"))
+
+
+class TestFileUriContract(PathContract):
+    @pytest.fixture
+    def root(self, fixture_tree):
+        return FileUri(fixture_tree.as_uri())
 
 
 # HTTP read-only contract
 class TestHttpContract(ReadPathContract):
+    # One URL serves an index page or a file: listing a file and reading a
+    # directory cannot be told apart from the response.
+    distinguishes_file_types = False
+
     @pytest.fixture
     def root(self, http_server):
         from pathlib_next.uri.schemes.http import HttpPath
@@ -91,9 +94,14 @@ class TestHttpContract(ReadPathContract):
 # Zip read/write contract (local outer archive -- full mutation support:
 # unlink/rmdir/rename/overwrite, see polish_perf/09)
 class TestZipContract(PathContract):
+    # Members are rewritten whole; open("a") raises NotImplementedError.
+    supports_append = False
+
     @pytest.fixture
-    def root(self, tmp_path, fixture_tree):
-        zip_file = tmp_path / "tree.zip"
+    def root(self, tmp_path_factory, fixture_tree):
+        # Outside fixture_tree (which is tmp_path): an archive built inside
+        # the tree it archives lists itself.
+        zip_file = tmp_path_factory.mktemp("zip") / "tree.zip"
         make_zip_from_local(fixture_tree, zip_file)
         return ZipUri(f"zip:{zip_file.as_uri()}!/")
 
@@ -101,17 +109,22 @@ class TestZipContract(PathContract):
 # Tar read-only contract
 class TestTarContract(ReadPathContract):
     @pytest.fixture
-    def root(self, tmp_path, fixture_tree):
-        tar_file = tmp_path / "tree.tar"
+    def root(self, tmp_path_factory, fixture_tree):
+        tar_file = tmp_path_factory.mktemp("tar") / "tree.tar"
         make_tar_from_local(fixture_tree, tar_file)
         return TarUri(f"tar:{tar_file.as_uri()}!/")
 
 
 # DataUri read-only contract (represents single file)
 class TestDataUriContract(ReadPathContract):
+    supports_listing = False
+
     @pytest.fixture
     def root(self):
         return DataUri("data:text/plain,a")
+
+    def _single_resource(self):
+        pytest.skip("a data: URI is a single resource with no children")
 
     def test_exists_and_types(self, root):
         assert root.exists()
@@ -130,6 +143,23 @@ class TestDataUriContract(ReadPathContract):
         st = root.stat()
         assert st.st_size == 1
 
+    def test_open_read_modes(self, root):
+        with root.open() as fh:
+            assert fh.read() == "a"
+        with root.open("rt") as fh:
+            assert fh.read() == "a"
+        with root.open("rb") as fh:
+            assert fh.read() == b"a"
+
+    def test_stat_missing_raises_file_not_found(self, root):
+        self._single_resource()
+
+    def test_read_missing_raises_file_not_found(self, root):
+        self._single_resource()
+
+    def test_read_directory_raises(self, root):
+        self._single_resource()
+
 
 # Ftp contract
 class TestFtpContract(PathContract):
@@ -142,6 +172,9 @@ class TestFtpContract(PathContract):
 
 # WebDAV contract
 class TestDavContract(PathContract):
+    # Uploads are whole-resource PUTs; open("a") raises NotImplementedError.
+    supports_append = False
+
     @pytest.fixture
     def root(self, dav_server):
         pytest.importorskip("requests")
@@ -152,6 +185,11 @@ class TestDavContract(PathContract):
 
 # S3 contract
 class TestS3Contract(PathContract):
+    # Directories are key prefixes (implicit parents, a key and a prefix of
+    # the same name can coexist) and objects are written whole.
+    enforces_directory_hierarchy = False
+    supports_append = False
+
     @pytest.fixture
     def root(self, s3_server):
         pytest.importorskip("boto3")
@@ -164,6 +202,9 @@ class TestS3Contract(PathContract):
 # GitHub contract — in-process fake contents-API server (see conftest.py's
 # github_api_server); read-only (commits-API writes are out of scope).
 class TestGitHubContract(ReadPathContract):
+    # Git trees cannot hold an empty directory: empty_dir/ has a .gitkeep.
+    supports_empty_directories = False
+
     @pytest.fixture
     def root(self, github_api_server):
         pytest.importorskip("requests")
@@ -177,6 +218,8 @@ class TestGitHubContract(ReadPathContract):
 # GitLab contract — in-process fake REST v4 server (see conftest.py's
 # gitlab_api_server); read-only.
 class TestGitLabContract(ReadPathContract):
+    supports_empty_directories = False
+
     @pytest.fixture
     def root(self, gitlab_api_server):
         pytest.importorskip("requests")
@@ -227,7 +270,8 @@ class TestSftpContract(PathContract):
             try:
                 client = backend.client(path.source)
                 client.sock.get_transport().close()
-            except Exception:
+            except (OSError, EOFError, paramiko.SSHException):
+                # Already disconnected: nothing left to close.
                 pass
             _CACHED_CLIENTS.invalidate(backend, path.source, threading.get_ident())
         else:
@@ -249,6 +293,10 @@ class TestSftpContract(PathContract):
 # GCS contract — in-process fake JSON REST server (see conftest.py's
 # gcs_api_server); full read/write.
 class TestGsContract(PathContract):
+    # Same object-store model as TestS3Contract.
+    enforces_directory_hierarchy = False
+    supports_append = False
+
     @pytest.fixture
     def root(self, gs_server):
         pytest.importorskip("google.cloud.storage")
@@ -258,6 +306,10 @@ class TestGsContract(PathContract):
 # Azure Blob contract — in-process fake XML REST server (see conftest.py's
 # az_api_server); full read/write.
 class TestAzContract(PathContract):
+    # Same object-store model as TestS3Contract.
+    enforces_directory_hierarchy = False
+    supports_append = False
+
     @pytest.fixture
     def root(self, az_server):
         pytest.importorskip("azure.storage.blob")

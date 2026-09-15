@@ -839,11 +839,146 @@ def test_sftppath_rm_recursive_uses_concurrent_helper(monkeypatch):
 def test_explicit_max_concurrency_overrides_default():
     backend = backend_mod.AsyncsshSftpBackend({"config": None}, max_concurrency=4)
     assert backend.max_concurrency == 4
-    # 0 is honored as given (the async helpers clamp to >=1 at use time via
-    # `max(1, max_concurrency)`), not silently replaced by the default.
     assert (
         backend_mod.AsyncsshSftpBackend(
             {"config": None}, max_concurrency=1
         ).max_concurrency
         == 1
     )
+    # 0 is honored as given (the async helpers clamp to >=1 at use time via
+    # `max(1, max_concurrency)`), not silently replaced by the default.
+    assert (
+        backend_mod.AsyncsshSftpBackend(
+            {"config": None}, max_concurrency=0
+        ).max_concurrency
+        == 0
+    )
+
+
+# --- concurrent recursive copy against a real server --------------------------
+# The fakes above hold one flat directory. These run SftpPath.copy's native
+# fan-out (`_concurrent_copy`) over conftest's in-process asyncssh server,
+# whose root is `fixture_tree`, and read the result back from local disk.
+
+
+@pytest.fixture
+def asyncssh_tree(sftp_server, fixture_tree):
+    from pathlib_next.uri.schemes.sftp import SftpPath
+
+    backend = backend_mod.AsyncsshSftpBackend()
+    root = SftpPath(sftp_server, backend=backend)
+    yield root, fixture_tree
+    backend_mod._CACHE.invalidate((backend, root.source))
+
+
+def _bounded(call, timeout=60):
+    """Run `call` on a worker thread: a fan-out deadlock fails the test
+    instead of hanging the run (sync calls made on the asyncssh bridge loop can deadlock).
+    """
+    import threading
+
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = call()
+        except BaseException as error:  # re-raised on the test thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), f"copy did not finish within {timeout}s"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
+def _local_tree(root):
+    return {
+        p.relative_to(root).as_posix(): (None if p.is_dir() else p.read_bytes())
+        for p in root.rglob("*")
+    }
+
+
+def test_concurrent_copy_nested_tree_and_overwrite_real_server(asyncssh_tree):
+    root, local = asyncssh_tree
+    (local / "sub" / "nested" / "deeper").mkdir()
+    (local / "sub" / "nested" / "deeper" / "e.bin").write_bytes(b"\x00e" * 3000)
+
+    _bounded(lambda: (root / "sub").copy(root / "copy", recursive=True))
+    assert _local_tree(local / "copy") == _local_tree(local / "sub")
+
+    # overwrite=True descends into the existing tree: an existing nested
+    # directory is reused and an existing file replaced.
+    (local / "sub" / "nested" / "d.py").write_bytes(b"changed")
+    (local / "copy" / "stale.txt").write_bytes(b"kept")
+    _bounded(lambda: (root / "sub").copy(root / "copy", recursive=True, overwrite=True))
+    assert (local / "copy" / "nested" / "d.py").read_bytes() == b"changed"
+    assert (local / "copy" / "nested" / "deeper" / "e.bin").read_bytes() == (
+        b"\x00e" * 3000
+    )
+    assert (local / "copy" / "stale.txt").read_bytes() == b"kept"
+
+
+def test_concurrent_copy_type_conflicts_in_existing_tree_real_server(asyncssh_tree):
+    root, local = asyncssh_tree
+    target = local / "conflict"
+    target.mkdir()
+    (target / "nested").write_bytes(b"a file where src has a directory")
+    (target / "c.py").mkdir()  # a directory where src has a file
+
+    errors = []
+    _bounded(
+        lambda: (root / "sub").copy(
+            root / "conflict",
+            recursive=True,
+            overwrite=True,
+            ignore_error=errors.append,
+        )
+    )
+    assert sorted(type(error).__name__ for error in errors) == [
+        "FileExistsError",
+        "IsADirectoryError",
+    ]
+    # Neither conflicting entry was replaced.
+    assert (target / "nested").read_bytes() == b"a file where src has a directory"
+    assert (target / "c.py").is_dir()
+
+    with pytest.raises((FileExistsError, IsADirectoryError)):
+        _bounded(
+            lambda: (root / "sub").copy(
+                root / "conflict", recursive=True, overwrite=True
+            )
+        )
+
+
+def test_concurrent_copy_symlink_child_uses_sync_fallback_real_server(asyncssh_tree):
+    import os
+
+    root, local = asyncssh_tree
+    real = local / "sub" / "c.py"
+    try:
+        # Absolute: asyncssh's chrooted SFTPServer cannot map a relative link
+        # target back into the chroot (readlink raises "File not found").
+        os.symlink(str(real), local / "sub" / "link.py")
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink unavailable: {error}")
+    try:
+        if (root / "sub" / "link.py").readlink().path != "/sub/c.py":
+            raise OSError("unexpected link target")
+    except OSError as error:
+        pytest.skip(f"this server does not serve symlinks: {error}")
+
+    _bounded(
+        lambda: (root / "sub").copy(
+            root / "linked_copy", recursive=True, follow_symlinks=False
+        )
+    )
+    copied = local / "linked_copy" / "link.py"
+    assert copied.is_symlink()
+    # The same target, compared as the server reports it: a local readlink
+    # on Windows adds an extended-length path prefix.
+    assert (root / "linked_copy" / "link.py").readlink().path == "/sub/c.py"
+    assert copied.read_bytes() == b"c"
+    assert (local / "linked_copy" / "nested" / "d.py").read_bytes() == b"d"

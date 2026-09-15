@@ -10,7 +10,6 @@ disambiguation.
 import errno
 import http.server
 import json
-import threading
 
 import pytest
 
@@ -153,7 +152,7 @@ def test_github_open_on_directory_raises_is_a_directory(github_api_server):
         p.read_bytes()
 
 
-def test_github_symlink_entry_treated_as_file(fixture_tree):
+def test_github_symlink_entry_treated_as_file(serve_http):
     """A `symlink`/`submodule` contents-API entry has no special handling
     -- it's surfaced as a plain file (documented divergence)."""
 
@@ -171,19 +170,12 @@ def test_github_symlink_entry_treated_as_file(fixture_tree):
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        backend = RepoBackend(api_base=f"http://127.0.0.1:{server.server_port}")
+    with serve_http(_Handler) as base_url:
+        backend = RepoBackend(api_base=base_url)
         p = GitHubPath("github://github.com/acme/widgets", backend=backend)
         entries = dict(p._scandir())
         assert not entries["link"].is_dir()
         assert entries["link"].st_size == 4
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 # --- GitLab-specific behavior --------------------------------------------
@@ -234,7 +226,7 @@ def test_gitpath_direct_constructor_initializes_provider_instance():
 
 
 @pytest.fixture
-def status_server():
+def status_server(serve_http):
     """Serves canned status codes on demand -- `/<code>` returns that
     status, `/ratelimited` returns 403 with GitHub's rate-limit headers.
     """
@@ -261,15 +253,8 @@ def status_server():
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with serve_http(_Handler) as base_url:
+        yield base_url
 
 
 def test_github_404_raises_file_not_found(status_server):

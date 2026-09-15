@@ -9,7 +9,6 @@ from pathlib_next.uri import Uri
 test_uris = ["http://user:pass@google.com:80"]
 
 
-# @pytest.mark.parametrize("_uri", test_uris)
 def parse_uri(_uri: str):
     uri = pathlib_next.Uri(_uri)
     assert uri.as_uri() == _uri

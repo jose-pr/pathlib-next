@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import http.server
 import threading
@@ -6,6 +7,53 @@ import time
 import pytest
 
 from pathlib_next.mempath import MemPath, MemPathBackend
+
+
+def _uri_extra_collect_ignore():
+    """Test modules to skip collecting when the `uri` extra is not installed.
+
+    `pip install pathlib-next` has no dependencies, so without `uritools` and
+    `netimps` any module that imports `pathlib_next.uri` (or the extra itself)
+    at import time is a collection error that aborts the whole session. Such
+    modules are found by reading their module-level imports, so the list never
+    needs maintaining; everything else (LocalPath, MemPath, glob, sync, the
+    CLI) still runs. With the extra installed this returns nothing.
+    """
+    import ast
+    import importlib.util
+    import pathlib
+
+    if all(importlib.util.find_spec(name) for name in ("uritools", "netimps")):
+        return []
+
+    def needs_uri(module: str) -> bool:
+        return module.split(".")[0] in ("uritools", "netimps") or (
+            module == "pathlib_next.uri" or module.startswith("pathlib_next.uri.")
+        )
+
+    def imports_uri(node) -> bool:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return False  # runs at call time, where the test can skip itself
+        if isinstance(node, ast.Import):
+            return any(needs_uri(alias.name) for alias in node.names)
+        if isinstance(node, ast.ImportFrom) and not node.level:
+            module = node.module or ""
+            return needs_uri(module) or any(
+                needs_uri(f"{module}.{alias.name}")
+                or (module == "pathlib_next" and alias.name in ("Uri", "UriPath"))
+                for alias in node.names
+            )
+        return any(imports_uri(child) for child in ast.iter_child_nodes(node))
+
+    here = pathlib.Path(__file__).parent
+    return sorted(
+        path.name
+        for path in here.glob("test_*.py")
+        if imports_uri(ast.parse(path.read_bytes(), filename=str(path)))
+    )
+
+
+collect_ignore = _uri_extra_collect_ignore()
 
 
 @pytest.fixture
@@ -21,18 +69,126 @@ def fixture_tree(tmp_path):
         nested/
           d.py
       empty_dir/
+
+    Built by the shipped `pathlib_next.testing.populate_fixture_tree()`, so
+    the in-repo contracts and downstream users share one definition.
     """
-    (tmp_path / "a.txt").write_text("a")
-    (tmp_path / "b.py").write_text("b")
-    (tmp_path / ".hidden.txt").write_text("hidden")
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "c.py").write_text("c")
-    nested = sub / "nested"
-    nested.mkdir()
-    (nested / "d.py").write_text("d")
-    (tmp_path / "empty_dir").mkdir()
-    return tmp_path
+    from pathlib_next.testing import populate_fixture_tree
+
+    return populate_fixture_tree(tmp_path)
+
+
+@contextlib.contextmanager
+def _serve_http(handler):
+    """Run a `ThreadingHTTPServer` for `handler` on an OS-assigned loopback
+    port; yields its base URL (no trailing slash) and stops it on exit."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def serve_http():
+    """The `_serve_http(handler)` context manager, for tests that need a
+    one-off handler of their own."""
+    return _serve_http
+
+
+class NetworkAccessBlocked(RuntimeError):
+    """A test tried to reach a non-loopback host. Not an OSError on purpose:
+    code that treats a network failure as "offline" must not swallow it."""
+
+
+def _is_loopback_host(host) -> bool:
+    import ipaddress
+
+    if host is None:
+        return True
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    host = str(host).strip("[]").split("%", 1)[0]
+    if host.lower() in ("", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "allow_network: lift the autouse non-loopback network guard for a test "
+        "that deliberately resolves or connects to a real host",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _block_non_loopback_network(request, monkeypatch):
+    """Hermetic tests: any connect/sendto/getaddrinfo aimed at a host other
+    than loopback raises `NetworkAccessBlocked`, and a blocked attempt fails
+    the test at teardown even if the code under test swallowed the error.
+    Autouse rather than opt-in, because the failure it prevents (a refactor
+    that quietly sends a monkeypatched HTTP test to the real internet, or a
+    DNS lookup that stalls an offline CI runner) is only caught by a guard
+    the test author did not have to remember. `@pytest.mark.allow_network`
+    lifts it for a test that means to use the network."""
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+    import socket
+
+    blocked = []
+
+    def check(host, what):
+        if not _is_loopback_host(host):
+            blocked.append(f"{what} {host!r}")
+            raise NetworkAccessBlocked(
+                f"{what} to non-loopback host {host!r}; "
+                "mark the test @pytest.mark.allow_network if intended"
+            )
+
+    def address_host(address):
+        # AF_INET/AF_INET6 tuples carry the host first; AF_UNIX paths are local.
+        if isinstance(address, tuple) and address:
+            return address[0]
+        return None
+
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_sendto = socket.socket.sendto
+    real_getaddrinfo = socket.getaddrinfo
+
+    def connect(self, address):
+        check(address_host(address), "connect")
+        return real_connect(self, address)
+
+    def connect_ex(self, address):
+        check(address_host(address), "connect")
+        return real_connect_ex(self, address)
+
+    def sendto(self, data, *args):
+        check(address_host(args[-1]), "sendto")
+        return real_sendto(self, data, *args)
+
+    def getaddrinfo(host, *args, **kwargs):
+        check(host, "getaddrinfo")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", sendto)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    # Yielded so a test of the guard itself can inspect and clear it.
+    yield blocked
+    if blocked:
+        pytest.fail(f"non-loopback network access attempted: {blocked}")
 
 
 @pytest.fixture
@@ -53,15 +209,8 @@ def http_server(fixture_tree):
     handler = functools.partial(
         http.server.SimpleHTTPRequestHandler, directory=str(fixture_tree)
     )
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with _serve_http(handler) as base_url:
+        yield base_url
 
 
 class _CannedListingHandler(http.server.SimpleHTTPRequestHandler):
@@ -155,15 +304,8 @@ class _NginxTableListingHandler(_CannedListingHandler):
 
 def _start_canned_server(handler_cls, fixture_tree):
     handler = functools.partial(handler_cls, directory=str(fixture_tree))
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with _serve_http(handler) as base_url:
+        yield base_url
 
 
 @pytest.fixture
@@ -209,15 +351,8 @@ def http_status_server():
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StatusHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with _serve_http(_StatusHandler) as base_url:
+        yield base_url
 
 
 class _WritableHandler(http.server.SimpleHTTPRequestHandler):
@@ -363,12 +498,23 @@ def ftp_server(fixture_tree):
     ioloop = Select()
     server = FTPServer(("127.0.0.1", 0), handler, ioloop=ioloop)
 
+    stop = threading.Event()
+
     def serve():
+        # serve_forever()'s own loop, with a poll timeout and a stop flag:
+        # without a timeout select() blocks indefinitely, so a close
+        # scheduled from the pytest thread never ran and every teardown
+        # waited out its full join timeout. Everything, close_all()
+        # included, runs on this thread.
         try:
-            server.serve_forever()
+            while not stop.is_set() and ioloop.socket_map:
+                ioloop.poll(0.05)
+                ioloop.sched.poll()
         except OSError as error:
             if error.errno != errno.EBADF:
                 raise
+        finally:
+            server.close_all()
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
@@ -376,11 +522,9 @@ def ftp_server(fixture_tree):
         port = server.socket.getsockname()[1]
         yield f"ftp://user:12345@127.0.0.1:{port}/"
     finally:
-        ioloop.call_later(0, server.close_all)
+        stop.set()
         thread.join(timeout=5)
-        if thread.is_alive():
-            server.close_all()
-            thread.join(timeout=5)
+        assert not thread.is_alive(), "ftp_server thread did not stop"
 
 
 @pytest.fixture
@@ -714,15 +858,8 @@ def github_api_server(fixture_tree):
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _GitHubApiHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", owner, repo
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with _serve_http(_GitHubApiHandler) as base_url:
+        yield base_url, owner, repo
 
 
 @pytest.fixture
@@ -846,15 +983,8 @@ def gitlab_api_server(fixture_tree):
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _GitLabApiHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", owner, repo
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with _serve_http(_GitLabApiHandler) as base_url:
+        yield base_url, owner, repo
 
 
 @pytest.fixture
@@ -1058,16 +1188,8 @@ def gcs_api_server(fixture_tree):
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _GcsApiHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        base_url = f"http://127.0.0.1:{server.server_port}"
+    with _serve_http(_GcsApiHandler) as base_url:
         yield base_url, bucket_name
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -1286,16 +1408,8 @@ def az_api_server(fixture_tree):
         def log_message(self, format, *args):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AzApiHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        base_url = f"http://127.0.0.1:{server.server_port}"
+    with _serve_http(_AzApiHandler) as base_url:
         yield base_url, account, container
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 @pytest.fixture

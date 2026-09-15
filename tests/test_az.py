@@ -27,11 +27,11 @@ def test_az_stat_root(az_server):
     assert stat.is_dir()
 
 
-def test_az_list_empty(az_server):
-    """List on container with files."""
+def test_az_list_container_root(az_server):
+    """List the container root, which holds fixture_tree."""
     path, _ = az_server
-    children = list(path.iterdir())
-    assert len(children) > 0  # fixture_tree has files
+    children = {child.name for child in path.iterdir()}
+    assert children == {"a.txt", "b.py", ".hidden.txt", "sub", "empty_dir"}
 
 
 def test_az_read_existing_file(az_server, fixture_tree):

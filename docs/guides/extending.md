@@ -146,26 +146,49 @@ fallback).
 To ensure custom implementations comply with `pathlib_next`'s expected behaviors, the library offers three contract levels in `pathlib_next.testing` which can be mixed into your `pytest` suite:
 
 1. **`PurePathContract`**: Covers logical pure-path operations (joining, parents, stems, suffix checks, and glob matching) that do not require any physical I/O.
-2. **`ReadPathContract`**: Extends `PurePathContract` to verify read-only I/O capabilities (such as `exists()`, `is_file()`, `is_dir()`, `read_text()`, `iterdir()`, and `stat()`). This level requires a pre-populated `root` fixture.
-3. **`PathContract`**: Extends `ReadPathContract` to verify full read/write/modify capabilities (such as `mkdir()`, `write_text()`, `unlink()`, `rm()`, `copy()`, `move()`, and `touch()`).
+2. **`ReadPathContract`**: Extends `PurePathContract` to verify read-only I/O: `exists()`/`is_file()`/`is_dir()`, `read_text()`/`read_bytes()`, `open()` read modes, `iterdir()`, `stat()`, `glob()`/`rglob()` and `walk()`, plus the error paths with pathlib's exception types (a missing path raises `FileNotFoundError`, listing a file `NotADirectoryError`, reading a directory `IsADirectoryError` or, as pathlib does on Windows, `PermissionError`).
+3. **`PathContract`**: Extends `ReadPathContract` to verify writes: `mkdir()`, `write_text()`/`write_bytes()`, `open()` write/append/exclusive modes, `unlink()`, `rmdir()`, `rm()`, `copy()` (including `recursive=True`), `move()`, `rename()` and `touch()`, again with their error paths (a missing parent raises `FileNotFoundError`, `rmdir()` of a file `NotADirectoryError`, of a non-empty directory `OSError(ENOTEMPTY)`).
 
-### Which Contract is Run by Built-in Schemes?
-- **Full `PathContract`**: Executed against `LocalPath`, `MemPath`, `FileUri`, and `SftpPath`.
-- **`ReadPathContract`**: Executed against `DataUri` (with directory listing skipped), `ZipUri` (read-only mode), `TarUri`, and `HttpPath` (against a local test HTTP server).
-- **Unit Mocks only**: `FtpPath`, `DavPath`, and `S3Path` are tested via unit fakes because fully spinning up their real servers locally to satisfy the generic test suite is non-trivial.
+Both I/O levels need a `root` fixture pointing at a **fresh, function-scoped** directory holding the standard tree (`a.txt`, `b.py`, `.hidden.txt`, `sub/c.py`, `sub/nested/d.py`, `empty_dir/`). `populate_fixture_tree(root)` builds it through your path's own `mkdir()`/`write_text()`. The write tests create fixed names under `root` without cleaning up, so two contract classes must never share one.
 
 ### Example: Running the full contract
 
-Subclass the appropriate contract with a `root` fixture providing a writable directory:
-
 ```python
 import pytest
-from pathlib_next.testing import PathContract
+
+from pathlib_next import LocalPath as MyPath  # your Path subclass here
+from pathlib_next.testing import PathContract, populate_fixture_tree
+
 
 class TestMyPath(PathContract):
     @pytest.fixture
     def root(self, tmp_path):
-        return MyPath(tmp_path)   # an empty, writable directory
+        root = MyPath(tmp_path)
+        populate_fixture_tree(root)
+        return root
 ```
 
-See `pathlib_next`'s own `tests/test_contract.py` for concrete examples wiring these contracts to existing schemes.
+This example runs verbatim in the project's own suite (`tests/test_contract_helpers.py`).
+
+### Capability attributes
+
+A backend that genuinely cannot meet a rule sets the matching class attribute to `False` on its test class. The affected tests then report as skipped, never as passed. Every attribute defaults to `True`; set one only for a documented gap.
+
+| Attribute | Contract | Covers | Built-in schemes that set it `False` |
+| --- | --- | --- | --- |
+| `supports_listing` | `ReadPathContract` | `iterdir()`, `glob()`, `walk()` | `DataUri` (a single resource) |
+| `supports_empty_directories` | `ReadPathContract` | `empty_dir/` lists as empty | `GitHubPath`, `GitLabPath` (git trees cannot hold an empty directory) |
+| `distinguishes_file_types` | `ReadPathContract` | listing a file raises `NotADirectoryError`; reading a directory raises | `HttpPath` (one URL serves an index page or a file) |
+| `supports_rename` | `PathContract` | `rename()` | `MemPath` (`move()` copies instead) |
+| `supports_append` | `PathContract` | `open("a")` | `ZipUri`, `DavPath`, `S3Path`, `GsPath`, `AzPath` |
+| `supports_exclusive_create` | `PathContract` | `open("x")` | none |
+| `enforces_directory_hierarchy` | `PathContract` | `mkdir()`/writes below a missing parent raise `FileNotFoundError`; writing a file over a directory raises | `S3Path`, `GsPath`, `AzPath` (directories are key prefixes) |
+
+### Which contract runs against the built-in schemes?
+
+`tests/test_contract.py` runs:
+
+- **Full `PathContract`**: `LocalPath`, `MemPath`, `FileUri`, `ZipUri` (local outer archive), `FtpPath` (in-process pyftpdlib), `DavPath` (in-process WsgiDAV), `S3Path` (moto), `SftpPath` (in-process asyncssh server, with both the paramiko and asyncssh client backends), and `GsPath`/`AzPath` (in-process fake REST servers; they skip when the SDK is not installed).
+- **`ReadPathContract`**: `HttpPath` (local HTTP server), `TarUri`, `DataUri` (listing skipped), and `GitHubPath`/`GitLabPath` (in-process fake APIs).
+
+See `tests/test_contract.py` for how each scheme's `root` fixture is wired.

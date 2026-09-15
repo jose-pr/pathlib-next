@@ -406,6 +406,74 @@ def test_http_append_rewrite_mode_multiple_writes(http_writable_server):
     assert p.read_bytes() == b"abc"
 
 
+@pytest.fixture
+def patch_mode_requests(monkeypatch):
+    """Record every request method sent through `requests`, passing each on
+    to the real server unchanged."""
+    import requests
+
+    real_request = requests.Session.request
+    methods = []
+
+    def request(self, method, url, *args, **kwargs):
+        methods.append(method)
+        return real_request(self, method, url, *args, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "request", request)
+    return methods
+
+
+def _patch_mode(url):
+    import requests
+
+    return UriPath(url).with_session(requests.Session(), append_mode="patch")
+
+
+def test_http_append_patch_mode_existing_file_real_server(
+    http_writable_server, patch_mode_requests
+):
+    # conftest's _WritableHandler.do_PATCH writes at the Content-Range
+    # offset, so a wrong offset corrupts the persisted bytes.
+    p = _patch_mode(f"{http_writable_server}/patch_existing.txt")
+    p.write_bytes(b"hello")
+    patch_mode_requests.clear()
+    with p.open("ab") as f:
+        f.write(b" wor")
+        f.write(b"ld")
+    assert "PATCH" in patch_mode_requests and "GET" not in patch_mode_requests
+    assert p.read_bytes() == b"hello world"
+    with p.open("ab") as f:
+        f.write(b"!")
+    assert p.read_bytes() == b"hello world!"
+
+
+def test_http_append_patch_mode_new_file_real_server(
+    http_writable_server, patch_mode_requests
+):
+    p = _patch_mode(f"{http_writable_server}/patch_new.txt")
+    with p.open("ab") as f:
+        f.write(b"abc")
+    assert patch_mode_requests.count("PATCH") == 1
+    assert p.read_bytes() == b"abc"
+
+
+def test_http_append_patch_mode_empty_append_real_server(
+    http_writable_server, patch_mode_requests
+):
+    # pathlib's open("ab") with nothing written creates a missing file and
+    # leaves an existing one alone; neither sends an (invalid) empty range.
+    new = _patch_mode(f"{http_writable_server}/patch_empty_new.txt")
+    with new.open("ab"):
+        pass
+    assert new.read_bytes() == b""
+
+    existing = _patch_mode(f"{http_writable_server}/a.txt")
+    with existing.open("ab"):
+        pass
+    assert existing.read_bytes() == b"a"
+    assert "PATCH" not in patch_mode_requests
+
+
 def test_http_append_patch_mode_configured(monkeypatch):
     """Test PATCH mode with Content-Range header."""
     import requests
@@ -415,9 +483,7 @@ def test_http_append_patch_mode_configured(monkeypatch):
     def mock_request(self, method, url, **kwargs):
         recorded.append((method, url, kwargs.get("headers", {}), kwargs.get("data")))
         if method == "HEAD":
-            return _MockHttpResponse(200, "", headers={"Content-Length": "0"}, url=url)
-        elif method == "GET":
-            return _MockHttpResponse(200, "existing content", url=url)
+            return _MockHttpResponse(200, "", headers={"Content-Length": "16"}, url=url)
         elif method == "PATCH":
             return _MockHttpResponse(204, url=url)
         else:
@@ -432,11 +498,13 @@ def test_http_append_patch_mode_configured(monkeypatch):
     with p.open("ab") as f:
         f.write(b"new content")
 
-    # Should have made a STAT call (to get size) and a PATCH call
-    patch_calls = [r for r in recorded if r[0] == "PATCH"]
-    assert len(patch_calls) > 0
-    # Content-Range header should be present
-    assert any("Content-Range" in r[2] for r in patch_calls)
+    # One HEAD for the size (the start offset), then exactly the new bytes
+    # at that offset -- never a GET + full rewrite.
+    assert [(method, data) for method, _url, _headers, data in recorded] == [
+        ("HEAD", None),
+        ("PATCH", b"new content"),
+    ]
+    assert recorded[1][2] == {"Content-Range": "bytes 16-26/*"}
 
 
 def test_http_append_patch_mode_rejection(monkeypatch):

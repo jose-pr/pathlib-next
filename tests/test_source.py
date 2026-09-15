@@ -80,6 +80,7 @@ def test_is_local_bare_ipv6_string_host():
     assert Source(None, None, "::1", None).is_local()
 
 
+@pytest.mark.allow_network  # real resolution of this machine's own name
 def test_is_local_own_hostname():
     # Exercises the real hostname->address resolution path end to end
     # (netimps.resolve()'s default backend chain), not just IP literals.
@@ -102,7 +103,7 @@ def test_is_local_own_hostname():
     assert Source(None, None, hostname, None).is_local()
 
 
-def test_is_local_false_for_nonresolving_hostname():
+def test_is_local_false_for_nonresolving_hostname(monkeypatch):
     # A hostname that genuinely doesn't resolve anywhere now correctly
     # returns False (definitive non-local answer) rather than raising --
     # netimps.resolve()'s contract is "always a list, empty on genuine
@@ -112,7 +113,23 @@ def test_is_local_false_for_nonresolving_hostname():
     # socket.gaierror for the same input -- callers like
     # utils.sync._is_local() that used to catch that exception and treat
     # it as "local" (safe-default fallback) now get a real answer instead.
+    #
+    # The resolver is stubbed with that "not found" answer: a real lookup
+    # of an .invalid name still queries the configured nameservers.
+    import netimps
+
+    queries = []
+
+    def resolve(host, rdtype, *args, **kwargs):
+        queries.append((host, rdtype))
+        return []
+
+    monkeypatch.setattr(netimps, "resolve", resolve)
     assert not Source(None, None, "this-host-does-not-exist.invalid", None).is_local()
+    assert queries == [
+        ("this-host-does-not-exist.invalid", "a"),
+        ("this-host-does-not-exist.invalid", "aaaa"),
+    ]
 
 
 def test_is_local_own_interface_address():
@@ -147,3 +164,21 @@ def test_getitem_by_name_and_index():
 def test_str_uses_uricompose():
     s = Source("http", None, "host", 80)
     assert str(s) == "http://host:80"
+
+
+def test_network_guard_blocks_non_loopback_hosts(_block_non_loopback_network):
+    # The autouse conftest guard: loopback works, anything else raises (and
+    # would fail the test at teardown even if swallowed).
+    import socket
+
+    blocked = _block_non_loopback_network
+    assert socket.getaddrinfo("127.0.0.1", 80)
+    assert socket.getaddrinfo("localhost", 80)
+    for call in (
+        lambda: socket.getaddrinfo("example.com", 80),
+        lambda: socket.create_connection(("192.0.2.1", 80), timeout=0.1),
+    ):
+        with pytest.raises(RuntimeError, match="non-loopback"):
+            call()
+    assert blocked == ["getaddrinfo 'example.com'", "getaddrinfo '192.0.2.1'"]
+    blocked.clear()

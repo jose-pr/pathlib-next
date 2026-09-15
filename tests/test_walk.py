@@ -1,6 +1,4 @@
-import pytest
 import os
-import posixpath as _posix
 import unittest.mock
 from pathlib_next.mempath import MemPath
 from pathlib_next.fspath import LocalPath
