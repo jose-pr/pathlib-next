@@ -256,6 +256,8 @@ class S3Path(UriPath):
     def rename(self, target: "S3Path | Uri | str"):
         target = self._rename_target(target)
         dest_key = target.path.lstrip("/")
+        if dest_key == self.key:
+            return
         self._client.copy_object(
             Bucket=self.bucket,
             Key=dest_key,

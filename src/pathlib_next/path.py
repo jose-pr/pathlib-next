@@ -414,7 +414,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         carry st_dev/st_ino) -- LocalPath gets a real implementation from
         pathlib.Path via MRO instead of this one.
         """
-        other = other_path if isinstance(other_path, Path) else type(self)(other_path)
+        other = (
+            other_path
+            if isinstance(other_path, Path)
+            else self._coerce_target(other_path)
+        )
         st1 = self.stat()
         st2 = other.stat()
         ident1 = (getattr(st1, "st_dev", None), getattr(st1, "st_ino", None))
@@ -712,6 +716,23 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             except Exception as error:
                 _handle(error, self)
 
+    def _coerce_target(self, target: str) -> "Path":
+        """Turn a `str` destination (`copy()`, `move()`, `samefile()`) into a
+        path on the same backend. The default keeps per-instance state (a
+        `MemPath`'s in-memory filesystem) via `with_segments()`; the bare
+        constructor used before gave every str destination a fresh, empty
+        backend, so `move("/c.txt")` wrote there and then deleted the source.
+        `UriPath` overrides this to parse the string as a URI."""
+        return self.with_segments(target)
+
+    def _rename_compatible(self, target: "Path") -> bool:
+        """Whether `rename()` may be attempted onto `target` at all. `move()`
+        skips straight to copy + delete when it is not. Default True: URI
+        schemes decide per target in `rename()` (raising NotImplementedError);
+        `LocalPath` requires a local target, since `os.rename()` would
+        otherwise take a remote path's `__fspath__()` as a local name."""
+        return True
+
     def _is_junction_link(self) -> bool:
         """Whether this path is a directory *link* that a non-following stat
         still reports as a directory (a Windows junction).
@@ -845,7 +866,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         see `docs/divergences.md`'s "Deliberate extensions" section.
         """
         if isinstance(target, str):
-            target = type(self)(target)
+            target = self._coerce_target(target)
         src = self
 
         if recursive and src.is_dir():
@@ -930,8 +951,10 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
     def move(self, target: "Path|str", *, overwrite=False):
         """Move this file or directory to target, falling back to copy+unlink/rm if rename is unsupported."""
         if isinstance(target, str):
-            target = type(self)(target)
+            target = self._coerce_target(target)
         src = self
+        # rename() only makes sense between paths the same backend can see.
+        native = src._rename_compatible(target)
 
         # Everything that can fail cheaply is checked before the target is
         # touched: a missing source, or a file onto a directory, used to
@@ -953,19 +976,32 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     if not src_stat.is_dir():
                         raise IsADirectoryError(target)
                     target.rm(recursive=True, missing_ok=True)
-                elif type(target) is type(src) and callable(
-                    getattr(src, "replace", None)
+                elif (
+                    native
+                    and type(target) is type(src)
+                    and callable(getattr(src, "replace", None))
                 ):
                     # Local paths: os.replace() swaps atomically and leaves
                     # the target untouched if it fails (e.g. a locked source).
-                    return src.replace(target)
+                    try:
+                        return src.replace(target)
+                    except OSError as error:
+                        if error.errno != _errno.EXDEV:
+                            raise
+                        native = False
                 else:
                     target.unlink(missing_ok=True)
 
-        try:
-            return src.rename(target)
-        except NotImplementedError:
-            pass
+        if native:
+            try:
+                return src.rename(target)
+            except NotImplementedError:
+                pass
+            except OSError as error:
+                # Another filesystem or drive: fall back to copy + delete, as
+                # shutil.move and 3.14's Path.move do.
+                if error.errno != _errno.EXDEV:
+                    raise
 
         if src.is_dir():
             src.copy(target, overwrite=overwrite, recursive=True)

@@ -59,6 +59,17 @@ class _AzWriteStream(_io.BytesIO):
         super().close()
 
 
+def _copy_status(props) -> "str | None":
+    # `start_copy_from_url()` returns a dict with "copy_status";
+    # `get_blob_properties()` returns BlobProperties, whose status lives at
+    # `.copy.status` -- indexing it with "copy_status" raised KeyError.
+    try:
+        return props["copy_status"]
+    except (KeyError, TypeError):
+        pass
+    return getattr(getattr(props, "copy", None), "status", None)
+
+
 class AzPath(UriPath):
     """`az:` scheme (`az://account/container/key/path`): read/write/list via
     `azure.storage.blob`. Requires the `az` extra. Azure Blob has no real
@@ -281,25 +292,36 @@ class AzPath(UriPath):
                 if not on_error(error):
                     raise
 
+    def _same_location(self, other: Uri) -> bool:
+        # The authority is the storage account; a rename is a blob copy
+        # within one container, so the container must match too.
+        if not super()._same_location(other):
+            return False
+        other_container = next((s for s in other.path.split("/") if s), "")
+        return other_container == self.container
+
     def rename(self, target: "AzPath | Uri | str"):
         target = self._rename_target(target)
-        dest_key = (
-            self.with_segments(target).key
-            if not isinstance(target, AzPath)
-            else target.key
-        )
+        # `with_path`, not `with_segments(target)`: the latter joined the Uri
+        # object itself as a segment and raised TypeError for every str target.
+        dest = target if isinstance(target, AzPath) else self.with_path(target.path)
+        dest_key = dest.key
+        if dest_key == self.key:
+            # Copying a blob onto itself and then deleting the "source"
+            # deletes the only copy.
+            return
         source_blob_client = self._container.get_blob_client(self.key)
         source_url = source_blob_client.url
         dest_blob_client = self._container.get_blob_client(dest_key)
         # start_copy_from_url is async, poll for completion
         copy_props = dest_blob_client.start_copy_from_url(source_url)
         # Poll until copy is complete
-        while copy_props["copy_status"] == "pending":
+        while _copy_status(copy_props) == "pending":
             import time
 
             time.sleep(0.1)
             dest_blob_client = self._container.get_blob_client(dest_key)
             copy_props = dest_blob_client.get_blob_properties()
-        if copy_props["copy_status"] != "success":
+        if _copy_status(copy_props) != "success":
             raise OSError(f"Copy failed: {self} -> {target}")
         source_blob_client.delete_blob()

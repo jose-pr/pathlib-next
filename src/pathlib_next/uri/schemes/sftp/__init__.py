@@ -398,6 +398,10 @@ class SftpPath(UriPath):
     def hardlink_to(self, target: "SftpPath | Uri | str"):
         if not self.backend.supports_hardlink:
             raise NotImplementedError("hardlink_to() requires the asyncssh backend")
+        if isinstance(target, Uri) and not self._same_location(target):
+            raise NotImplementedError(
+                f"hardlink_to() cannot link across hosts: {self} -> {target}"
+            )
         target_path = target.path if isinstance(target, Uri) else str(target)
         self._sftpclient.link(target_path, self.path)
 
@@ -466,6 +470,10 @@ class SftpPath(UriPath):
         if (
             not isinstance(self.backend, AsyncsshSftpBackend)
             or not recursive
+            # The fan-out writes every destination file over THIS path's
+            # connection: only a target on the same host may use it.
+            or not isinstance(target, SftpPath)
+            or not self._same_location(target)
             or not self.is_dir()
         ):
             return super().copy(

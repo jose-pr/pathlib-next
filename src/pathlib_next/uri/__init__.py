@@ -28,6 +28,24 @@ UriLike: TypeAlias = "str | Uri | os.PathLike"
 
 _NOSOURCE = Source(None, None, None, None)
 
+
+def _authority_key(source: Source) -> tuple:
+    scheme, userinfo, host, port = source
+    return (
+        scheme.lower() if scheme else None,
+        userinfo or None,
+        str(host).lower() if host else None,
+        port or None,
+    )
+
+
+def _same_authority(a: Source, b: Source) -> bool:
+    """Whether two sources name the same endpoint (scheme, userinfo, host,
+    port), treating `""` and `None` alike. The test for whether a backend,
+    connection or rename may cross from one path to another."""
+    return _authority_key(a) == _authority_key(b)
+
+
 _U = _ty.TypeVar("_U", bound="Uri")
 
 
@@ -269,12 +287,30 @@ class Uri(Pathname):
         and decoded back out).
         """
         if isinstance(target, Uri):
-            return target
-        if isinstance(target, str):
-            target = self._from_decoded_path(target)
-        # target is a Uri by now, so this join re-uses `_load_parts`'
-        # existing right-to-left semantics without re-parsing anything.
-        return Uri(self.parent, target)
+            result = target
+        else:
+            if isinstance(target, str):
+                target = self._from_decoded_path(target)
+            # target is a Uri by now, so this join re-uses `_load_parts`'
+            # existing right-to-left semantics without re-parsing anything.
+            result = Uri(self.parent, target)
+        if not self._same_location(result):
+            # Every scheme renames over its own connection or bucket using
+            # only `target.path`, so a target elsewhere (another host, bucket,
+            # archive or scheme -- including a local path) used to be renamed
+            # in the wrong place, silently. NotImplementedError is move()'s
+            # signal to fall back to copy + delete.
+            raise NotImplementedError(
+                f"rename() cannot cross locations: {self} -> {result}"
+            )
+        return result
+
+    def _same_location(self, other: "Uri") -> bool:
+        """Whether `other` lives where a native `rename()` of `self` can
+        reach it: the same endpoint (see `_same_authority`), or a sourceless
+        path relative to `self`. Schemes whose namespace is narrower than the
+        authority (an archive, an Azure container) override this."""
+        return not other.source or _same_authority(self.source, other.source)
 
     @classmethod
     def _format_parsed_parts(
@@ -567,7 +603,7 @@ class UriPath(Uri, Path):
     `listdir_attr`, an S3 list page, ...) -- `walk()`/`glob()` then answer
     `is_dir()` on the results for free, without a stat request per entry."""
 
-    __slots__ = ("_backend", "_stat_hint")
+    __slots__ = ("_backend", "_stat_hint", "_backend_origin")
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
 
@@ -679,6 +715,10 @@ class UriPath(Uri, Path):
                 for segment in reversed(args):
                     if isinstance(segment, cls):
                         backend = segment.backend
+                        # Checked against the finished path on first use:
+                        # `base / "http://other/x"` must not carry `base`'s
+                        # session (auth, token) to another host.
+                        inst._backend_origin = segment.source
                         break
             inst._backend = backend
         return inst
@@ -690,7 +730,11 @@ class UriPath(Uri, Path):
         self, source: Source, path: str, query: str, fragment: str, /, **kwargs
     ):
         if "backend" not in kwargs:
-            kwargs["backend"] = self.backend
+            kwargs["backend"] = (
+                self.backend
+                if not source or _same_authority(source, self.source)
+                else None
+            )
         return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
 
     def _init(
@@ -710,9 +754,25 @@ class UriPath(Uri, Path):
     @property
     def backend(self):
         """The connection or session state backend instance."""
+        self._check_inherited_backend()
         if self._backend is None:
             self._backend = self._initbackend()
         return self._backend
+
+    def _coerce_target(self, target: str) -> "UriPath":
+        # A str destination to copy()/move() is still URI syntax: that is what
+        # makes a cross-scheme `copy("s3://bucket/key")` work. (Tracked: a bare
+        # path string therefore has no source.)
+        return type(self)(target)
+
+    def _check_inherited_backend(self):
+        # A backend copied from a join segment is only valid for the same
+        # endpoint; for any other it is dropped and rebuilt from this path.
+        origin = self._backend_origin
+        if origin is not None:
+            self._backend_origin = None
+            if self._backend is not None and not _same_authority(origin, self.source):
+                self._backend = None
 
     def with_backend(self, backend):
         """Return a new path instance sharing the same backend state."""
@@ -731,7 +791,9 @@ class UriPath(Uri, Path):
         elif source.scheme not in cls._schemes():
             inst = cls.__new__(cls, source.scheme + ":", findclass=True)
         else:
-            inst = cls.__new__(cls, backend=self._backend)
+            self._check_inherited_backend()
+            same = _same_authority(source, self.source)
+            inst = cls.__new__(cls, backend=self._backend if same else None)
         inst._init(source, self.path, self.query, self.fragment)
         return inst
 

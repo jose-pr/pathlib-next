@@ -305,6 +305,16 @@ class ArchiveUri(UriPath):
             raise FileNotFoundError(self)
         self.backend.delete_member(marker)
 
+    def _same_location(self, other: Uri) -> bool:
+        # Every archive URI has the same bare "zip:"/"tar:" authority, so the
+        # authority alone cannot tell two archives apart: an archive path is
+        # only renameable onto a member of the very same archive (backend).
+        if isinstance(other, ArchiveUri):
+            return other.backend is self.backend
+        if isinstance(other, UriPath):
+            return False
+        return super()._same_location(other)
+
     def rename(self, target: "ArchiveUri | Uri | str"):
         # A plain str target is a sibling rename (relative to self's
         # parent), matching sftp.py's/ftp.py's rename() semantics. An existing

@@ -81,12 +81,14 @@ class FileUri(UriPath):
         return self.filepath.rmdir()
 
     def rename(self, target: FsPathLike | str):
-        try:
-            _target = _os.fspath(target)
-        except (TypeError, NotImplementedError):
-            _target = NotImplemented
-
-        if _target is NotImplemented:
-            raise NotImplementedError("rename", target)
-
-        return self.filepath.rename(_target)
+        # Through `_rename_target()` like every other scheme: a relative str
+        # is a sibling rename (it used to resolve against the process cwd),
+        # a local path is accepted, and a remote Uri raises
+        # NotImplementedError so move() copies instead of renaming locally.
+        dest = self._rename_target(target)
+        if not isinstance(dest, FileUri):
+            dest = self._from_parsed_parts(
+                dest.source or self.source, dest.path, None, None
+            )
+        self.filepath.rename(dest.filepath)
+        return dest

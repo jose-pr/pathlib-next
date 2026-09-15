@@ -104,6 +104,15 @@ class LocalPath(
                 stat = None
             yield entry.name, stat
 
+    def _rename_compatible(self, target) -> bool:
+        if isinstance(target, _path.PurePath):
+            return True
+        # FileUri: a local file under a URI spelling.
+        try:
+            return isinstance(getattr(target, "filepath", None), _path.PurePath)
+        except Exception:
+            return False
+
     def _is_junction_link(self) -> bool:
         # lstat() reports a junction (IO_REPARSE_TAG_MOUNT_POINT) as a plain
         # directory -- CPython only rewrites the mode to S_IFLNK for real
