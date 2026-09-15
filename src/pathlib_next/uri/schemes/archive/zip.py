@@ -6,9 +6,9 @@ import shutil as _shutil
 import stat as _stat
 import struct as _struct
 import tempfile as _tempfile
-import threading as _threading
 import time as _time
 import zipfile as _zipfile
+from contextlib import contextmanager as _contextmanager
 
 from ....utils.stat import FileStat
 from ..file import FileUri
@@ -47,12 +47,69 @@ def _copy_zipinfo(info: _zipfile.ZipInfo, name: str) -> _zipfile.ZipInfo:
     return copied
 
 
-class _ZipBackend(_ArchiveBackend):
-    __slots__ = ("_lock",)
+def _member_mode(info: _zipfile.ZipInfo) -> "int | None":
+    """The Unix mode stored for `info`, or None when there is none: only a
+    Unix-made entry (`create_system == 3`) carries one, in the high 16 bits
+    of `external_attr`. A symlink or other special type is not modelled by
+    the archive schemes and reports no mode either."""
+    mode = info.external_attr >> 16 if info.create_system == 3 else 0
+    if not _stat.S_IMODE(mode):
+        return None
+    kind = _stat.S_IFMT(mode)
+    if info.filename.endswith("/"):
+        kind = _stat.S_IFDIR
+    elif kind == 0:
+        kind = _stat.S_IFREG
+    if kind not in (_stat.S_IFREG, _stat.S_IFDIR):
+        return None
+    return kind | _stat.S_IMODE(mode)
 
-    def __init__(self, outer):
-        super().__init__(outer)
-        self._lock = _threading.RLock()
+
+class _LazyReadFile:
+    """A read-only, seekable view of a local file that holds an OS handle
+    only while an operation runs: `release()` closes it, and the next
+    read/seek reopens it at the same position. A shared `ZipFile` over one
+    therefore never keeps the archive open between operations (on Windows
+    an open handle blocks deleting or replacing the file)."""
+
+    def __init__(self, path: str):
+        self.name = path
+        self._pos = 0
+        # Opened eagerly: a missing file raises FileNotFoundError here,
+        # which `zipfile` would otherwise turn into BadZipFile.
+        self._fp = open(path, "rb")
+
+    def _file(self):
+        if self._fp is None:
+            self._fp = open(self.name, "rb")
+            self._fp.seek(self._pos)
+        return self._fp
+
+    def read(self, size=-1):
+        data = self._file().read(size)
+        self._pos = self._fp.tell()
+        return data
+
+    def seek(self, offset, whence=0):
+        self._pos = self._file().seek(offset, whence)
+        return self._pos
+
+    def tell(self):
+        return self._pos
+
+    def seekable(self):
+        return True
+
+    def release(self):
+        fp, self._fp = self._fp, None
+        if fp is not None:
+            fp.close()
+
+    close = release
+
+
+class _ZipBackend(_ArchiveBackend):
+    __slots__ = ()
 
     @property
     def writable(self) -> bool:
@@ -66,27 +123,43 @@ class _ZipBackend(_ArchiveBackend):
             # Never "a" for reads: append mode opens the file r+b (fails on a
             # read-only archive), creates a missing file, and on close appends
             # an end-of-central-directory record to a file that is not a zip.
-            return _zipfile.ZipFile(str(self.outer.filepath), mode="r")
+            fp = _LazyReadFile(str(self.outer.filepath))
+            try:
+                return _zipfile.ZipFile(fp, mode="r")
+            finally:
+                fp.release()
         return _zipfile.ZipFile(_io.BytesIO(self.outer.read_bytes()), mode="r")
 
     def _close_handle(self):
-        # Drop the cached read handle so the next operation (through any
-        # instance sharing this backend) reopens and sees the write.
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
+        # `ZipFile.close()` leaves a passed-in file object open.
+        fp = getattr(self._handle, "fp", None)
+        super()._close_handle()
+        if isinstance(fp, _LazyReadFile):
+            fp.release()
+
+    @_contextmanager
+    def _reading(self):
+        """The shared handle, under the lock; the OS file handle behind it
+        is released again when the operation ends."""
+        with self._lock:
+            handle = self.handle
+            try:
+                yield handle
+            finally:
+                if isinstance(handle.fp, _LazyReadFile):
+                    handle.fp.release()
 
     def names(self):
-        with self._lock:
-            return self.handle.namelist()
+        with self._reading() as handle:
+            return handle.namelist()
 
     def read_member(self, path):
-        with self._lock:
+        with self._reading() as handle:
             # Read fully into memory rather than returning the live
             # ZipExtFile: callers may hold the returned stream open across
             # further mutations (unlink/rename/write) on this same shared
             # backend, and those close+reopen the underlying handle.
-            return _io.BytesIO(self.handle.read(path))  # raises KeyError if missing
+            return _io.BytesIO(handle.read(path))  # raises KeyError if missing
 
     def write_member(self, path: str, data: bytes):
         with self._lock:
@@ -98,19 +171,61 @@ class _ZipBackend(_ArchiveBackend):
                 with _zipfile.ZipFile(outer_path, "x") as archive:
                     archive.writestr(path, data)
                 return
-            if path in self.handle.namelist():
+            if path in self.names():
                 # zipfile has no in-place entry update -- writestr()-ing an
                 # existing name just appends a duplicate. Overwriting an
                 # existing entry needs a full-archive rewrite.
                 self._rewrite(overwrite={path: data})
                 return
-            self._close_handle()
-            if not _zipfile.is_zipfile(outer_path):
-                raise _zipfile.BadZipFile(f"File is not a zip file: {outer_path!r}")
+            self._append(path, data)
+
+    def _append(self, path: str, data: bytes):
+        """Add a new entry without risking the archive: an in-place "a"
+        append overwrites the central directory with the new entry's data
+        and writes a new one only on close, so dying in between left no
+        readable member. The archive is byte-copied (nothing recompressed)
+        to a temp file, appended to there, and swapped in by
+        `_replace_outer`."""
+        outer_path = _os.path.realpath(str(self.outer.filepath))
+        if not _zipfile.is_zipfile(outer_path):
+            raise _zipfile.BadZipFile(f"File is not a zip file: {outer_path!r}")
+
+        def fill(tmp):
+            with open(outer_path, "rb") as original:
+                _shutil.copyfileobj(original, tmp)
             # zipfile only persists the central directory to disk when the
             # *archive* (not just the entry) is closed.
-            with _zipfile.ZipFile(outer_path, "a") as archive:
+            with _zipfile.ZipFile(tmp, "a") as archive:
                 archive.writestr(path, data)
+
+        self._replace_outer(fill)
+
+    def _replace_outer(self, fill):
+        """Build the new archive with `fill(tmp)` in a temp file next to the
+        archive -- resolving a symlink, so the link's target is what gets
+        replaced -- fsync it, keep the original's file mode, and atomically
+        replace the original (`os.replace`): a failure or crash at any point
+        leaves the original untouched and no temp file behind. Must be
+        called with `self._lock` held."""
+        outer_path = _os.path.realpath(str(self.outer.filepath))
+        self._close_handle()
+        fd, tmp_name = _tempfile.mkstemp(
+            dir=_os.path.dirname(outer_path), prefix=".pathlib_next-zip-", suffix=".tmp"
+        )
+        try:
+            with _os.fdopen(fd, "w+b") as tmp:
+                fill(tmp)
+                tmp.flush()
+                _os.fsync(tmp.fileno())
+            _shutil.copymode(outer_path, tmp_name)
+            _os.replace(tmp_name, outer_path)
+        except BaseException:
+            try:
+                _os.chmod(tmp_name, _stat.S_IREAD | _stat.S_IWRITE)
+                _os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def delete_member(self, name: str):
         with self._lock:
@@ -136,12 +251,10 @@ class _ZipBackend(_ArchiveBackend):
 
         Every kept entry keeps its metadata (`_copy_zipinfo`), and the
         archive keeps its comment, any bytes before the first member (a
-        zipapp shebang, a self-extractor stub) and its file mode. Writes to a
-        temp file next to the archive -- resolving a symlink, so the link's
-        target is what gets replaced -- fsyncs it and atomically replaces the
-        original (`os.replace`) so a crash mid-rewrite can't leave a corrupt
-        archive. Must be called with `self._lock` held (all public mutators
-        above already do)."""
+        zipapp shebang, a self-extractor stub) and its file mode. Written
+        through `_replace_outer`, so a crash mid-rewrite can't leave a
+        corrupt archive. Must be called with `self._lock` held (all public
+        mutators above already do)."""
         rename = dict(rename or {})
         overwrite = dict(overwrite or {})
         prefix_renames = {old: new for old, new in rename.items() if old.endswith("/")}
@@ -157,12 +270,9 @@ class _ZipBackend(_ArchiveBackend):
             return name, False
 
         outer_path = _os.path.realpath(str(self.outer.filepath))
-        self._close_handle()
-        fd, tmp_name = _tempfile.mkstemp(
-            dir=_os.path.dirname(outer_path), prefix=".pathlib_next-zip-", suffix=".tmp"
-        )
-        try:
-            with _os.fdopen(fd, "wb") as tmp, _zipfile.ZipFile(outer_path, "r") as src:
+
+        def fill(tmp):
+            with _zipfile.ZipFile(outer_path, "r") as src:
                 infos = src.infolist()
                 plan = []
                 winner = {}
@@ -200,26 +310,20 @@ class _ZipBackend(_ArchiveBackend):
                     for name, data in overwrite.items():
                         if name not in written:
                             dst.writestr(name, data)
-                tmp.flush()
-                _os.fsync(tmp.fileno())
-            _shutil.copymode(outer_path, tmp_name)
-            _os.replace(tmp_name, outer_path)
-        except BaseException:
-            try:
-                _os.chmod(tmp_name, _stat.S_IREAD | _stat.S_IWRITE)
-                _os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+
+        self._replace_outer(fill)
 
     def member_stat(self, path):
-        with self._lock:
-            info = self.handle.getinfo(path)
+        with self._reading() as handle:
+            info = handle.getinfo(path)
             mtime = (
                 int(_time.mktime((*info.date_time, 0, 0, -1))) if info.date_time else 0
             )
             return FileStat(
-                st_size=info.file_size, st_mtime=mtime, is_dir=path.endswith("/")
+                st_mode=_member_mode(info),
+                st_size=info.file_size,
+                st_mtime=mtime,
+                is_dir=path.endswith("/"),
             )
 
 
@@ -227,12 +331,12 @@ class ZipUri(ArchiveUri):
     """`zip:` scheme. Read/write: write support (new entries, overwriting
     existing entries, `unlink`/`rmdir`/`rename`) works when the outer
     archive is a local `file:` URI; every other outer scheme is read-only
-    (fetched fully into memory first). New entries are appended in place
-    (cheap); overwriting/deleting/renaming an existing entry requires a
-    full-archive rewrite (`_ZipBackend._rewrite`) since `zipfile` has no
-    in-place entry mutation -- each such call rewrites the whole archive to
-    a temp file and atomically replaces the original (`os.replace`),
-    keeping every other entry's metadata. Write methods (`_open` write
+    (fetched fully into memory first). Every mutation replaces the archive
+    atomically (temp file + `os.replace`): a new entry is appended to a
+    byte copy of the archive (nothing recompressed); overwriting/deleting/
+    renaming an existing entry rewrites the whole archive
+    (`_ZipBackend._rewrite`), since `zipfile` has no in-place entry
+    mutation, keeping every other entry's metadata. Write methods (`_open` write
     modes, `_mkdir`, `unlink`, `rmdir`, `rename`) live on the shared
     `ArchiveUri` base -- they're generic, gated on `self.backend.writable`,
     which only this backend ever reports `True`."""

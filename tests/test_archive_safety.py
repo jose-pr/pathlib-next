@@ -445,3 +445,145 @@ def test_unpack_archive_never_writes_outside_dest(tmp_path, monkeypatch, fmt, na
     assert all(t == inside or t.startswith(inside + os.sep) for t in touched), touched
     assert [p for p in top.rglob("*") if p.is_file() and dest not in p.parents] == []
     assert [p for p in tmp_path.iterdir() if p.is_file()] == [archive]
+
+
+# --- ftparchive-zip-append-not-crash-safe ---
+
+
+def _stray_files(directory):
+    return [p.name for p in directory.iterdir() if p.name.startswith(".pathlib_next")]
+
+
+def test_zip_interrupted_append_leaves_the_archive_intact(zip_archive, monkeypatch):
+    before = zip_archive.read_bytes()
+
+    def dies_before_the_central_directory(self):
+        # The window in which an in-place append had already overwritten
+        # the old central directory and not yet written the new one.
+        raise OSError("simulated crash")
+
+    monkeypatch.setattr(
+        zipfile.ZipFile, "_write_end_record", dies_before_the_central_directory
+    )
+    with pytest.raises(OSError, match="simulated crash"):
+        (UriPath(_zip_uri(zip_archive)) / "new.txt").write_bytes(b"x" * 100_000)
+    monkeypatch.undo()
+    _release()
+    assert zip_archive.read_bytes() == before
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert zf.namelist() == ["docs/readme.txt", "top.txt"]
+        assert zf.read("docs/readme.txt") == b"hello world"
+    assert _stray_files(zip_archive.parent) == []
+
+
+def test_zip_append_keeps_member_bytes_and_archive_mode(zip_archive):
+    with zipfile.ZipFile(zip_archive) as zf:
+        raw_before = {i.filename: (i.CRC, i.compress_size) for i in zf.infolist()}
+    (UriPath(_zip_uri(zip_archive)) / "new.txt").write_text("new")
+    with zipfile.ZipFile(zip_archive) as zf:
+        raw_after = {i.filename: (i.CRC, i.compress_size) for i in zf.infolist()}
+        assert zf.read("new.txt") == b"new"
+    assert raw_after.pop("new.txt")
+    assert raw_after == raw_before
+    assert _stray_files(zip_archive.parent) == []
+
+
+# --- ftparchive-zip-stale-shared-handle ---
+
+
+def test_zip_write_after_an_external_change_keeps_that_change(zip_archive):
+    root = UriPath(_zip_uri(zip_archive))
+    assert (root / "top.txt").exists()  # opens and caches the shared handle
+    with zipfile.ZipFile(zip_archive, "a") as zf:
+        zf.writestr("external.txt", "from another tool")
+    assert (root / "external.txt").read_text() == "from another tool"
+    (root / "mine.txt").write_text("mine")
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert sorted(zf.namelist()) == [
+            "docs/readme.txt",
+            "external.txt",
+            "mine.txt",
+            "top.txt",
+        ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive letters are Windows-only")
+def test_zip_spellings_of_one_file_share_one_backend(zip_archive):
+    uri = _zip_uri(zip_archive)
+    drive = uri.index(":/", len("zip:file:")) - 1
+    lower = uri[:drive] + uri[drive].swapcase() + uri[drive + 1 :]
+    a, b = UriPath(uri), UriPath(lower)
+    assert a.backend is b.backend
+    (a / "from_a.txt").write_text("a")
+    (b / "from_b.txt").write_text("b")
+    assert {"from_a.txt", "from_b.txt"} <= set(_names(zip_archive))
+
+
+def test_zip_read_does_not_keep_the_archive_open(zip_archive):
+    member = UriPath(_zip_uri(zip_archive, "top.txt"))
+    assert member.read_text() == "top level"
+    assert [p.name for p in member.parent.iterdir()] == ["docs", "top.txt"]
+    os.remove(zip_archive)  # WinError 32 while a handle is held
+    assert not zip_archive.exists()
+    del member
+    _release()
+
+
+# --- ftparchive-tar-live-stream-race ---
+
+
+def test_tar_member_stream_survives_reads_of_other_members(tmp_path):
+    import gzip
+
+    path = tmp_path / "big.tar.gz"
+    payloads = {f"m{i}.bin": os.urandom(64_000) for i in range(4)}
+    with tarfile.open(path, "w:gz") as tf:
+        for name, data in payloads.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    assert gzip.open(path).read(1)
+    root = UriPath(_tar_uri(path))
+    first = (root / "m0.bin").open("rb")
+    head = first.read(1000)
+    assert (root / "m3.bin").read_bytes() == payloads["m3.bin"]
+    assert head + first.read() == payloads["m0.bin"]
+    first.close()
+
+
+def test_tar_concurrent_reads_return_each_members_bytes(tmp_path):
+    import sys
+    import threading
+
+    path = tmp_path / "race.tar.gz"
+    payloads = {f"m{i}.bin": os.urandom(50_000) for i in range(6)}
+    with tarfile.open(path, "w:gz") as tf:
+        for name, data in payloads.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    root = UriPath(_tar_uri(path))
+    failures = []
+
+    def reader(name):
+        member = root / name
+        for _ in range(5):
+            try:
+                with member.open("rb") as f:
+                    data = b"".join(iter(lambda: f.read(512), b""))
+                if data != payloads[name]:
+                    failures.append((name, "wrong bytes"))
+            except Exception as error:  # noqa: BLE001 -- reported below
+                failures.append((name, repr(error)))
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=reader, args=(n,)) for n in payloads]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert failures == []
