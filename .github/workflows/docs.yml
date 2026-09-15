@@ -1,0 +1,83 @@
+name: Docs
+
+# Builds the docs site and deploys it to GitHub Pages. Kept separate from
+# release.yml so the site can be rebuilt/redeployed without cutting a release,
+# and a release is not the first time the docs build is exercised. This
+# workflow owns ALL Pages deploys (main = latest, release = the version just
+# shipped); release.yml only gates on a strict docs build.
+#
+# Triggers:
+#   - release published (a v* release ships its matching docs). A release
+#     created by release.yml with GITHUB_TOKEN does not fire this event, so
+#     release.yml dispatches this workflow for the tag instead; this trigger
+#     covers a release published by hand.
+#   - push to main touching docs sources (keeps Pages current between releases).
+#   - workflow_dispatch, for a manual redeploy against any ref.
+#
+# Repo settings this workflow cannot set for itself: default workflow
+# permissions must be read and write (or `pages: write` cannot be granted),
+# and the github-pages environment's deployment policy must allow `v*` tags
+# as well as main.
+on:
+  release:
+    types: [published]
+  push:
+    branches: ["main"]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/**"
+      - "CHANGELOG.md" # embedded by docs/changelog.md
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize deploys; never cancel an in-flight Pages deploy mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  docs-build:
+    name: Build documentation site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write # configure-pages enablement
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/configure-pages@v5
+        with:
+          # Self-enable Pages (source: GitHub Actions) on every run, so a fresh
+          # clone or fork does not fail with "Get Pages site failed".
+          enablement: true
+      - name: Install package with docs tooling
+        run: python -m pip install -e ".[dev,docs,uri,http,sftp,sftp-async,s3]"
+      - name: Build docs
+        run: mkdocs build --strict
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  docs-deploy:
+    name: Deploy documentation to GitHub Pages
+    needs: docs-build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      # Schema linters flag `github-pages` as invalid; it is a name GitHub
+      # reserves, not an error.
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

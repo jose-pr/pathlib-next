@@ -1,6 +1,6 @@
 name: Test
 
-# On-demand / ad-hoc test workflow, kept separate from release.yaml's own
+# On-demand / ad-hoc test workflow, kept separate from release.yml's own
 # release-gate test job so it can be run without cutting a release. Two ways
 # to trigger it:
 #   - workflow_dispatch (optionally against a specific ref), for manual runs.
@@ -15,6 +15,11 @@ on:
         description: "Git ref to test (branch, tag, or SHA)"
         required: false
         default: ""
+      benchmark:
+        description: "Also run the benchmark suite (manual runs only)"
+        type: boolean
+        required: false
+        default: false
       benchmark_recursive:
         description: "Run the recursive SFTP benchmark cases"
         required: false
@@ -38,7 +43,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu full matrix
+          # Ubuntu full matrix over every supported version
           - os: ubuntu-latest
             python-version: "3.9"
           - os: ubuntu-latest
@@ -49,15 +54,17 @@ jobs:
             python-version: "3.12"
           - os: ubuntu-latest
             python-version: "3.13"
-          # Windows/macOS matrix edges
+          - os: ubuntu-latest
+            python-version: "3.14"
+          # Windows/macOS matrix edges (oldest + newest supported)
           - os: windows-latest
             python-version: "3.9"
           - os: windows-latest
-            python-version: "3.13"
+            python-version: "3.14"
           - os: macos-latest
             python-version: "3.9"
           - os: macos-latest
-            python-version: "3.13"
+            python-version: "3.14"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,30 +73,70 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package with all extras
-        run: python -m pip install -e ".[dev,uri,http,sftp,sftp-async]"
+        # Install every extra that has tests depending on it, or those tests
+        # silently skip (pytest.importorskip) instead of actually running.
+        # gs/az (google-cloud-storage, azure-storage-blob) are heavy SDKs and
+        # run in their own job below.
+        run: python -m pip install -e ".[dev,uri,http,sftp,sftp-async,s3]"
       - name: Run tests
-        run: python -m pytest -q
+        # -rs lists every skip with its reason, so a missing extra shows up.
+        run: python -m pytest -q -rs
 
-  test-no-extras:
-    name: Test No-Extras (py3.9, ubuntu)
+  test-cloud-sdks:
+    name: Test with gs/az SDKs (py${{ matrix.python-version }}, ubuntu)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.14"]
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: ${{ matrix.python-version }}
+      - name: Install package with every extra, gs and az included
+        run: python -m pip install -e ".[dev,uri,http,sftp,sftp-async,s3,gs,az]"
+      - name: Run tests
+        # The GCS/Azure contract suites run against in-process fake servers
+        # (tests/conftest.py); no credentials are needed.
+        run: python -m pytest -q -rs
+
+  test-no-extras:
+    name: Test No-Extras (py${{ matrix.python-version }}, ubuntu)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Install package without extras
+        # Exactly `pip install pathlib-next` plus the test runner: no uritools,
+        # no netimps, nothing from `dev`.
         run: |
           python -m pip install --upgrade pip
-          pip install -e . uritools pytest
-      - name: Run smoke and local tests without extras
+          python -m pip install -e . pytest
+      - name: Run the test suite without extras
+        # tests/conftest.py leaves out modules that import the `uri` extra at
+        # module level; everything else must collect and pass or skip cleanly.
+        run: python -m pytest -q -rs
+      - name: uripath CLI reads a local file without extras
         run: |
-          python -m pytest -q tests/test_smoke.py tests/test_local.py tests/test_mempath.py tests/test_data_uri.py
+          printf 'no extras\n' > local.txt
+          test "$(uripath read local.txt)" = "no extras"
 
   benchmark:
-    name: Benchmarks (py3.12, ${{ matrix.os }})
+    name: Benchmarks (py3.14, ${{ matrix.os }})
+    # Opt-in: benchmarks are noisy and slow, so they never run on ci-* tags
+    # or by default; dispatch the workflow with benchmark=true.
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -104,7 +151,7 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install benchmark dependencies
         run: python -m pip install -e ".[dev,uri,http,sftp,sftp-async]"
       - name: Run benchmark suite
@@ -112,9 +159,11 @@ jobs:
           PATHLIB_NEXT_BENCH_SFTP_RECURSIVE: ${{ inputs.benchmark_recursive == 'true' && '1' || '0' }}
         shell: pwsh
         run: |
-          python benchmarks/bench.py | Tee-Object -FilePath benchmark.txt
+          python benchmarks/bench.py --save --name "ci-${{ matrix.os }}-py3.14" | Tee-Object -FilePath benchmark.txt
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-${{ matrix.os }}
-          path: benchmark.txt
+          path: |
+            benchmark.txt
+            benchmarks/results/*.json
