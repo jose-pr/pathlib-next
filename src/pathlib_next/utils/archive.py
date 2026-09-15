@@ -4,6 +4,8 @@ import tarfile
 import typing as _ty
 import zipfile
 
+from . import is_safe_child_name, is_windows_flavoured
+
 if _ty.TYPE_CHECKING:
     from ..path import Path
 
@@ -22,6 +24,18 @@ def _detect_format(name: str, peek: "_ty.Callable[[], bytes] | None" = None) -> 
         return "tar"
     magic = peek() if peek is not None else b""
     return "zip" if magic.startswith(b"PK") else "tar"
+
+
+def _safe_member_parts(name: str, *, windows: bool) -> "list[str] | None":
+    """Split archive member `name` into the parts to join onto the
+    extraction directory, or return None when the member must be skipped
+    because a part would leave it (`..`, and with `windows=True` a drive
+    such as `D:x` or the drive-relative `C:..`). Both separators split;
+    empty and `.` parts are dropped, so `/abs` and `./x` stay inside."""
+    parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or not all(is_safe_child_name(p, windows=windows) for p in parts):
+        return None
+    return parts
 
 
 def make_archive(src: Path, format: str, target: Path) -> None:
@@ -85,6 +99,8 @@ def unpack_archive(archive: Path, dest: Path) -> None:
 
     Supports format detection from filename.
     Operations run stream-first to support any Path implementation.
+    Members whose name would land outside `dest` (a `..` part, or on a
+    Windows-flavoured `dest` a drive such as `D:x` or `C:..`) are skipped.
     """
     if not dest.exists():
         dest.mkdir(parents=True, exist_ok=True)
@@ -97,18 +113,15 @@ def unpack_archive(archive: Path, dest: Path) -> None:
             return b"PK"  # can't sniff -- preserve the historical "assume zip" default
 
     is_zip = _detect_format(archive.name, _peek) == "zip"
+    windows = is_windows_flavoured(dest)
 
     with archive.open("rb") as in_f:
         if is_zip:
             with zipfile.ZipFile(in_f) as zip_ref:
                 for member in zip_ref.infolist():
                     filename = member.filename
-                    parts = [
-                        p
-                        for p in filename.replace("\\", "/").split("/")
-                        if p and p != ".."
-                    ]
-                    if not parts:
+                    parts = _safe_member_parts(filename, windows=windows)
+                    if parts is None:
                         continue
 
                     target_path = dest
@@ -130,12 +143,8 @@ def unpack_archive(archive: Path, dest: Path) -> None:
             with tarfile.open(fileobj=in_f, mode="r") as tar_ref:
                 for member in tar_ref.getmembers():
                     filename = member.name
-                    parts = [
-                        p
-                        for p in filename.replace("\\", "/").split("/")
-                        if p and p != ".."
-                    ]
-                    if not parts:
+                    parts = _safe_member_parts(filename, windows=windows)
+                    if parts is None:
                         continue
 
                     target_path = dest

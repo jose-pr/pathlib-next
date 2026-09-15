@@ -1,15 +1,35 @@
 from __future__ import annotations
 
+import errno as _errno
 import io as _io
 import re as _re
 import threading as _threading
 import weakref as _weakref
 
+from ....utils import is_safe_child_name
 from ....utils.stat import FileStat
 from ... import Uri, UriPath
 
 _SEP = "!/"
 _SCHEME_RE = _re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+_MEMBER_SEP_RE = _re.compile(r"[/\\]")
+_DRIVE_RE = _re.compile(r"^[a-zA-Z]:")
+
+
+def _is_safe_member_name(name: str) -> bool:
+    """Whether archive member `name` stays inside the archive root once its
+    parts are joined onto a destination (e.g. by a recursive `copy()`).
+
+    Both `/` and `\\` count as separators here -- only here: lookups keep
+    the raw member name, since `\\` is a legal filename character on POSIX.
+    Rejects absolute names, empty/`.`/`..` parts and drive-qualified parts
+    (`C:x`, `C:..`); a trailing `/` (a directory marker) is allowed."""
+    if name.endswith("/"):
+        name = name[:-1]
+    return all(
+        is_safe_child_name(part) and not _DRIVE_RE.match(part)
+        for part in _MEMBER_SEP_RE.split(name)
+    )
 
 
 def _split_archive_path(path: str) -> "tuple[str, str]":
@@ -143,8 +163,12 @@ class _ArchiveWriteStream(_io.BytesIO):
 
     def close(self):
         if not self.closed:
-            self._backend.write_member(self._path, self.getvalue())
-        super().close()
+            try:
+                self._backend.write_member(self._path, self.getvalue())
+            finally:
+                # Closed even when the write fails, so `__del__` does not
+                # retry it (and raise again) at garbage collection.
+                super().close()
 
 
 class ArchiveUri(UriPath):
@@ -202,7 +226,9 @@ class ArchiveUri(UriPath):
         prefix = f"{self.path}/" if self.path else ""
         seen = set()
         for name in self._names():
-            if not name.startswith(prefix):
+            # An unsafe member ('../x', '/abs', 'C:x', ...) is never listed:
+            # a caller joining a listed name onto a destination must stay in it.
+            if not name.startswith(prefix) or not _is_safe_member_name(name):
                 continue
             rest = name[len(prefix) :]
             if not rest:
@@ -281,16 +307,29 @@ class ArchiveUri(UriPath):
 
     def rename(self, target: "ArchiveUri | Uri | str"):
         # A plain str target is a sibling rename (relative to self's
-        # parent), matching sftp.py's/ftp.py's rename() semantics.
+        # parent), matching sftp.py's/ftp.py's rename() semantics. An existing
+        # target is replaced as POSIX rename(2) does: a file replaces a file,
+        # a directory replaces an empty directory -- never a duplicate member.
         self._require_writable()
         target = self._rename_target(target)
         old_path = self.path
         new_path = target.path.lstrip("/")
         names = self._names()
         marker = f"{old_path}/"
+        new_marker = f"{new_path}/"
         if old_path in names:
+            if new_path == old_path:
+                return
+            if any(n.startswith(new_marker) for n in names):
+                raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
             self.backend.rename_member(old_path, new_path)
-        elif marker in names or any(n.startswith(marker) for n in names):
-            self.backend.rename_member(marker, f"{new_path}/")
+        elif any(n.startswith(marker) for n in names):
+            if new_marker == marker:
+                return
+            if new_path in names:
+                raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(target))
+            if any(n != new_marker and n.startswith(new_marker) for n in names):
+                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(target))
+            self.backend.rename_member(marker, new_marker)
         else:
             raise FileNotFoundError(self)
