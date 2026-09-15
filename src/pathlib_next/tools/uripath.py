@@ -5,8 +5,18 @@ import shutil
 import sys
 import typing as _ty
 
-from .. import LocalPath, UriPath
+from .. import LocalPath
 from ..utils.sync import PathSyncer, SyncEvent
+
+try:
+    from ..uri import UriPath
+except ImportError as _error:
+    # The `uri` extra is optional: local paths and `-` still work without
+    # it, and a URI argument reports what to install (see `_path()`).
+    UriPath = None
+    _URI_IMPORT_ERROR = _error
+else:
+    _URI_IMPORT_ERROR = None
 
 _CHUNK_SIZE = 1024 * 1024
 
@@ -26,6 +36,11 @@ def _looks_like_uri(value: str) -> bool:
 
 def _path(value: str):
     if _looks_like_uri(value):
+        if UriPath is None:
+            raise ImportError(
+                f"{value!r} is a URI, which needs the 'uri' extra:"
+                " pip install 'pathlib-next[uri]'"
+            ) from _URI_IMPORT_ERROR
         return UriPath(value, findclass=True)
     return LocalPath(value)
 

@@ -5,7 +5,6 @@ import ipaddress as _ip
 import re as _re
 import typing as _ty
 
-import netimps as _netimps
 import uritools as _uritools
 
 _IPAddress = _ty.Union[_ip.IPv4Address, _ip.IPv6Address]
@@ -364,6 +363,11 @@ class Source(_ty.NamedTuple):
         host = self.host
         if not host or host == "localhost":
             return True
+        # Imported here, not at module top: netimps calls platform.node() at
+        # import (a WMI query on Windows), a cost every `import pathlib_next`
+        # paid although only this method needs it.
+        import netimps as _netimps
+
         if not isinstance(host, str):
             return _netimps.is_local_address(host)
         literal = _netimps.try_parse(host)

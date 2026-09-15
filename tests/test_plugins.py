@@ -93,7 +93,8 @@ class TestLoadBuiltinScheme:
         "scheme", ["file", "data", "zip", "tar", "ftp", "ftps", "http", "https"]
     )
     def test_known_stdlib_schemes_return_true(self, scheme):
-        """All stdlib-only schemes should always load successfully."""
+        """Schemes whose dependencies this suite always installs (stdlib,
+        plus `requests` for http/https) load successfully."""
         assert UriPath._load_builtin_scheme(scheme) is True
 
     def test_unknown_scheme_returns_false(self):
@@ -101,8 +102,6 @@ class TestLoadBuiltinScheme:
 
     def test_import_error_returns_false(self):
         """If the target module raises ImportError, _load_builtin_scheme returns False."""
-        import sys
-
         with mock.patch("importlib.import_module", side_effect=ImportError("no dep")):
             result = UriPath._load_builtin_scheme("ftp")
         assert result is False
@@ -138,7 +137,14 @@ def test_every_builtin_scheme_is_in_both_fallback_registries():
     declared by `FtpPath` but missing from both, so `UriPath("ftps://...")`
     returned a do-nothing `UriPath` in a fresh process. Only classes whose
     optional dependencies import here are checked."""
-    import pathlib_next.uri.schemes  # noqa: F401  (registers what imports)
+    try:
+        eps = importlib.metadata.entry_points(group="pathlib_next.schemes")
+    except TypeError:  # Python 3.9
+        eps = importlib.metadata.entry_points().get("pathlib_next.schemes", ())
+    # The schemes package loads backends lazily: import every builtin module
+    # first so the scheme map reflects all classes whose dependencies import.
+    for ep in eps:
+        UriPath._load_builtin_scheme(ep.name)
 
     declared = {
         scheme
@@ -146,9 +152,5 @@ def test_every_builtin_scheme_is_in_both_fallback_registries():
         if cls.__module__.startswith("pathlib_next.uri.schemes")
     }
     assert "ftps" in declared
-    try:
-        eps = importlib.metadata.entry_points(group="pathlib_next.schemes")
-    except TypeError:  # Python 3.9
-        eps = importlib.metadata.entry_points().get("pathlib_next.schemes", ())
     assert sorted(declared - {ep.name for ep in eps}) == []
     assert sorted(s for s in declared if not UriPath._load_builtin_scheme(s)) == []
