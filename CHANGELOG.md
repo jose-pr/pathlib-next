@@ -141,7 +141,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from the password slot when present, and these schemes redact the whole
   userinfo.
 
+- **`glob()`/`rglob()` crashed, hung or returned wrong results.**
+  `glob("**")` and `glob("dir/**")` raised `NotADirectoryError` on any tree
+  containing a file; `**` followed directory symlinks, so a symlink loop
+  produced duplicates effectively forever; globbing under a missing directory
+  or a file raised instead of yielding nothing; repeated `**` returned
+  duplicates; a trailing `/` matched files on `MemPath` and URI paths; `?`
+  never matched on a `UriPath` (read as a query); `glob.full_match()` slowed
+  down exponentially with repeated `**`. A trailing `**` now follows the
+  running Python (files too on 3.13+).
+- **`match()` on `MemPath`, `Uri` and every `UriPath` did not follow
+  pathlib.** It anchored at the start and let `*` cross `/`, and a URI's
+  `host:` prefix defeated absolute patterns. It is now pathlib's
+  right-anchored per-segment match; an empty pattern raises `ValueError`.
+  `LocalPath` accepts `match(case_sensitive=)` on 3.9-3.11, and its
+  `full_match()` handles rooted, drive and backslash patterns before 3.13.
+- **`parents`/`parent` of an absolute `MemPath` or `Uri` lost the root.**
+  `MemPath('/a/b').parents` is now `['/a', '/']`; `Uri('http://h/a').parent` is
+  `http://h/`; a top-level `FileUri`'s parent is `/` (or the drive root
+  `C:/` on Windows) instead of resolving to the current directory.
+  `relative_to()`/`is_relative_to()` treat `s3://bucket`/`http://h` as the
+  root, so `relative_to(p.parent)` and `walk_up=True` work.
+- **`with_name()`/`with_stem()`/`with_suffix()` accepted `''`, `.` and
+  separators** on `MemPath` and `Uri`, splicing `x/y` or `../../etc` into a
+  path. They now raise `ValueError` like pathlib.
+- **`MemPath` did not normalize like `PurePosixPath`.** `MemPath('/') / 'a'`
+  was `//a` and unequal to `MemPath('/a')`; a trailing `/` changed equality;
+  an absolute join did not reset. All now match `PurePosixPath`.
+- **`Path.touch()` made new files world-writable and could truncate existing
+  ones.** It chmod'ed every new file to 0o666 ignoring the umask (`file:`,
+  SFTP, FTP) and treated any `stat()` error as "missing". `mode` now defaults
+  to `None` (chmod only when passed), an existing file is never truncated, and
+  `FileUri.touch()` uses pathlib's `touch()`.
+- **`copy()` made local copies read-only.** `preserve_metadata=True` applied
+  the placeholder 0o444/0o555 mode that `MemPath`, HTTP, WebDAV, object stores
+  and archives report, so a copied file could not be overwritten or re-synced.
+  Placeholder modes are no longer applied (`FileStat.mode_known`).
+- **`utils.parsedate()` read GMT dates as local time**, so every HTTP/WebDAV
+  `st_mtime` was off by the host's UTC offset, and it raised `OverflowError`
+  on Windows east of UTC. It now returns UTC epoch seconds and passes numbers
+  through.
+- **`s3://b/dir/` (trailing slash) was treated as the marker object**: not a
+  directory, and `rm(recursive=True)` removed only the marker. S3, GCS and
+  Azure keys now drop one trailing `/`. Azure keys keep interior empty
+  segments (`a//b`) as written.
+- **`GsBackend` rewrote the process-wide `STORAGE_EMULATOR_HOST`** and dropped
+  other `client_options`. Keyword arguments now go to `storage.Client`
+  unchanged; for an emulator also pass `use_auth_w_custom_endpoint=False`.
+
 ### Changed
+- **`Path.glob()`/`rglob()`/`LocalPath.glob()` include hidden files and
+  directories by default**, as pathlib does. Pass `include_hidden=False` for
+  the old results. `glob("")` now raises `ValueError` and an absolute pattern
+  raises `glob.NonRelativePatternError`; before, `""` yielded the base and an
+  absolute pattern listed outside it.
 - **SFTP host keys are verified by default on both backends.** Before, any
   server key was accepted (asyncssh even overrode ssh_config pinning), so a
   man-in-the-middle received the URI password. Now an unknown or changed key
@@ -175,6 +228,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   thread raises `RuntimeError` instead of hanging.
 
 ### Added
+- `glob.parse_pattern()`, `glob.select()`, `glob.NonRelativePatternError`;
+  `recurse_symlinks=False` on `glob()`/`rglob()`; `FileStat.mode_known`.
 - `close()` on `SftpBackend`/`AsyncsshSftpBackend`; `FtpBackend(timeout=,
   ssl_context=, verify=)`; `RepoBackend(timeout=)`; `utils.LRU(on_evict=...)`
   and `LRU.discard()`.
