@@ -90,6 +90,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   member with a `..` part (previously extracted with the `..` dropped), are
   now skipped.
 
+- **`rename()`/`move()` renamed onto the wrong host, bucket or archive.**
+  Every scheme renamed through its own connection or bucket with only the
+  target's path: `SftpPath`/`FtpPath` moves to another server renamed on the
+  source server, `S3Path`/`GsPath` moves to another bucket landed in the
+  source bucket (overwriting an existing object of that name there), a zip
+  member moved to a local path was renamed inside the archive, and
+  `LocalPath.move()` onto a remote path renamed a local file. `rename()` now
+  raises `NotImplementedError` for a target on another endpoint, archive or
+  Azure container, and `move()` copies and deletes instead. `move()` also
+  falls back to copy + delete on a cross-device rename (`EXDEV`), and
+  `SftpPath.copy(recursive=True)` uses its concurrent fan-out only for a
+  target on the same host.
+- **Session credentials and tokens followed a join to another host.**
+  `base / "http://other/x"`, `UriPath(base, url)` and `base.with_source(...)`
+  reused `base`'s backend, so an `HttpPath.with_session(auth=...)` session or
+  a `github://TOKEN@...` token was sent to the other host. A backend is now
+  reused only for the same scheme, userinfo, host and port.
+- **`AzPath.rename()` with a `str` target always raised `TypeError`**, and a
+  pending copy crashed with `KeyError` after starting it. **`GsPath`/`AzPath`/
+  `S3Path.rename()` onto the same key deleted the object.** Both fixed.
+- **`FileUri.rename("b.txt")` resolved against the process cwd** and returned
+  a `LocalPath`. It now renames within the same directory and returns a
+  `FileUri`.
+- **`MemPath.copy("/b.txt")`/`move("/c.txt")` wrote into a new, empty
+  in-memory filesystem**, and `move()` then deleted the source. A `str`
+  destination now stays on the source's backend.
+
 ### Added
 - `utils.is_safe_child_name(name, *, windows=False)` and
   `utils.is_windows_flavoured(path)`: check that an untrusted name stays a

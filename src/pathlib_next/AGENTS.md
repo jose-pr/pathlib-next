@@ -123,6 +123,12 @@ pathlib_next`.
     (e.g. a case-only rename) is renamed in place rather than removed. With
     `overwrite=True` a file target on a local path is replaced atomically
     (`replace()`); elsewhere it is unlinked just before the rename.
+    `rename()` is attempted only when `_rename_compatible(target)` (a
+    `LocalPath` needs a local target) and falls back to copy + delete on
+    `NotImplementedError` or `OSError(EXDEV)`. A `str` destination is
+    resolved by `_coerce_target()`: `with_segments()` by default (so a
+    `MemPath` destination stays on the same in-memory filesystem), a URI
+    parse on `UriPath`.
 - **`PathLike`** — `Union[str, Path]`. **`PurePathLike`** — `Union[str,
   Pathname]`. **`FsPathLike`** — `Protocol` requiring `__fspath__() -> str`.
 
@@ -258,8 +264,14 @@ extra that depends on it).
   `_rename_target(target)` is what `rename()` calls: a `Uri` passes
   through untouched, a `str` goes through `_from_decoded_path()` and, if
   relative, is joined onto `self.parent` (sibling rename — a URI has no
-  cwd). `_symlink_target(target)` (overriding `Path`'s) is the same minus
-  the parent anchoring, so a relative link target stays relative.
+  cwd). It then requires `_same_location(result)` — the same endpoint
+  (scheme, userinfo, host, port; `""` and `None` alike) or a sourceless
+  relative path; `ArchiveUri` also requires the same archive and `AzPath`
+  the same container — and otherwise raises `NotImplementedError`, so
+  `rename()` never renames onto another host/bucket/archive/scheme and
+  `move()` falls back to copy + delete. `_symlink_target(target)`
+  (overriding `Path`'s) is the same minus the parent anchoring, so a
+  relative link target stays relative.
   `copy()`/`move()` deliberately still parse a `str` destination as a URI
   — that is what makes a cross-scheme `copy("s3://bucket/key")` work.
 - **`UriPath(Uri, Path)`** — `Uri` + `Path` (I/O) + scheme dispatch.
@@ -275,7 +287,11 @@ extra that depends on it).
   `UriPath` subclass registers it. `backend` property — per-instance
   connection/session state, lazily created via `_initbackend()` (override
   in a scheme subclass; base returns `None`); `with_backend(backend)`
-  returns a new instance sharing the given backend. `_listdir() ->
+  returns a new instance sharing the given backend. A backend is shared
+  only within one endpoint: joining an absolute URI for another host
+  (`base / "http://other/x"`), `UriPath(base, url)`, `with_source()` and
+  derived paths with a different authority get a fresh backend from
+  `_initbackend()`, so session credentials and tokens never follow. `_listdir() ->
   Iterator[str]` (not implemented by default) / `_scandir()` (derives from
   `_listdir()` + one `stat()` per child unless overridden directly — prefer
   overriding `_scandir()` when the listing call already returns
