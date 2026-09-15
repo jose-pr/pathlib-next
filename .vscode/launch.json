@@ -1,14 +1,26 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    // See https://go.microsoft.com/fwlink/?linkid=830387 for the attributes.
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Example",
+            "name": "Python: current file",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/src/example.py",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python: pytest current file",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "${file}"
+            ],
             "console": "integratedTerminal",
             "justMyCode": false
         }

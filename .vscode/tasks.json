@@ -1,6 +1,7 @@
 {
-    // See https://go.microsoft.com/fwlink/?LinkId=733558
-    // for the documentation about the tasks.json format
+    // See https://go.microsoft.com/fwlink/?LinkId=733558 for the tasks.json format.
+    // Publishing is not a local task: releases go through the tagged release
+    // workflow (see AGENTS.md).
     "version": "2.0.0",
     "tasks": [
         {
@@ -11,15 +12,43 @@
                 "-m",
                 "pip",
                 "install",
-                "-U",
-                ".[dev]"
+                "-e",
+                ".[dev,docs,uri,http,sftp,sftp-async,s3,gs,az]"
             ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test",
+            "type": "shell",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "-m",
+                "pytest",
+                "-q"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "problemMatcher": [],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            }
         },
         {
             "label": "Clean",
             "type": "shell",
             "linux": {
+                "command": "rm",
+                "args": [
+                    "-rf",
+                    "dist/*"
+                ]
+            },
+            "osx": {
                 "command": "rm",
                 "args": [
                     "-rf",
@@ -41,39 +70,23 @@
         {
             "label": "Build",
             "type": "shell",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Clean"
+            ],
             "command": "${command:python.interpreterPath}",
             "args": [
                 "-m",
                 "build"
             ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "problemMatcher": [],
             "group": {
                 "kind": "build",
                 "isDefault": true
             }
-        },
-        {
-            "label": "Release",
-            "type": "shell",
-            "command": "${command:python.interpreterPath}",
-            "args": [
-                "-m",
-                "twine",
-                "upload",
-                "dist/*"
-            ],
-            "problemMatcher": [],
-        },
-        {
-            "label": "Deploy",
-            "type": "shell",
-            "dependsOrder": "sequence",
-            "dependsOn": [
-                "Clean",
-                "Build",
-                "Release"
-            ],
-            "problemMatcher": [],
-        },
+        }
     ]
 }
