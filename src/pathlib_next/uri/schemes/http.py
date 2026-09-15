@@ -4,6 +4,7 @@ import contextlib as _contextlib
 import errno as _errno
 import html.parser as _html_parser
 import io as _io
+import os as _os
 import re as _re
 import time as _time
 import typing as _ty
@@ -515,7 +516,13 @@ class HttpPath(UriPath):
             # entry silently got name == "".
             is_dir = entry.name.endswith("/")
             name = entry.name.removesuffix("/")
-            if not name:
+            if not _utils.is_safe_child_name(name):
+                # A listing is untrusted input: wsgidav's table renders its
+                # parent row as `<a href="..">`, and a `<pre>` index can
+                # carry `./`. Yielding "." or ".." as a child made
+                # `child.unlink()` DELETE the parent collection (the client
+                # normalizes `/d/..` to `/`) and `walk()` loop forever.
+                # Filtered here so every parser branch is covered.
                 continue
             yield name, FileStat(
                 st_size=0 if is_dir else (entry.size or 0),
@@ -619,6 +626,22 @@ class HttpPath(UriPath):
         return HttpWriteStream(self)
 
     def unlink(self, missing_ok=False):
+        # A server that honours DELETE on a collection (WebDAV, RFC 4918)
+        # removes the whole tree, while pathlib's unlink() never removes a
+        # directory -- refuse one. Limitation: over http: this relies on the
+        # HEAD-based `stat()` heuristic, which cannot see every collection
+        # (a wsgidav `/d/` answers HEAD with a plain 200 and reads as a
+        # file); a child from `iterdir()` carries its listing's is_dir hint,
+        # so that route is covered. Use `dav:` for reliable detection.
+        if self.is_dir():
+            raise IsADirectoryError(
+                _errno.EISDIR, _os.strerror(_errno.EISDIR), str(self)
+            )
+        self._delete(missing_ok=missing_ok)
+
+    def _delete(self, missing_ok=False):
+        # The raw DELETE, with no collection guard: `rmdir()` has already
+        # verified an empty directory before calling it.
         with _translate_http_errors(self):
             resp = self.backend.request("DELETE", self)
             if resp.status_code == 404:
@@ -635,9 +658,12 @@ class HttpPath(UriPath):
         # os.rmdir()/pathlib.Path.rmdir() do.
         if not self.is_dir():
             raise NotADirectoryError(self)
-        for _ in self._listdir():
+        # `_scandir()`, not the raw `_listdir()`: a listing's own "."/".."
+        # rows are not children and must not make an empty directory
+        # look non-empty.
+        for _ in self._scandir():
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
-        self.unlink()
+        self._delete()
 
     def with_session(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno as _errno
 import io as _io
+import os as _os
 import typing as _ty
 import urllib.parse as _urlparse
 import xml.etree.ElementTree as _ET
@@ -10,7 +11,7 @@ from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import Uri
 from ..source import _compose_uri
-from .http import HttpPath
+from .http import HttpPath, _translate_http_errors
 
 _NS = {"D": "DAV:"}
 
@@ -128,7 +129,10 @@ class DavPath(HttpPath):
             if not href_path or href_path == self_path:
                 continue  # the "." entry describing self, per RFC 4918
             name = href_path.rsplit("/", 1)[-1]
-            if name:
+            # The href is untrusted and already percent-decoded: an entry
+            # such as `%2E%2E/` decodes to "..", which let a recursive copy
+            # write outside its destination.
+            if _utils.is_safe_child_name(name):
                 yield name, FileStat(
                     st_size=size, st_mtime=_utils.parsedate(lm), is_dir=is_dir
                 )
@@ -140,7 +144,16 @@ class DavPath(HttpPath):
     def _open(self, mode="r", buffering=-1):
         if "r" in mode:
             buffer_size = _io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering
-            req = self.backend.request("GET", self._wire_uri(), stream=True)
+            with _translate_http_errors(self):
+                req = self.backend.request("GET", self._wire_uri(), stream=True)
+                try:
+                    req.raise_for_status()
+                except BaseException:
+                    # Without this check a 404/401/500 error page was read
+                    # back as file content. Close first: stream=True leaves
+                    # the body unread and the pooled connection held.
+                    req.close()
+                    raise
             resp = req.raw
             resp.auto_close = False
             return (
@@ -163,6 +176,26 @@ class DavPath(HttpPath):
         resp.raise_for_status()
 
     def unlink(self, missing_ok=False):
+        # WebDAV DELETE on a collection is recursive (RFC 4918), so a bare
+        # DELETE here removed a whole tree. pathlib's unlink() never removes
+        # a directory: check with a Depth:0 PROPFIND first. The recursive
+        # DELETE stays available through `rm(recursive=True)`.
+        try:
+            root = self._propfind(depth="0")
+        except FileNotFoundError:
+            if missing_ok:
+                return
+            raise
+        responses = root.findall("D:response", _NS)
+        if responses and _parse_response(responses[0])[1]:
+            raise IsADirectoryError(
+                _errno.EISDIR, _os.strerror(_errno.EISDIR), str(self)
+            )
+        self._delete(missing_ok=missing_ok)
+
+    def _delete(self, missing_ok=False):
+        # The raw DELETE, with no collection guard: `rmdir()` has already
+        # verified an empty directory before calling it.
         resp = self.backend.request("DELETE", self._wire_uri())
         if resp.status_code == 404:
             if missing_ok:
@@ -180,7 +213,7 @@ class DavPath(HttpPath):
             raise NotADirectoryError(self)
         for _ in self._listdir():
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
-        self.unlink()
+        self._delete()
 
     def rm(
         self,

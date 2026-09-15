@@ -154,6 +154,11 @@ def test_http_unlink(monkeypatch):
     import requests
 
     monkeypatch.setattr(requests.Session, "request", mock_request)
+    from pathlib_next.uri.schemes.http import HttpPath
+
+    # unlink() first asks is_dir() (it refuses a directory); stub it so
+    # only the DELETE is recorded.
+    monkeypatch.setattr(HttpPath, "is_dir", lambda self: False)
 
     p = UriPath("http://example.com/file.txt")
     p.unlink()
@@ -205,6 +210,50 @@ def test_http_rmdir_not_empty(monkeypatch):
     with pytest.raises(OSError) as excinfo:
         p.rmdir()
     assert excinfo.value.errno == errno.ENOTEMPTY
+
+
+def test_http_unlink_on_directory_sends_no_delete(monkeypatch):
+    import errno
+    import requests
+    from pathlib_next.uri.schemes.http import HttpPath
+
+    recorded = []
+    monkeypatch.setattr(
+        requests.Session,
+        "request",
+        lambda self, method, url, **kw: recorded.append((method, url)),
+    )
+    monkeypatch.setattr(HttpPath, "is_dir", lambda self: True)
+
+    p = UriPath("http://example.com/dir/")
+    with pytest.raises(IsADirectoryError) as excinfo:
+        p.unlink()
+    assert excinfo.value.errno == errno.EISDIR
+    assert recorded == []
+
+
+def test_http_rmdir_ignores_dot_entries_in_listing(monkeypatch):
+    # An empty directory whose listing carries its own "."/".." rows is
+    # still empty -- rmdir() must DELETE it, not raise ENOTEMPTY.
+    from pathlib_next.uri.schemes.http import HttpPath, _FileEntry
+
+    deleted = []
+    monkeypatch.setattr(
+        HttpPath,
+        "_listdir",
+        lambda self: [
+            _FileEntry("..", None, None, None),
+            _FileEntry("./", None, None, None),
+        ],
+    )
+    monkeypatch.setattr(HttpPath, "is_dir", lambda self: True)
+    monkeypatch.setattr(
+        HttpPath, "_delete", lambda self, missing_ok=False: deleted.append(self)
+    )
+
+    p = UriPath("http://example.com/dir/")
+    p.rmdir()
+    assert deleted == [p]
 
 
 def test_http_rmdir_on_file_raises_notadirectoryerror(monkeypatch):

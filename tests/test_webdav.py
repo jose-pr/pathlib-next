@@ -215,6 +215,9 @@ def test_mkdir_existing_raises_file_exists():
 
 def test_unlink_sends_delete():
     session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/readme.txt", "0")] = _FakeResponse(
+        207, _MULTISTATUS_FILE
+    )
     session.responses[("DELETE", "http://host/docs/readme.txt")] = _FakeResponse(204)
     p = _dav("dav://host/docs/readme.txt", session)
     p.unlink()
@@ -233,6 +236,100 @@ def test_unlink_missing_without_missing_ok_raises():
     p = _dav("dav://host/missing.txt", session)
     with pytest.raises(FileNotFoundError):
         p.unlink()
+
+
+def test_unlink_collection_raises_without_delete():
+    # WebDAV DELETE is recursive: unlink() on a collection must refuse it
+    # after a Depth:0 PROPFIND instead of deleting the tree.
+    import errno
+
+    session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/", "0")] = _FakeResponse(
+        207, _MULTISTATUS_DIR
+    )
+    session.responses[("DELETE", "http://host/docs/")] = _FakeResponse(204)
+    p = _dav("dav://host/docs/", session)
+    with pytest.raises(IsADirectoryError) as excinfo:
+        p.unlink()
+    assert excinfo.value.errno == errno.EISDIR
+    assert not any(call[0] == "DELETE" for call in session.calls)
+
+
+_MULTISTATUS_HOSTILE = b"""<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/share/</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+    <D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/share/%2E%2E/</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+    <D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/share/./</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+    <D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/share/ok.txt</D:href>
+    <D:propstat><D:prop><D:resourcetype/>
+    <D:getcontentlength>2</D:getcontentlength></D:prop>
+    <D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+
+def test_propfind_dot_entries_are_not_children(tmp_path):
+    # A listing href `%2E%2E/` decodes to ".."; a recursive copy joined it
+    # onto the destination and wrote outside it.
+    from pathlib_next import LocalPath
+
+    session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/share/", "0")] = _FakeResponse(
+        207, _MULTISTATUS_DIR.replace(b"/docs/", b"/share/")
+    )
+    session.responses[("PROPFIND", "http://host/share/", "1")] = lambda: _FakeResponse(
+        207, _MULTISTATUS_HOSTILE
+    )
+    session.responses[("GET", "http://host/share/ok.txt")] = lambda: _FakeResponse(
+        200, b"ok"
+    )
+    p = _dav("dav://host/share/", session)
+    assert [c.name for c in p.iterdir()] == ["ok.txt"]
+    dst = tmp_path / "dst"
+    p.copy(LocalPath(dst), recursive=True, preserve_metadata=False)
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["dst"]
+    assert (dst / "ok.txt").read_bytes() == b"ok"
+
+
+class _ClosingResponse(_FakeResponse):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.closed = False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            err = requests.HTTPError(str(self.status_code))
+            err.response = self
+            raise err
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize(
+    "status, exc", [(404, FileNotFoundError), (403, PermissionError), (500, OSError)]
+)
+def test_open_read_error_status_raises_and_closes(status, exc):
+    session = _FakeSession()
+    resp = _ClosingResponse(status, b"<!DOCTYPE HTML><title>error</title>")
+    session.responses[("GET", "http://host/docs/gone.txt")] = resp
+    p = _dav("dav://host/docs/gone.txt", session)
+    with pytest.raises(exc):
+        p.read_bytes()
+    assert resp.closed
 
 
 def test_rename_sends_move_with_destination_header():
