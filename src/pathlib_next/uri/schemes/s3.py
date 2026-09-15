@@ -46,6 +46,17 @@ def _is_not_found(error: _botoexc.ClientError) -> bool:
     return code in ("404", "NoSuchKey", "NotFound")
 
 
+def _object_key(path: str) -> str:
+    """The object key a s3 URI path names: leading `/`s dropped, and
+    exactly one trailing `/`. `s3://b/dir/` is the directory `dir`, the
+    way pathlib drops a trailing slash -- keeping it made the key `dir/`, so
+    the `dir/` marker object read as a file and `rm(recursive=True)` deleted
+    only the marker. Interior empty segments (`a//b`) are literal key bytes
+    and stay."""
+    key = path.lstrip("/")
+    return key[:-1] if key.endswith("/") else key
+
+
 class _S3WriteStream(_io.BytesIO):
     def __init__(self, path: "S3Path"):
         super().__init__()
@@ -84,7 +95,7 @@ class S3Path(UriPath):
 
     @property
     def key(self) -> str:
-        return self.path.lstrip("/")
+        return _object_key(self.path)
 
     @property
     def _client(self):
@@ -255,7 +266,7 @@ class S3Path(UriPath):
 
     def rename(self, target: "S3Path | Uri | str"):
         target = self._rename_target(target)
-        dest_key = target.path.lstrip("/")
+        dest_key = _object_key(target.path)
         if dest_key == self.key:
             return
         self._client.copy_object(

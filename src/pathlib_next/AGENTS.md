@@ -50,8 +50,14 @@ pathlib_next`.
     back to `iterdir()` + one `stat()` per child; override directly when the
     listing call already returns metadata (used by `walk()`/`glob()` so
     remote schemes avoid a stat round trip per entry).
-  - `glob(pattern, *, case_sensitive=None, include_hidden=False,
-    recursive=None, dironly=None)` — a `"**"` pattern component
+  - `glob(pattern, *, case_sensitive=None, include_hidden=True,
+    recursive=None, dironly=None, recurse_symlinks=False)` — pathlib
+    semantics of the running interpreter: hidden entries included (pass
+    `include_hidden=False` to filter), `**` never descends into directory
+    symlinks (`recurse_symlinks=True` raises `NotImplementedError`), a
+    missing or non-directory base yields nothing, `""` raises `ValueError`
+    and an absolute pattern `glob.NonRelativePatternError` (a
+    `NotImplementedError` and a `ValueError`). A `"**"` pattern component
     auto-enables recursion (pathlib parity); pass `recursive=False`
     explicitly to disable it even with `"**"` present, or `True` to force it
     without `"**"`. A recursive glob on a remote scheme walks the whole
@@ -61,8 +67,11 @@ pathlib_next`.
     `_scandir()`, not `iterdir()`; the pre-seeded stat from `_scandir()` is
     trusted only when `follow_symlinks=False` (its own default) — an
     explicit `follow_symlinks=True` always re-`stat()`s each entry.
-  - `touch(mode=0o666, exist_ok=True)` — raises `FileExistsError` (not a
-    silent truncate) when `exist_ok=False` and the file exists.
+  - `touch(mode=None, exist_ok=True)` — never truncates an existing file;
+    raises `FileExistsError` when `exist_ok=False` and it exists. A new
+    file is chmod'ed only when `mode` is passed (unmasked); an existing
+    file's mtime is not updated on generic backends. `LocalPath`/`FileUri`
+    use pathlib's `touch()`.
   - `_mkdir(mode)` (not implemented by default) / `mkdir(mode=0o777,
     parents=False, exist_ok=False)` — `mkdir()` retries through
     `_mkdir()`, creating parents on `FileNotFoundError` when `parents=True`.
@@ -360,9 +369,11 @@ userinfo from `str()`/`repr()`/`as_uri(sanitize=True)`. `ftps:`
 (`FtpBackend(timeout=30.0, ssl_context=None, verify=True)`) verifies
 certificates by default and reuses the TLS session for data connections.
 `utils.LRU(func, maxsize=128, on_evict=None)` calls `on_evict(key, value)` for
-entries it drops (`discard(*args)` removes one). `gs:` honors `STORAGE_EMULATOR_HOST` (set
-into `os.environ` for the `google-cloud-storage` client, e.g. for a local
-emulator) when configured on the path/backend.
+entries it drops (`discard(*args)` removes one). `GsBackend(**client_kwargs)` passes its keyword arguments to
+`google.cloud.storage.Client` unchanged (for an emulator:
+`client_options={"api_endpoint": url}, use_auth_w_custom_endpoint=False`);
+it never sets `STORAGE_EMULATOR_HOST`. S3/GCS/Azure keys drop one trailing
+`/`, so `s3://b/dir/` names the directory `dir`.
 
 ## Testing helpers (`pathlib_next.testing`)
 
@@ -390,11 +401,14 @@ Subclass one of these with your own `root` fixture to verify a custom
 - **`glob.glob(path, *, dironly=False, root_dir=None, recursive=False,
   include_hidden=False, case_sensitive=None) -> Iterable[path-like]`** — the
   engine behind `Path.glob()`/`rglob()`; works over anything exposing
-  `iterdir()`/`is_dir()`/`name`/`parents`/`has_glob_pattern()`. Dotfiles are
-  excluded from `*`/`?` matches unless `include_hidden=True`.
+  `iterdir()`/`is_dir()`/`name`/`parents`/`has_glob_pattern()`. The
+  module-level function keeps stdlib `glob`'s default of excluding dotfiles
+  unless `include_hidden=True` (`Path.glob()` includes them).
+  **`glob.parse_pattern(pattern)`** / **`glob.select(...)`** — the
+  parsed-pattern selector `Path.glob()` uses; **`glob.NonRelativePatternError`**.
   **`glob.full_match(segments, pattern, case_sensitive) -> bool`** —
   pathlib 3.13 `full_match()` semantics, `"**"` matches zero or more
-  segments. **`glob.RECURSIVE`** = `"**"`.
+  segments, linear in pattern and path length. **`glob.RECURSIVE`** = `"**"`.
 - **`sync.PathSyncer(checksum=None, /, remove_missing=False,
   follow_symlinks=True, symlink_mode="preserve", hook=None,
   ignore_error=False, quick_check=True)`** — one-way checksum-driven tree
@@ -484,7 +498,8 @@ Subclass one of these with your own `root` fixture to verify a custom
   want a graceful fallback catch `NotImplementedError` (e.g. `move()` falls
   back to copy+unlink when `rename` isn't implemented).
 - **`sizeof_fmt(num) -> str`** — human-readable byte size (`"1.5K"`, ...).
-  **`parsedate(date) -> float`** — epoch seconds from a `str`/
-  `time.struct_time`/`tuple`/`float`; unparseable or `None` input returns
-  `0`, not "now". **`get_machine_ips() -> list[IPv4Address | IPv6Address]`**
-  — `lru_cache(maxsize=1)`d.
+  **`parsedate(date) -> float`** — UTC epoch seconds from an HTTP date
+  string (RFC 1123/850/asctime; a zone offset is honoured, no zone means
+  UTC), a `time.struct_time`/`tuple` (UTC unless it carries an offset) or a
+  number (returned as is); unparseable or `None` input returns `0`, not
+  "now".

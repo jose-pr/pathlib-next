@@ -6,6 +6,25 @@ from pathlib_next.uri.schemes.gs import GsPath, GsBackend
 from pathlib_next.uri import UriPath
 
 
+@pytest.fixture
+def gs_server(gcs_api_server, monkeypatch):
+    """The fake GCS server through the real SDK. `GsBackend` no longer turns
+    `api_endpoint` into a process-wide `STORAGE_EMULATOR_HOST`, so a custom
+    endpoint authenticates unless told not to:
+    `use_auth_w_custom_endpoint=False` is the SDK's own no-auth switch."""
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    base_url, bucket_name = gcs_api_server
+    backend = GsBackend(
+        client_options={"api_endpoint": base_url},
+        use_auth_w_custom_endpoint=False,
+    )
+    yield GsPath(f"gs://{bucket_name}", backend=backend), backend
+    # The backend must not have redirected the rest of the process.
+    import os
+
+    assert "STORAGE_EMULATOR_HOST" not in os.environ
+
+
 def test_gs_path_registration():
     """Test that gs: scheme resolves to GsPath."""
     path = UriPath("gs://bucket/key/path", findclass=True)

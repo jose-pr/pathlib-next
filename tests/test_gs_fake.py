@@ -143,3 +143,99 @@ def test_rm_recursive_delete_error_reroutes_to_ignore_error():
         ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
     )
     assert calls == [(OSError, "dir")]
+
+
+# --- a trailing "/" names the directory, not the "dir/" marker object -------
+
+
+@pytest.mark.parametrize(
+    "uri, key",
+    [
+        ("gs://bucket/dir/", "dir"),
+        ("gs://bucket/dir", "dir"),
+        ("gs://bucket/", ""),
+        ("gs://bucket/a//b", "a//b"),
+        ("gs://bucket/dir//", "dir/"),
+    ],
+)
+def test_key_drops_one_trailing_slash(uri, key):
+    assert _gs(uri).key == key
+
+
+def test_trailing_slash_marker_dir_is_a_directory_and_rm_deletes_tree():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update(
+        {"dir/": b"", "dir/a.txt": b"a", "dir/sub/b.txt": b"b", "other.txt": b"k"}
+    )
+    p = _gs("gs://bucket/dir/", backend)
+    assert p.is_dir()
+    assert not p.is_file()
+    p.rm(recursive=True)
+    assert bucket.objects == {"other.txt": b"k"}
+
+
+# --- GsBackend passes client options through, never touching os.environ ----
+
+
+@pytest.fixture
+def fake_storage_module(monkeypatch):
+    """A stand-in `google.cloud.storage` that records the Client kwargs, so
+    the backend is checked without the SDK installed."""
+    import importlib
+    import sys
+    import types
+
+    received = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            received.append(kwargs)
+
+    storage = types.ModuleType("google.cloud.storage")
+    storage.Client = Client
+    for name in ("google", "google.cloud"):
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "google.cloud.storage", storage)
+    monkeypatch.setattr(sys.modules["google.cloud"], "storage", storage, raising=False)
+    return received
+
+
+def test_gs_backend_does_not_mutate_environment(fake_storage_module, monkeypatch):
+    import os
+
+    from pathlib_next.uri.schemes.gs import GsBackend
+
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    options = {
+        "api_endpoint": "https://storage-acme.p.googleapis.com",
+        "quota_project_id": "billing-proj",
+    }
+    GsBackend(client_options=options, project="prod").client()
+    assert "STORAGE_EMULATOR_HOST" not in os.environ
+    # Every option reaches the client, api_endpoint included.
+    assert fake_storage_module == [
+        {
+            "client_options": {
+                "api_endpoint": "https://storage-acme.p.googleapis.com",
+                "quota_project_id": "billing-proj",
+            },
+            "project": "prod",
+        }
+    ]
+
+    # A later, unrelated backend is not redirected.
+    GsBackend(project="unrelated").client()
+    assert "STORAGE_EMULATOR_HOST" not in os.environ
+    assert fake_storage_module[-1] == {"project": "unrelated"}
+
+
+def test_gs_backend_caches_its_client(fake_storage_module):
+    from pathlib_next.uri.schemes.gs import GsBackend
+
+    backend = GsBackend(project="p")
+    assert backend.client() is backend.client()
+    assert len(fake_storage_module) == 1

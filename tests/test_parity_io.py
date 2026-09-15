@@ -76,10 +76,14 @@ def test_glob_recursive_auto_enable(fixture_tree):
     assert ours == theirs == {"b.py", "c.py", "d.py"}
 
 
-def test_glob_hidden_excluded_by_default(fixture_tree):
+def test_glob_hidden_included_by_default_like_pathlib(fixture_tree):
     root = pathlib_next.LocalPath(fixture_tree)
     names = {p.name for p in root.glob("*.txt")}
-    assert names == {"a.txt"}  # .hidden.txt excluded
+    assert names == {
+        p.name for p in __import__("pathlib").Path(fixture_tree).glob("*.txt")
+    }
+    assert names == {"a.txt", ".hidden.txt"}
+    assert {p.name for p in root.glob("*.txt", include_hidden=False)} == {"a.txt"}
 
 
 def test_walk_matches_os_walk(fixture_tree):

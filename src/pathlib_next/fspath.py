@@ -14,6 +14,7 @@ import typing as _ty
 
 from . import path as _proto
 from . import utils as _utils
+from .utils import glob as _glob
 from .utils.stat import FileStat as _FileStat
 
 # pathlib.Path.stat()/chmod() only accept follow_symlinks= on 3.10+; below
@@ -25,6 +26,71 @@ _HAS_FOLLOW_SYMLINKS = _sys.version_info >= (3, 10)
 @_func.cache
 def _is_case_sensitive(flavour: _os.path) -> bool:
     return flavour.normcase("Aa") == "Aa"
+
+
+def _translate_segment(part: str, not_sep: str) -> str:
+    """One pattern segment to a regex in which `*`/`?` never match `sep`
+    (CPython 3.13's `fnmatch._translate(part, not_sep + "*", not_sep)`)."""
+    import fnmatch as _fnmatch
+
+    # fnmatch.translate() wraps its output; slice that off a bracket
+    # expression's translation to reuse its range/negation handling.
+    prefix, suffix = _fnmatch.translate("_").split("_")
+    out = []
+    i, n = 0, len(part)
+    while i < n:
+        c = part[i]
+        i += 1
+        if c == "*":
+            if not out or out[-1] != f"{not_sep}*":
+                out.append(f"{not_sep}*")
+        elif c == "?":
+            out.append(not_sep)
+        elif c == "[":
+            j = i
+            if j < n and part[j] == "!":
+                j += 1
+            if j < n and part[j] == "]":
+                j += 1
+            while j < n and part[j] != "]":
+                j += 1
+            if j >= n:
+                out.append("\\[")
+            else:
+                out.append(
+                    _fnmatch.translate(part[i - 1 : j + 1])[len(prefix) : -len(suffix)]
+                )
+                i = j + 1
+        else:
+            out.append(_re.escape(c))
+    return "".join(out)
+
+
+@_func.lru_cache(maxsize=512)
+def _compile_full_match(pattern: str, sep: str, case_sensitive: bool):
+    """Compile a `full_match()` pattern string the way CPython 3.13 does:
+    `glob.translate(pattern, recursive=True, include_hidden=True, seps=sep)`."""
+    esc = _re.escape(sep)
+    not_sep = f"[^{esc}]"
+    results = []
+    parts = pattern.split(sep)
+    last = len(parts) - 1
+    for idx, part in enumerate(parts):
+        if part == "*":
+            results.append(f"{not_sep}+{esc}" if idx < last else f"{not_sep}+")
+        elif part == "**":
+            if idx < last:
+                if parts[idx + 1] != "**":
+                    results.append(f"(?:.+{esc})?")
+            else:
+                results.append(".*")
+        else:
+            if part:
+                results.append(_translate_segment(part, not_sep))
+            if idx < last:
+                results.append(esc)
+    flags = 0 if case_sensitive else _re.IGNORECASE
+    return _re.compile(f"(?s:{''.join(results)})\\Z", flags).match
 
 
 class _BaseFSPathname(_path.PurePath, _proto.Pathname):
@@ -60,6 +126,68 @@ class _BaseFSPathname(_path.PurePath, _proto.Pathname):
 
     def with_segments(self, *args: str | _proto.FsPathLike):
         return type(self)(*args)
+
+    # match()/full_match(): stdlib's own wherever it has the promised
+    # signature. `PurePath` follows this class in the MRO, so defining either
+    # name unconditionally would displace stdlib's on the versions that have
+    # it -- hence the version-gated definitions.
+
+    if _sys.version_info < (3, 12):
+
+        def match(self, path_pattern, *, case_sensitive=None):
+            """Return True if this path matches the given pattern (stdlib's
+            `PurePath.match`). `case_sensitive=` is 3.12+ in CPython; this
+            shim accepts it on older versions too."""
+            if case_sensitive is None:
+                return _path.PurePath.match(self, path_pattern)
+            return self._match_case(_os.fspath(path_pattern), case_sensitive)
+
+        def _match_case(self, pattern: str, case_sensitive: bool) -> bool:
+            # CPython 3.9-3.11's PurePath.match, with the flavour's casefold
+            # replaced by the requested sensitivity.
+            import fnmatch as _fnmatch
+
+            fold = (lambda s: s) if case_sensitive else str.lower
+            pat = self.with_segments(fold(pattern))
+            pat_parts = list(pat.parts)
+            if not pat_parts:
+                raise ValueError("empty pattern")
+            if pat.drive and pat.drive != fold(self.drive):
+                return False
+            if pat.root and pat.root != self.root:
+                return False
+            parts = [fold(part) for part in self.parts]
+            if pat.drive or pat.root:
+                if len(pat_parts) != len(parts):
+                    return False
+                pat_parts = pat_parts[1:]
+            elif len(pat_parts) > len(parts):
+                return False
+            return all(
+                _fnmatch.fnmatchcase(part, pat)
+                for part, pat in zip(reversed(parts), reversed(pat_parts))
+            )
+
+    if _sys.version_info < (3, 13):
+
+        def full_match(self, pattern, *, case_sensitive=None):
+            """Return True if this path matches the glob-style `pattern`
+            against the whole path, with "**" matching any number of
+            segments -- a port of CPython 3.13's `PurePath.full_match`. The
+            generic `Pathname.full_match` splits on "/" and never sees a
+            drive, a root or a backslash, so rooted and Windows patterns
+            failed before 3.13."""
+            if not isinstance(pattern, _path.PurePath):
+                pattern = self.with_segments(pattern)
+            if case_sensitive is None:
+                case_sensitive = self._is_case_sensitive
+            sep = "\\" if isinstance(pattern, _path.PureWindowsPath) else "/"
+            path_str = str(self)
+            pattern_str = str(pattern)
+            match = _compile_full_match(
+                "" if pattern_str == "." else pattern_str, sep, case_sensitive
+            )
+            return match("" if path_str == "." else path_str) is not None
 
 
 class PosixPathname(_path.PurePosixPath, _BaseFSPathname):
@@ -247,29 +375,37 @@ class LocalPath(
         pattern: str | _proto.FsPathLike,
         *,
         case_sensitive: bool = None,
-        include_hidden: bool = False,
+        include_hidden: bool = True,
         recursive: bool = None,
         dironly: bool = None,
+        recurse_symlinks: bool = False,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
 
-        A "**" pattern component auto-enables recursion (pathlib parity);
-        see Path.glob()'s docstring for the `recursive=` override rules.
+        Same semantics as Path.glob(); every separator of this flavour
+        splits the pattern, and a pattern with a drive or root raises
+        `glob.NonRelativePatternError` like pathlib.
         """
-        if not isinstance(pattern, (str, _re.Pattern)):
-            pattern = _os.fspath(pattern)
-        if dironly is None:
-            dironly = (
-                isinstance(pattern, str)
-                and pattern
-                and pattern[-1] in self._path_separators
-            )
-        yield from _proto.Path.glob(
+        pattern = _os.fspath(pattern)
+        if pattern:
+            anchored = self.with_segments(pattern)
+            if anchored.drive or anchored.root:
+                raise _glob.NonRelativePatternError(
+                    "Non-relative patterns are unsupported"
+                )
+            for sep in self._path_separators:
+                pattern = pattern.replace(sep, "/")
+            if any(self._parser.splitdrive(part)[0] for part in pattern.split("/")):
+                # "sub/C:/x": joining "C:" would re-anchor outside self, and
+                # no child can be named that, so nothing matches (pathlib).
+                return iter(())
+        return _proto.Path.glob(
             self,
             pattern,
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
             dironly=dironly,
+            recurse_symlinks=recurse_symlinks,
         )

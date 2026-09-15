@@ -996,7 +996,10 @@ def gs_server(gcs_api_server):
     from pathlib_next.uri.schemes.gs import GsBackend, GsPath
 
     base_url, bucket_name = gcs_api_server
-    backend = GsBackend(client_options={"api_endpoint": base_url})
+    # The SDK authenticates against a custom endpoint unless told not to.
+    backend = GsBackend(
+        client_options={"api_endpoint": base_url}, use_auth_w_custom_endpoint=False
+    )
     return GsPath(f"gs://{bucket_name}", backend=backend), backend
 
 

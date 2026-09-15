@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import pathlib
+import sys
 
 import uritools
 from hypothesis import given, settings
@@ -176,6 +177,101 @@ def test_is_relative_to_str_matches_pure_posix_path_for_unrelated_other(segs):
     for path_str in (_posix(segs), "/" + _posix(segs)):
         u, pp = Uri(path_str), pathlib.PurePosixPath(path_str)
         assert u.is_relative_to(other_str) == pp.is_relative_to(other_str)
+
+
+# --- Generic Pathname (Uri, MemPath) vs PurePosixPath: match, parents,
+# MemPath normalization. Small alphabets so wildcards actually hit. ---
+
+_match_name = st.sampled_from(["a", "b", "ab", "a.py", ".a", "b.a"])
+_match_pattern_part = st.sampled_from(
+    ["a", "b", "*", "?", "a*", "*.py", "[ab]", "[!a]*", "**", ".*", "."]
+)
+
+
+def _generic_classes():
+    from pathlib_next.mempath import MemPath
+
+    return (Uri, MemPath)
+
+
+@given(
+    rooted=st.booleans(),
+    names=st.lists(_match_name, min_size=0, max_size=4),
+    pattern_rooted=st.booleans(),
+    pattern_parts=st.lists(_match_pattern_part, min_size=0, max_size=4),
+    case_sensitive=st.sampled_from([None, True, False]),
+)
+@settings(max_examples=400)
+def test_generic_match_matches_pure_posix_path(
+    rooted, names, pattern_rooted, pattern_parts, case_sensitive
+):
+    """Multi-segment and rooted patterns (not just a trailing "*"): right
+    anchoring, `*` never crossing "/", anchors, and the empty pattern."""
+    path_str = ("/" if rooted else "") + "/".join(names)
+    pattern = ("/" if pattern_rooted else "") + "/".join(pattern_parts)
+    kwargs = {} if case_sensitive is None else {"case_sensitive": case_sensitive}
+
+    def outcome(p):
+        try:
+            if isinstance(p, pathlib.PurePath) and sys.version_info < (3, 12):
+                # 3.9-3.11 stdlib has no case_sensitive=; posix is sensitive.
+                if case_sensitive is False:
+                    return pathlib.PurePosixPath(str(p).lower()).match(pattern.lower())
+                return p.match(pattern)
+            return p.match(pattern, **kwargs)
+        except ValueError:
+            return ValueError
+
+    expected = outcome(pathlib.PurePosixPath(path_str))
+    for cls in _generic_classes():
+        assert outcome(cls(path_str)) == expected, (cls, path_str, pattern)
+
+
+@given(rooted=st.booleans(), segs=segments_list)
+@settings(max_examples=200)
+def test_generic_parents_and_parent_match_pure_posix_path(rooted, segs):
+    path_str = ("/" if rooted else "") + "/".join(segs)
+    pp = pathlib.PurePosixPath(path_str)
+
+    def spell(p):
+        s = p.as_posix()
+        return "" if s == "." else s
+
+    for cls in _generic_classes():
+        p = cls(path_str)
+        assert [spell(x) for x in p.parents] == [spell(x) for x in pp.parents]
+        assert spell(p.parent) == spell(pp.parent)
+        for ancestor in pp.parents:
+            assert p.is_relative_to(spell(ancestor)) is True
+
+
+_mem_piece = st.sampled_from(["", ".", "a", "b", "cd"])
+
+
+@given(
+    args=st.lists(
+        st.tuples(st.booleans(), st.lists(_mem_piece, max_size=4)),
+        min_size=1,
+        max_size=3,
+    )
+)
+@settings(max_examples=300)
+def test_mempath_normalizes_like_pure_posix_path(args):
+    from pathlib_next.mempath import MemPath
+
+    # POSIX keeps exactly two leading slashes as a distinct root; MemPath has
+    # one root, so such arguments are not generated.
+    strs = [("/" if rooted else "") + "/".join(pieces) for rooted, pieces in args]
+    strs = [s for s in strs if not (s.startswith("//") and not s.startswith("///"))]
+    if not strs:
+        return
+    pp = pathlib.PurePosixPath(*strs)
+    ours = MemPath(*strs)
+    assert str(ours) == ("" if str(pp) == "." else str(pp))
+    assert ours == MemPath(str(pp)) or str(pp) == "."
+    assert hash(ours) == hash(MemPath(ours.as_posix()))
+    assert ours.name == pp.name
+    assert ours.root == pp.root
 
 
 # --- uritools oracle: one-pass parse/compose fast paths ---

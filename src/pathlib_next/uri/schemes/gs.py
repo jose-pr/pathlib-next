@@ -21,7 +21,13 @@ class BaseGsBackend(object):
 
 class GsBackend(BaseGsBackend):
     """Lazily creates+caches a `google.cloud.storage` Client. A single client
-    is reused across threads -- it's documented as thread-safe."""
+    is reused across threads -- it's documented as thread-safe.
+
+    `client_kwargs` go to `storage.Client` unchanged, `client_options`
+    (dict or `ClientOptions`, `api_endpoint` included) among them. A custom
+    endpoint still authenticates; for an emulator or fake server pass
+    `use_auth_w_custom_endpoint=False` (anonymous credentials), or set
+    `STORAGE_EMULATOR_HOST` yourself -- the SDK reads it."""
 
     __slots__ = ("client_kwargs", "_client")
 
@@ -31,20 +37,27 @@ class GsBackend(BaseGsBackend):
 
     def client(self):
         if self._client is None:
-            import os
             from google.cloud import storage
 
-            kwargs = dict(self.client_kwargs)
-            # Handle api_endpoint: set env var for google-cloud-storage emulator support
-            if "client_options" in kwargs and isinstance(
-                kwargs["client_options"], dict
-            ):
-                endpoint = kwargs["client_options"].get("api_endpoint")
-                if endpoint:
-                    os.environ["STORAGE_EMULATOR_HOST"] = endpoint
-                    del kwargs["client_options"]
-            self._client = storage.Client(**kwargs)
+            # Passed through as given. This used to turn a dict
+            # `api_endpoint` into a process-wide, never-restored
+            # `os.environ["STORAGE_EMULATOR_HOST"]` and drop the other
+            # client options: every later client in the process (and any
+            # subprocess) was redirected to that endpoint with anonymous
+            # credentials.
+            self._client = storage.Client(**self.client_kwargs)
         return self._client
+
+
+def _object_key(path: str) -> str:
+    """The object key a gs URI path names: leading `/`s dropped, and
+    exactly one trailing `/`. `gs://b/dir/` is the directory `dir`, the
+    way pathlib drops a trailing slash -- keeping it made the key `dir/`, so
+    the `dir/` marker object read as a file and `rm(recursive=True)` deleted
+    only the marker. Interior empty segments (`a//b`) are literal key bytes
+    and stay."""
+    key = path.lstrip("/")
+    return key[:-1] if key.endswith("/") else key
 
 
 class _GsWriteStream(_io.BytesIO):
@@ -84,7 +97,7 @@ class GsPath(UriPath):
 
     @property
     def key(self) -> str:
-        return self.path.lstrip("/")
+        return _object_key(self.path)
 
     @property
     def _client(self):
@@ -248,7 +261,7 @@ class GsPath(UriPath):
 
     def rename(self, target: "GsPath | Uri | str"):
         target = self._rename_target(target)
-        dest_key = target.path.lstrip("/")
+        dest_key = _object_key(target.path)
         if dest_key == self.key:
             # Copying onto itself and then deleting the source loses the object.
             return

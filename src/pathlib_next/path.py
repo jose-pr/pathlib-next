@@ -45,11 +45,18 @@ class _PathnameParents(_ty.Sequence[PN]):
     """This object provides sequence-like access to the logical ancestors
     of a path.  Don't try to construct it yourself."""
 
-    __slots__ = ("_path", "_segments")
+    __slots__ = ("_path", "_anchored", "_segments")
 
     def __init__(self, path: PN):
         self._path = path
-        segments = path.segments
+        segments = tuple(path.segments)
+        # A leading "" marks the root of an absolute path. It is the anchor,
+        # not an ancestor of its own: counting it made MemPath("/a/b").parents
+        # ['/a', '', ''] -- one entry too many, and the root spelled as the
+        # relative empty path (pathlib: ['/a', '/']).
+        self._anchored = bool(segments) and segments[0] == ""
+        if self._anchored:
+            segments = segments[1:]
         while segments and not segments[-1]:
             segments = segments[:-1]
         self._segments = segments
@@ -69,7 +76,11 @@ class _PathnameParents(_ty.Sequence[PN]):
             raise IndexError(idx)
         if idx < 0:
             idx += len(self)
-        return self._path.with_segments(*self._segments[: -idx - 1])
+        kept = self._segments[: -idx - 1]
+        if not self._anchored:
+            return self._path.with_segments(*kept)
+        # ("", "") is the root in with_segments' "/"-joined spelling.
+        return self._path.with_segments("", *(kept or ("",)))
 
     def __repr__(self):
         return "<{}.parents>".format(type(self._path).__name__)
@@ -150,13 +161,25 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         ...
 
     def with_name(self, name: str) -> _ty.Self:
-        """Return a new path with the name changed."""
+        """Return a new path with the name changed.
+
+        Raises ValueError for an empty name, ".", or a name containing "/",
+        as pathlib does. Without the check a name such as "../../etc/passwd"
+        or "x/y" was spliced in verbatim, so a caller relying on pathlib's
+        validation of an untrusted file name got a path outside the
+        directory. A bare ".." is accepted, also as pathlib does; use
+        `utils.is_safe_child_name()` to reject it. `with_stem()`/
+        `with_suffix()` validate their result through here.
+        """
+        if not name or "/" in name or name == ".":
+            raise ValueError("Invalid name %r" % (name,))
         if not self.name:
             raise ValueError("%r has an empty name" % (self,))
         return self.with_segments(*self.segments[:-1], name)
 
     def with_stem(self, stem: str) -> _ty.Self:
-        """Return a new path with the stem changed."""
+        """Return a new path with the stem changed (validated like
+        `with_name()`)."""
         return self.with_name(stem + self.suffix)
 
     def with_suffix(self, suffix: str) -> _ty.Self:
@@ -260,17 +283,64 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         """True if the path is absolute"""
         ...
 
+    def _match_parts(self) -> tuple[bool, list[str]]:
+        """`(anchored, names)`: the path as `match()` sees it -- whether it
+        is rooted, and its names with empty and "." segments dropped, the
+        way `PurePosixPath` parses a string."""
+        segments = self.segments
+        anchored = bool(segments) and segments[0] == ""
+        return anchored, [s for s in segments if s and s != "."]
+
     def match(self, path_pattern: str | _re.Pattern, *, case_sensitive=None):
         """
-        Return True if this path matches the given pattern.
+        Return True if this path matches the given glob-style pattern.
+
+        pathlib's semantics on the running interpreter: a relative pattern
+        matches the last N segments (from the right), an absolute pattern
+        must match the whole path, and each segment is matched on its own,
+        so `*` never crosses a "/". "**" acts like "*" (use `full_match()`
+        for recursive matching). An empty pattern raises ValueError.
+
+        A compiled `re.Pattern` cannot be split into segments; it is matched
+        against the whole path string instead ("/"-joined segments, so a
+        `Uri`'s scheme and host are never part of it).
         """
+        import fnmatch as _fnmatch
+
         if case_sensitive is None:
             case_sensitive = self._is_case_sensitive
-        # as_posix(), not str(self): str() of a Uri includes scheme/host.
-        path = self.as_posix()
-        if not isinstance(path_pattern, _re.Pattern):
-            path_pattern = _glob.compile_pattern(path_pattern, case_sensitive)
-        return path_pattern.match(path) is not None
+        anchored, names = self._match_parts()
+        if isinstance(path_pattern, _re.Pattern):
+            path = ("/" if anchored else "") + "/".join(names)
+            return path_pattern.match(path) is not None
+        if isinstance(path_pattern, Pathname):
+            path_pattern = "/".join(path_pattern.segments)
+        elif not isinstance(path_pattern, str):
+            path_pattern = _os.fspath(path_pattern)
+        pattern_anchored = path_pattern.startswith("/")
+        pattern_names = [s for s in path_pattern.split("/") if s and s != "."]
+        if not pattern_names and not pattern_anchored:
+            raise ValueError("empty pattern")
+        if pattern_anchored and not (anchored and len(names) == len(pattern_names)):
+            return False
+        # The root counts as one more part a relative pattern can reach.
+        path_parts = len(names) + anchored
+        if len(pattern_names) > path_parts:
+            return False
+        flags = 0 if case_sensitive else _re.IGNORECASE
+        for index, pattern in enumerate(reversed(pattern_names)):
+            if index == len(names):
+                # A relative pattern as long as the path reaches its root.
+                # 3.12+ compares it like any other part, and no wildcard
+                # matches a separator; 3.9-3.11 fnmatch the root string, so
+                # "*" and "?" match it there.
+                if _sys.version_info >= (3, 12):
+                    return False
+                return _re.match(_fnmatch.translate(pattern), "/", flags) is not None
+            name = names[len(names) - 1 - index]
+            if _re.match(_fnmatch.translate(pattern), name, flags) is None:
+                return False
+        return True
 
     def full_match(self, pattern: str, *, case_sensitive: bool = None) -> bool:
         """Return True if this path matches the glob-style `pattern`
@@ -465,34 +535,43 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         pattern: str | _ty.Self,
         *,
         case_sensitive: bool = None,
-        include_hidden: bool = False,
+        include_hidden: bool = True,
         recursive: bool = None,
         dironly: bool = None,
+        recurse_symlinks: bool = False,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
 
-        If `pattern` contains a "**" component, recursion is auto-enabled
-        (pathlib parity). Pass `recursive=False` explicitly to disable
-        recursion even when "**" is present, or `recursive=True` to force
-        it for a pattern that doesn't contain "**".
+        Pathlib semantics: hidden entries are matched (`include_hidden=False`
+        filters them out and skips hidden directories), a trailing separator
+        selects directories only, "**" never descends into a directory
+        symlink, and a trailing "**" also selects files on Python 3.13+
+        (directories only before). A missing or non-directory parent selects
+        nothing. An empty pattern raises `ValueError`, an absolute one
+        `glob.NonRelativePatternError` (a `NotImplementedError` and a
+        `ValueError`). `recurse_symlinks=True` is not supported.
+
+        A "**" component auto-enables recursion. Pass `recursive=False`
+        explicitly to treat "**" as a plain "*" instead.
         Note for remote schemes (http/sftp): a recursive glob walks the
         whole remote subtree, one request/roundtrip per directory.
         """
+        if recurse_symlinks:
+            raise NotImplementedError("glob(recurse_symlinks=True)")
+        # Validates eagerly (like pathlib 3.13+); the returned selection is
+        # lazy. The pattern is never joined onto self: `self / pattern` let an
+        # absolute pattern escape self and re-parsed "?" as a URI query.
+        parts, trailing_sep = _glob.parse_pattern(pattern)
         if recursive is None:
-            if isinstance(pattern, str):
-                segments = pattern.split("/")
-            elif hasattr(pattern, "segments"):
-                segments = pattern.segments
-            else:
-                segments = ()
-            recursive = _glob.RECURSIVE in segments
-        yield from _glob.glob(
-            self / pattern,
-            case_sensitive=case_sensitive,
-            include_hidden=include_hidden,
+            recursive = _glob.RECURSIVE in parts
+        return _glob.select(
+            self,
+            parts,
+            dironly=trailing_sep if dironly is None else dironly,
             recursive=recursive,
-            dironly=dironly,
+            include_hidden=include_hidden,
+            case_sensitive=case_sensitive,
         )
 
     def rglob(
@@ -500,17 +579,23 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         pattern: str,
         *,
         case_sensitive: bool = None,
-        include_hidden: bool = False,
+        include_hidden: bool = True,
         recursive: bool = True,
         dironly: bool = None,
+        recurse_symlinks: bool = False,
     ):
         """Equivalent to `glob(f"**/{pattern}", recursive=True)`."""
-        yield from self.glob(
+        if not (isinstance(pattern, str) and not pattern):
+            # Reject an absolute pattern before "**/" hides its anchor;
+            # glob() validates without listing anything.
+            self.glob(pattern, recursive=False)
+        return self.glob(
             f"**/{pattern}",
             case_sensitive=case_sensitive,
             include_hidden=include_hidden,
             recursive=recursive,
             dironly=dironly,
+            recurse_symlinks=recurse_symlinks,
         )
 
     def walk(
@@ -576,34 +661,56 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
             paths += [path / d for d in reversed(dirnames)]
 
-    def touch(self, mode=0o666, exist_ok=True):
+    def touch(self, mode=None, exist_ok=True):
         """
-        Create this file with the given access mode, if it doesn't exist.
+        Create this file, if it doesn't exist.
 
         Raises FileExistsError if exist_ok is False and the file already
-        exists (pathlib parity) instead of silently truncating it.
+        exists (pathlib parity). An existing file is never truncated.
+
+        Differences from `pathlib.Path.touch`, which creates through
+        `os.open()` (so the process umask applies) and bumps an existing
+        file's mtime:
+
+        - `mode` is applied with `chmod()` only when passed explicitly, and
+          then verbatim: a remote server's umask is unknowable. The default
+          (`None`) leaves a new file with the permissions the backend gives
+          it, instead of chmod'ing it to a world-writable 0o666.
+        - An existing file's mtime is left unchanged: the generic protocol
+          has no timestamp primitive, and rewriting the content to bump it
+          is not a touch. `LocalPath` and `FileUri` use pathlib's own touch.
         """
-        if exist_ok:
-            if self.exists():
-                return
+        # stat() directly, not exists(): exists() reads *any* OSError (a
+        # timeout, a dropped connection) as "missing", which let a transient
+        # failure fall through to a truncating open("w").
+        try:
+            self.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not exist_ok:
+                raise FileExistsError(self)
+            return
+        try:
+            with self.open("x"):
+                ...
+        except FileExistsError:
+            # Created since the stat() above: an existing file, not ours to
+            # truncate.
+            if not exist_ok:
+                raise
+            return
+        except NotImplementedError:
+            # _open() doesn't support "x" (optional per the mode contract),
+            # so the stat() above is the only guard before the truncating
+            # "w" -- a small TOCTOU window.
             with self.open("w"):
                 ...
-        else:
+        if mode is not None:
             try:
-                with self.open("x"):
-                    ...
+                self.chmod(mode)
             except NotImplementedError:
-                # _open() doesn't support "x" (optional per the mode
-                # contract) -- emulate exclusivity best-effort. Small
-                # TOCTOU window between the check and the open() below.
-                if self.exists():
-                    raise FileExistsError(self)
-                with self.open("w"):
-                    ...
-        try:
-            self.chmod(mode)
-        except NotImplementedError:
-            pass
+                pass
 
     @_utils.notimplemented
     def _mkdir(self, mode: int): ...
@@ -944,7 +1051,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if preserve_metadata:
             try:
                 stat = src.stat(follow_symlinks=follow_symlinks)
-                target.chmod(stat.st_mode)
+                # Only a mode the source backend actually reported is
+                # metadata. FileStat's placeholder (0o444 for a file) is not:
+                # applying it made every copy from MemPath/HTTP/S3/... a
+                # read-only file that a re-copy or re-sync could not replace.
+                if getattr(stat, "mode_known", True) and stat.st_mode:
+                    target.chmod(stat.st_mode)
             except NotImplementedError:
                 pass
 

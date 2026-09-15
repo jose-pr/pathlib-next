@@ -47,19 +47,33 @@ class MemPath(Path):
     def __init__(
         self, *segments: str | Pathname | Path, backend: MemPathBackend = None, **kwargs
     ):
-        _segments = []
+        # Joined and normalized like `PurePosixPath`: empty and "." segments
+        # collapse, and an absolute argument restarts the join. Raw
+        # concatenation made `MemPath("/") / "a"` the path "//a", unequal to
+        # (and hashed apart from) `MemPath("/a")`, gave "d/" an empty name,
+        # and let `MemPath("/root") / "/etc"` address "/root/etc".
+        path = ""
         _backend = None
         for segment in segments:
             if isinstance(segment, MemPath):
-                _segments.extend(segment.segments)
+                text = segment.as_posix()
                 _backend = segment.backend
             elif isinstance(segment, Path):
                 raise NotImplementedError()
             elif isinstance(segment, Pathname):
-                _segments.extend(segment.segments)
+                text = "/".join(segment.segments)
+            elif isinstance(segment, str):
+                text = segment
             else:
-                _segments.append(segment)
-        self._segments = "/".join(_segments).split("/")
+                raise TypeError(
+                    "argument should be a str or a Pathname, "
+                    f"not {type(segment).__name__!r}"
+                )
+            if text.startswith("/") or not path:
+                path = text
+            elif text:
+                path = f"{path}/{text}"
+        self._segments = self._parse(path)
         # `is not None`, not truthiness: a freshly-created root's backend is
         # an *empty* dict, which is falsy -- `if _backend:` silently treated
         # that as "no backend found" and gave the child a disconnected new
@@ -68,6 +82,16 @@ class MemPath(Path):
             backend = _backend
         self._backend = backend if backend is not None else MemPathBackend()
         self._normalized = None
+
+    @staticmethod
+    def _parse(path: str) -> list:
+        """Segments of a joined path string: `["", ""]` for the root,
+        `["", name, ...]` for another absolute path, `[name, ...]` for a
+        relative one and `[]` for the empty path (so its `root` is "")."""
+        names = [name for name in path.split("/") if name and name != "."]
+        if path.startswith("/"):
+            return ["", *names] if names else ["", ""]
+        return names
 
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self.as_posix())
@@ -104,15 +128,22 @@ class MemPath(Path):
 
     @property
     def parent(self):
-        segments = self.segments[:-1]
-        if segments == self.segments:
+        segments = self.segments
+        if not segments or segments == ["", ""]:
             return self
-        return self.with_segments(*segments)
+        if len(segments) == 2 and segments[0] == "":
+            # "/a" -> "/": dropping the root gave the relative empty path.
+            return self.with_segments("", "")
+        return self.with_segments(*segments[:-1])
 
     def relative_to(self, other):
         raise NotImplementedError()
 
     def with_segments(self, *segments: str):
+        if all(isinstance(segment, str) for segment in segments):
+            # The `Pathname` protocol's spelling: segments joined with "/",
+            # a leading "" marking the root (`("", "a")` is "/a").
+            segments = ("/".join(segments),)
         return type(self)(*segments, backend=self.backend)
 
     def as_uri(self):
@@ -189,12 +220,10 @@ class MemPath(Path):
     def iterdir(self):
         parent, name = self._parent_container()
         content = parent.get(name) if name else parent
-        cls = type(self)
-
         if not isinstance(content, dict):
             raise NotADirectoryError(self)
         for c in list(content.keys()):
-            yield cls(*self.segments, c, backend=self.backend)
+            yield self.with_segments(*self.segments, c)
 
     def _open(self, mode="r", buffering=-1) -> IOBase:
         # mode contract: "r"/"w" are required; "x"/"a" are supported here

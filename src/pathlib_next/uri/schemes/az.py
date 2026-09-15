@@ -94,17 +94,16 @@ class AzPath(UriPath):
 
     @property
     def container(self) -> str:
-        segments = self.segments
-        # Skip leading empty string, get the first real segment
-        real_segments = [s for s in segments if s]
-        return real_segments[0] if real_segments else ""
+        return self.path.lstrip("/").split("/", 1)[0]
 
     @property
     def key(self) -> str:
-        segments = self.segments
-        # Skip leading empty string and first real segment (container)
-        real_segments = [s for s in segments if s]
-        return "/".join(real_segments[1:]) if len(real_segments) > 1 else ""
+        # Everything after the container, minus exactly one trailing "/":
+        # `az://acct/cont/dir/` is the directory `dir`, as on s3:/gs:.
+        # Interior empty segments (`a//b`) are literal blob-name bytes and
+        # stay -- they used to be dropped, making `a//b` unreachable.
+        _container, _, key = self.path.lstrip("/").partition("/")
+        return key[:-1] if key.endswith("/") else key
 
     @property
     def _client(self):

@@ -6,6 +6,7 @@ Uri, and MemPath.
 """
 
 import pathlib
+import sys
 
 import pytest
 
@@ -97,28 +98,63 @@ def test_parent_and_parents(cls):
     assert parents[:2] == ["a/b", "a"]
     assert len(parents) == 3  # trailing root/"." element, like pathlib
 
+    # Stdlib's own `parents` (which PosixPathname inherits) gained slices and
+    # negative indices in 3.10. Only that combination may refuse them: a
+    # blanket try/except also hid a regression in the generic
+    # `_PathnameParents` used by Uri and MemPath.
+    stdlib_39_parents = cls is PosixPathname and sys.version_info < (3, 10)
+
     # Slicing
-    try:
+    if stdlib_39_parents:
+        with pytest.raises(TypeError):
+            p.parents[0:2]
+    else:
         sliced = p.parents[0:2]
         assert [x.as_posix() for x in sliced] == ["a/b", "a"]
-    except TypeError:
-        # Python 3.9 stdlib pathlib.PurePath.parents doesn't support slicing
-        pass
 
     # Negative indexing
-    try:
-        assert p.parents[-1].as_posix() == "" or p.parents[-1].as_posix() == "."
+    if stdlib_39_parents:
+        with pytest.raises(IndexError):
+            p.parents[-1]
+    else:
+        assert p.parents[-1].as_posix() in ("", ".")
         assert p.parents[-2].as_posix() == "a"
         assert p.parents[-3].as_posix() == "a/b"
-    except IndexError:
-        # Python 3.9 stdlib pathlib.PurePath.parents doesn't support negative indexing
-        pass
 
     # IndexError out of bounds
     with pytest.raises(IndexError):
         _ = p.parents[3]
     with pytest.raises(IndexError):
         _ = p.parents[-4]
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+def test_parents_of_a_rooted_path_end_at_the_root(cls):
+    p = cls("/a/b")
+    assert [pp.as_posix() for pp in p.parents] == ["/a", "/"]
+    assert len(p.parents) == 2
+    assert p.parent.parent.as_posix() == "/"
+    assert p.is_relative_to("/")
+    assert p.is_relative_to(cls("/"))
+
+
+@pytest.mark.parametrize("cls", IMPLS)
+@pytest.mark.parametrize(
+    "path,pattern,expected",
+    [
+        ("a/b/c.py", "b/*.py", True),
+        ("a/b/c.py", "a/*.py", False),
+        ("/a/b", "a/b", True),
+        ("/a/b", "/a/b", True),
+        ("a/b", "/a/b", False),
+        ("a/b/c.py", "/b/*.py", False),
+    ],
+)
+def test_match_is_right_anchored_per_segment(cls, path, pattern, expected):
+    # PosixPathname resolves stdlib's match (MRO); Uri and MemPath the
+    # generic Pathname.match -- both routes must agree with pathlib.
+    assert pathlib.PurePosixPath(path).match(pattern) is expected
+    assert cls(path).match(pattern) is expected
 
 
 @pytest.mark.parametrize("cls", IMPLS)

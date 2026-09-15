@@ -18,7 +18,9 @@ class FileStat(_FStat):
     from any object with a `stat()` method, or passes a `FileStat` through
     unchanged."""
 
-    __slots__ = (
+    #: The stat fields proper -- what `items()` reports and `from_stat()`
+    #: copies from a foreign stat object.
+    _FIELDS = (
         "st_mode",
         "st_nlink",
         "st_uid",
@@ -28,6 +30,14 @@ class FileStat(_FStat):
         "st_mtime",
         "st_ctime",
     )
+    __slots__ = _FIELDS + ("mode_known",)
+
+    #: Whether `st_mode` is metadata the backend actually reported (True) or
+    #: a placeholder synthesized from `is_dir` (False: `S_IFREG | 0o444`, or
+    #: `S_IFDIR | 0o555` for a directory). Consumers that would *write* the
+    #: mode somewhere -- `Path.copy(preserve_metadata=True)` -- skip it when
+    #: False, so an invented read-only mode never lands on a real file.
+    mode_known: bool
 
     def __init__(
         self,
@@ -36,6 +46,7 @@ class FileStat(_FStat):
         st_mtime: int = 0,
         is_dir: bool = False,
     ):
+        self.mode_known = bool(st_mode)
         self.st_mode = st_mode or (
             _stat.S_IFDIR | 0o555 if is_dir else _stat.S_IFREG | 0o444
         )
@@ -57,12 +68,13 @@ class FileStat(_FStat):
             self.st_mode = _stat.S_IFDIR | value
         else:
             self.st_mode = _stat.S_IFREG | value
+        self.mode_known = True
 
     def __getitem__(self, key):
         return getattr(self, key)
 
     def items(self):
-        for key in self.__slots__:
+        for key in self._FIELDS:
             yield key, getattr(self, key)
 
     def __repr__(self):
@@ -82,12 +94,17 @@ class FileStat(_FStat):
         """Copy any stat-like object's (`os.stat_result`, paramiko's
         `SFTPAttributes`, ...) recognized fields into a fresh `FileStat`,
         so downstream code (e.g. `.is_dir()`) can rely on a uniform type.
-        Passes an already-`FileStat` through unchanged."""
+        Passes an already-`FileStat` through unchanged. The copied mode
+        counts as backend-reported (`mode_known`) unless the source says
+        otherwise or carries no mode at all (missing, `None` or `0`)."""
         if isinstance(stat, FileStat):
             return stat
         result = FileStat.__new__(FileStat)
-        for prop in FileStat.__slots__:
+        for prop in FileStat._FIELDS:
             setattr(result, prop, getattr(stat, prop, 0))
+        result.mode_known = bool(getattr(stat, "mode_known", True)) and bool(
+            result.st_mode
+        )
         return result
 
     @classmethod

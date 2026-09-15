@@ -24,17 +24,13 @@ def _names(paths):
 def test_glob_matches_stdlib_pathlib(fixture_tree, pattern):
     ours = _names(pathlib_next.LocalPath(fixture_tree).glob(pattern))
     theirs = _names(pathlib.Path(fixture_tree).glob(pattern))
-    # pathlib.Path.glob() only gained include_hidden= (default False) in
-    # 3.13; before that it always included dotfiles. Our include_hidden=
-    # default (False) matches 3.13+, so on older stdlib pathlib we must
-    # drop hidden entries from the ground truth ourselves to compare like
-    # for like.
-    theirs = {n for n in theirs if not n.startswith(".")}
+    # No filtering: pathlib.Path.glob() has never had include_hidden= and
+    # matches dotfiles on every version, and so does ours by default.
     assert ours == theirs
 
 
 def test_glob_trailing_wildcard_b7(fixture_tree):
-    # B7 regression: WILCARD_PATTERN.match (anchored) missed "foo*"-style
+    # B7 regression: WILDCARD_PATTERN.match (anchored) missed "foo*"-style
     # trailing wildcards, so a pattern like "b*" wasn't even recognized as
     # containing a wildcard (has_glob_pattern) prior to the fix.
     root = pathlib_next.LocalPath(fixture_tree)
@@ -58,8 +54,12 @@ def test_glob_recursive_false_disables_even_with_star_star(fixture_tree):
 
 def test_glob_include_hidden(fixture_tree):
     root = pathlib_next.LocalPath(fixture_tree)
-    assert ".hidden.txt" not in _names(root.glob("*.txt"))
-    assert ".hidden.txt" in _names(root.glob("*.txt", include_hidden=True))
+    # Hidden entries are included by default (pathlib parity);
+    # include_hidden=False is the opt-in filter.
+    assert ".hidden.txt" in _names(root.glob("*.txt"))
+    assert ".hidden.txt" not in _names(root.glob("*.txt", include_hidden=False))
+    # A pattern that itself starts with "." still matches hidden names.
+    assert _names(root.glob(".*", include_hidden=False)) == {".hidden.txt"}
 
 
 def test_glob_dironly_trailing_slash_b18(fixture_tree):
@@ -82,7 +82,6 @@ def test_glob_no_match_yields_nothing(fixture_tree):
 
 
 def test_glob_on_mempath():
-    backend = None
     root = MemPath("/")
     (root / "a.py").write_text("a")
     (root / "b.txt").write_text("b")

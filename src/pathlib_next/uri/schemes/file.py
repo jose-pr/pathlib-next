@@ -20,6 +20,16 @@ class FileUri(UriPath):
             self._filepath = _Local(self.__fspath__())
         return self._filepath
 
+    @property
+    def parent(self):
+        parent = super().parent
+        path = parent.path
+        if _os.name == "nt" and len(path) == 2 and path[1] == ":" and path[0].isalpha():
+            # "C:" alone is drive-RELATIVE (the current directory on C:); the
+            # parent of a top-level "C:/Windows" is the drive root "C:/".
+            return parent.with_path(path + "/")
+        return parent
+
     def _init(
         self,
         source: Source,
@@ -56,6 +66,14 @@ class FileUri(UriPath):
 
     def mkdir(self, mode=511, parents=False, exist_ok=False):
         return self.filepath.mkdir(mode, parents, exist_ok)
+
+    def touch(self, mode=None, exist_ok=True):
+        # pathlib's touch: the mode goes through os.open(), so the umask
+        # applies, and an existing file's mtime is bumped. The generic
+        # Path.touch can do neither.
+        if mode is None:
+            return self.filepath.touch(exist_ok=exist_ok)
+        return self.filepath.touch(mode, exist_ok)
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # LocalPath.chmod() itself shims the 3.10+-only follow_symlinks=

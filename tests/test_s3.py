@@ -308,3 +308,104 @@ def test_rename_str_destination_key_is_literal(name):
     _s3("s3://bucket/a.txt", backend).rename(name)
     assert backend._client.objects.get(name) == b"content"
     assert "a.txt" not in backend._client.objects
+
+
+# --- a trailing "/" names the directory, not the "dir/" marker object -------
+# `s3://bucket/dir/` is how `aws s3 ls` and the console spell a folder. The
+# key kept the slash, so the `dir/` marker read as a file and
+# `rm(recursive=True)` deleted only the marker while reporting success.
+
+
+@pytest.mark.parametrize(
+    "uri, key",
+    [
+        ("s3://bucket/dir/", "dir"),
+        ("s3://bucket/dir", "dir"),
+        ("s3://bucket/a/b/", "a/b"),
+        ("s3://bucket/", ""),
+        # Exactly one trailing slash goes; interior empty segments are
+        # literal key bytes and stay.
+        ("s3://bucket/a//b", "a//b"),
+        ("s3://bucket/dir//", "dir/"),
+    ],
+)
+def test_key_drops_one_trailing_slash(uri, key):
+    assert _s3(uri).key == key
+
+
+def test_trailing_slash_marker_dir_is_a_directory_fake_client():
+    backend = _FakeBackend()
+    backend._client.objects.update(
+        {"dir/": b"", "dir/a.txt": b"a", "dir/sub/b.txt": b"b", "other": b"k"}
+    )
+    p = _s3("s3://bucket/dir/", backend)
+    assert p.is_dir()
+    assert not p.is_file()
+    p.rm(recursive=True)
+    assert backend._client.objects == {"other": b"k"}
+
+
+def test_rename_to_trailing_slash_destination_drops_the_slash():
+    backend = _FakeBackend()
+    backend._client.objects["a.txt"] = b"content"
+    _s3("s3://bucket/a.txt", backend).rename(_s3("s3://bucket/b.txt/", backend))
+    assert backend._client.objects == {"b.txt": b"content"}
+
+
+@pytest.fixture
+def moto_s3():
+    boto3 = pytest.importorskip("boto3")
+    pytest.importorskip("moto")
+    import os
+
+    from moto import mock_aws
+
+    with mock_aws():
+        os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="bkt")
+        yield client
+
+
+def _moto_keys(client):
+    listing = client.list_objects_v2(Bucket="bkt").get("Contents", [])
+    return sorted(obj["Key"] for obj in listing)
+
+
+def test_trailing_slash_dir_with_marker_moto(moto_s3):
+    for key in ("dir/", "dir/a.txt", "dir/sub/b.txt", "keep.txt"):
+        moto_s3.put_object(Bucket="bkt", Key=key, Body=b"x" if "." in key else b"")
+
+    p = S3Path("s3://bkt/dir/")
+    assert p.key == "dir"
+    assert p.exists()
+    assert p.is_dir()
+    assert not p.is_file()
+    assert sorted(child.name for child in p.iterdir()) == ["a.txt", "sub"]
+
+    p.rm(recursive=True)
+    assert _moto_keys(moto_s3) == ["keep.txt"]
+
+
+def test_trailing_slash_dir_without_marker_moto(moto_s3):
+    moto_s3.put_object(Bucket="bkt", Key="plain/x.txt", Body=b"x")
+    moto_s3.put_object(Bucket="bkt", Key="keep.txt", Body=b"k")
+
+    p = S3Path("s3://bkt/plain/")
+    assert p.exists()
+    assert p.is_dir()
+    assert [child.name for child in p.iterdir()] == ["x.txt"]
+    p.rm(recursive=True)
+    assert _moto_keys(moto_s3) == ["keep.txt"]
+
+
+def test_trailing_slash_mkdir_then_rmdir_moto(moto_s3):
+    p = S3Path("s3://bkt/new/")
+    p.mkdir()
+    # One "new/" marker, not "new//".
+    assert _moto_keys(moto_s3) == ["new/"]
+    assert p.is_dir()
+    p.rmdir()
+    assert _moto_keys(moto_s3) == []

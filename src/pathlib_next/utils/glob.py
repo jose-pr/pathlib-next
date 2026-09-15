@@ -1,11 +1,16 @@
-# Based on glob built-in on python modified to work with Uri/anything that implemetns fspath/iterdir that is similar to pathlib.Path
-from __future__ import annotations
+"""Filename globbing over any pathlib_next `Path`.
 
-"""Filename globbing utility."""
+Modelled on CPython's pathlib glob selectors, reworked to run over anything
+that implements `_scandir()`/`iterdir()`/`is_dir()`/`name` like
+`pathlib.Path` (`LocalPath`, `MemPath`, every `UriPath` scheme).
+"""
+
+from __future__ import annotations
 
 import fnmatch as _fnmatch
 import functools as _func
 import re as _re
+import sys as _sys
 import typing as _ty
 
 RECURSIVE = "**"
@@ -13,11 +18,22 @@ ANY_PATTERN = _re.compile(_fnmatch.translate("*"))
 WILDCARD_PATTERN = _re.compile("([*?[])")
 WILCARD_PATTERN = WILDCARD_PATTERN  # back-compat alias for the old typo'd name
 
+# CPython 3.13 made a trailing "**" select files as well as directories;
+# earlier versions select directories only. glob() follows the running
+# interpreter so LocalPath keeps matching the pathlib it runs next to.
+_DOUBLESTAR_SELECTS_FILES = _sys.version_info >= (3, 13)
+
 if _ty.TYPE_CHECKING:
     from ..path import P as _Globable
 else:
 
     class _Globable(_ty.Protocol): ...
+
+
+class NonRelativePatternError(NotImplementedError, ValueError):
+    """An absolute or anchored glob pattern. pathlib raises
+    `NotImplementedError("Non-relative patterns are unsupported")`; this is
+    also a `ValueError`, so either `except` clause catches it."""
 
 
 @_func.lru_cache(maxsize=256, typed=True)
@@ -27,28 +43,77 @@ def compile_pattern(pat: str, case_sensitive: bool):
     return _re.compile(_fnmatch.translate(pat), flags)
 
 
+def _collapse_recursive(parts: _ty.Iterable[str]) -> _ty.List[str]:
+    """Drop repeated consecutive "**" (they select the same paths)."""
+    collapsed: _ty.List[str] = []
+    for part in parts:
+        if part == RECURSIVE and collapsed and collapsed[-1] == RECURSIVE:
+            continue
+        collapsed.append(part)
+    return collapsed
+
+
 def full_match(segments: _ty.Sequence[str], pattern: str, case_sensitive: bool) -> bool:
     """Match `segments` against a glob pattern that may contain "**"
-    components matching zero or more segments (pathlib 3.13's
-    PurePath.full_match semantics)."""
-    return _full_match(tuple(segments), tuple(pattern.split("/")), case_sensitive)
+    components (pathlib 3.13's PurePath.full_match semantics): a "**" matches
+    zero or more segments, except a trailing "**" after other components,
+    which needs at least one ("a/**" does not match "a").
+
+    Runs as a set-of-states automaton, O(len(segments) * len(pattern)), so
+    repeated "**" cannot backtrack exponentially.
+    """
+    pats = pattern.split("/")
+    pats = _collapse_recursive(p for i, p in enumerate(pats) if p or i == 0)
+    segs = [s for i, s in enumerate(segments) if s or i == 0]
+    end = len(pats)
+
+    def closure(states: _ty.Set[int]) -> _ty.Set[int]:
+        for i in sorted(states):
+            # A non-trailing (or sole) "**" may match zero segments.
+            if i < end and pats[i] == RECURSIVE and (i < end - 1 or end == 1):
+                states.add(i + 1)
+        return states
+
+    states = closure({0})
+    for seg in segs:
+        advanced: _ty.Set[int] = set()
+        for i in states:
+            if i == end:
+                continue
+            pat = pats[i]
+            if pat == RECURSIVE:
+                advanced.update((i, i + 1))
+            elif compile_pattern(pat, case_sensitive).match(seg):
+                advanced.add(i + 1)
+        if not advanced:
+            return False
+        states = closure(advanced)
+    return end in states
 
 
-def _full_match(
-    segs: _ty.Tuple[str, ...], pats: _ty.Tuple[str, ...], case_sensitive: bool
-) -> bool:
-    if not pats:
-        return not segs
-    pat = pats[0]
-    if pat == RECURSIVE:
-        return _full_match(segs, pats[1:], case_sensitive) or (
-            bool(segs) and _full_match(segs[1:], pats, case_sensitive)
+def parse_pattern(pattern: "str | _ty.Any") -> _ty.Tuple[_ty.List[str], bool]:
+    """Split a relative glob `pattern` (a `/`-separated string or a
+    `Pathname`) into its components, and report whether it ended with a
+    separator (directories only).
+
+    Raises `ValueError` for an empty pattern and `NonRelativePatternError`
+    for an absolute one, as `pathlib.Path.glob()` does. Empty and "."
+    components are dropped.
+    """
+    if isinstance(pattern, str):
+        rooted = pattern.startswith("/")
+        segments = pattern.split("/")
+    else:
+        segments = list(pattern.segments)
+        rooted = bool(getattr(pattern, "anchor", "")) or bool(
+            getattr(pattern, "source", None)
         )
-    if not segs:
-        return False
-    if not compile_pattern(pat, case_sensitive).match(segs[0]):
-        return False
-    return _full_match(segs[1:], pats[1:], case_sensitive)
+    if rooted:
+        raise NonRelativePatternError("Non-relative patterns are unsupported")
+    parts = [part for part in segments if part not in ("", ".")]
+    if not parts:
+        raise ValueError(f"Unacceptable pattern: {str(pattern)!r}")
+    return parts, bool(segments) and segments[-1] == ""
 
 
 def glob(
@@ -62,115 +127,176 @@ def glob(
 ) -> _ty.Iterable[_Globable]:
     """Return an iterator which yields the paths matching a pathname pattern.
 
-    The pattern may contain simple shell-style wildcards a la
-    fnmatch. However, unlike fnmatch, filenames starting with a
-    dot are special cases that are not matched by '*' and '?'
-    patterns.
+    `path` is the pattern itself, as a path (e.g. `UriPath("file:/x/**/*.py")`).
+    The pattern may contain simple shell-style wildcards a la fnmatch. Like
+    the stdlib `glob` module, and unlike `Path.glob()`, hidden entries (names
+    starting with a dot) are not matched by wildcards and not descended into
+    by "**" unless `include_hidden` is true.
 
     If recursive is true, the pattern '**' will match any files and
     zero or more directories and subdirectories.
     """
-    if case_sensitive is None:
-        case_sensitive = path._is_case_sensitive
-
-    include_hidden = include_hidden or path.is_hidden()
-    pattern = compile_pattern(path.name, case_sensitive) if path.name else ANY_PATTERN
-
-    name_is_pattern = WILDCARD_PATTERN.search(path.name) is not None
-    wildcard_in_path = name_is_pattern or path.has_glob_pattern()
-    parent = next(iter(path.parents), None)
-
-    root: _Globable = (
-        (root_dir or parent) if not root_dir or not parent else (root_dir / parent)
+    segments = list(path.segments)
+    if len(segments) > 1 and segments[-1] == "":
+        segments.pop()
+        dironly = True
+    first_wildcard = next(
+        (i for i, seg in enumerate(segments) if WILDCARD_PATTERN.search(seg)),
+        max(len(segments) - 1, 0),
+    )
+    base = path.with_segments(*segments[:first_wildcard])
+    if root_dir is not None:
+        base = root_dir / base
+    parts = [part for part in segments[first_wildcard:] if part not in ("", ".")]
+    if not parts:
+        if base.is_dir() if dironly else base.exists():
+            yield base
+        return
+    yield from select(
+        base,
+        parts,
+        dironly=dironly,
+        recursive=recursive,
+        include_hidden=include_hidden,
+        case_sensitive=case_sensitive,
     )
 
-    if recursive and path.name == RECURSIVE:
-        globber = _glob_recursive
-    else:
-        globber = _glob_with_pattern
 
-    if not parent or not wildcard_in_path:
-        yield from globber(
-            root or path,
-            pattern,
-            dironly,
-            include_hidden=include_hidden,
-        )
+def select(
+    base: _Globable,
+    parts: _ty.Sequence[str],
+    *,
+    dironly: bool = False,
+    recursive: bool = True,
+    include_hidden: bool = True,
+    case_sensitive: bool | None = None,
+) -> _ty.Iterator[_Globable]:
+    """Yield the paths under `base` matching the pattern components `parts`
+    (see `parse_pattern()`); the engine behind `Path.glob()`.
+
+    Directory listings go through `_scandir()`; an `OSError` from listing a
+    missing or non-directory path selects nothing. "**" (when `recursive`)
+    decides recursion from the listing's non-following stat, so it never
+    descends into a directory symlink and always terminates. A trailing "**"
+    also selects files on Python 3.13+, directories only before.
+    """
+    default_case = getattr(base, "_is_case_sensitive", True)
+    if case_sensitive is None:
+        case_sensitive = default_case
+    if recursive:
+        parts = _collapse_recursive(parts)
+    steps: _ty.List[_ty.Tuple[str, _ty.Any]] = []
+    for part in parts:
+        if recursive and part == RECURSIVE:
+            steps.append((part, None))
+        elif WILDCARD_PATTERN.search(part) or case_sensitive != default_case:
+            steps.append((part, compile_pattern(part, case_sensitive)))
+        else:
+            steps.append((part, False))
+    opts = _Options(dironly, include_hidden)
+    selected = _select(base, steps, 0, opts, None)
+    if sum(1 for _, kind in steps if kind is None) < 2:
+        yield from selected
+        return
+    # Two separate "**" can reach one path along several splits.
+    seen = set()
+    for path in selected:
+        if path not in seen:
+            seen.add(path)
+            yield path
+
+
+class _Options(_ty.NamedTuple):
+    dironly: bool
+    include_hidden: bool
+
+
+def _select(
+    path: _Globable,
+    steps: _ty.Sequence[_ty.Tuple[str, _ty.Any]],
+    index: int,
+    opts: _Options,
+    is_dir: bool | None,
+) -> _ty.Iterator[_Globable]:
+    part, kind = steps[index]
+    last = index == len(steps) - 1
+
+    if kind is None:  # "**"
+        if is_dir is None and not path.is_dir():
+            return
+        if last:
+            with_files = _DOUBLESTAR_SELECTS_FILES and not opts.dironly
+            yield from _recurse(path, opts.include_hidden, with_files)
+            return
+        for directory in _recurse(path, opts.include_hidden, False):
+            yield from _select(directory, steps, index + 1, opts, True)
         return
 
-    # Recurse to enumerate matching directories only when the *parent*
-    # portion itself contains a wildcard (e.g. "sub*/*.py" needs every
-    # "sub*"-matching dir found first). Using `name_is_pattern` (whether the
-    # *leaf* is a pattern) here instead -- which is almost always true, since
-    # that's the common case of a literal directory + wildcarded filename --
-    # was wrong: it re-globbed `parent`'s own parent to "rediscover" parent
-    # by name, which only degenerates back to plain `[parent]` when `parent`
-    # has a non-empty literal name to match against. It silently returned
-    # the wrong directory set when `parent.name` is "" (MemPath's virtual
-    # root, and -- untested here, LocalPath at an OS filesystem root).
-    if parent and parent.has_glob_pattern():
-        dirs = glob(
-            parent,
-            root_dir=root_dir,
-            recursive=recursive,
-            dironly=True,
-            include_hidden=include_hidden,
-            case_sensitive=case_sensitive,
-        )
-    else:
-        dirs = [parent]
+    if kind is False:  # literal component: no listing needed
+        child = _child(path, part, None)
+        if not last:
+            yield from _select(child, steps, index + 1, opts, None)
+        elif child.is_dir() if opts.dironly else child.exists():
+            yield child
+        return
 
-    for parent in dirs:
-        yield from globber(parent, pattern, dironly, include_hidden)
+    need_dir = opts.dironly or not last
+    skip_hidden = not opts.include_hidden and not part.startswith(".")
+    for child, stat in _scan(path):
+        if skip_hidden and child.is_hidden():
+            continue
+        if not kind.match(child.name):
+            continue
+        if need_dir and not _entry_is_dir(child, stat, follow_symlinks=True):
+            continue
+        if last:
+            yield child
+        else:
+            yield from _select(child, steps, index + 1, opts, True)
 
 
-def _glob_with_pattern(
-    parent: _Globable, pattern: _re.Pattern, dironly: bool, include_hidden=False
-) -> _ty.Iterable[_Globable]:
-    if not include_hidden:
-
-        def _filter(p: _Globable):
-            return not p.is_hidden()
-
-    else:
-
-        def _filter(p: _Globable):
-            return True
-
-    for path in _iterdir(parent, dironly):
-        if _filter(path) and pattern.match(path.name):
-            yield path
-
-
-# This helper function recursively yields relative pathnames inside a literal
-# directory.
+def _recurse(
+    top: _Globable, include_hidden: bool, with_files: bool
+) -> _ty.Iterator[_Globable]:
+    """Yield `top` and every directory below it (plus every other entry when
+    `with_files`), never descending through a directory symlink."""
+    yield top
+    stack = [top]
+    while stack:
+        directory = stack.pop()
+        for child, stat in _scan(directory):
+            if not include_hidden and child.is_hidden():
+                continue
+            is_dir = _entry_is_dir(child, stat, follow_symlinks=False)
+            if is_dir or with_files:
+                yield child
+            if is_dir:
+                stack.append(child)
 
 
-def _glob_recursive(
-    parent: _Globable, pattern: _re.Pattern, dironly: bool, include_hidden=False
-):
-    if parent and parent.is_dir():
-        yield parent
-    yield from _rlistdir(parent, dironly, include_hidden=include_hidden)
+def _scan(directory: _Globable):
+    """(child, non-following stat or None) per entry; nothing if listing
+    fails. Materialized so a lazily-raising listing is still caught here."""
+    scandir = getattr(directory, "_scandir", None)
+    try:
+        if scandir is None:
+            return [(child, None) for child in directory.iterdir()]
+        return [(_child(directory, name, stat), stat) for name, stat in scandir()]
+    except OSError:
+        return ()
 
 
-# If dironly is false, yields all file names inside a directory.
-# If dironly is true, yields only directory names.
-def _iterdir(path: _Globable, dironly: bool):
-    for entry in path.iterdir():
-        try:
-            if not dironly or entry.is_dir():
-                yield entry
-        except OSError:
-            pass
+def _child(directory: _Globable, name: str, stat) -> _Globable:
+    if getattr(directory, "_pop_stat_hint", None) is not None:
+        # UriPath: `/` would re-parse the name as URI syntax ("a?b" -> query),
+        # and seeding the listing's stat saves a round trip per entry.
+        return directory._make_child_relpath(name, stat_hint=stat)
+    return directory / name
 
 
-# Recursively yields relative pathnames inside a literal directory.
-def _rlistdir(
-    dirname: _Globable, dironly: bool, include_hidden=False
-) -> _ty.Iterable[_Globable]:
-    for path in _iterdir(dirname, dironly):
-        if include_hidden or not path.is_hidden():
-            yield path
-            for y in _rlistdir(path, dironly, include_hidden):
-                yield y
+def _entry_is_dir(path: _Globable, stat, *, follow_symlinks: bool) -> bool:
+    if stat is not None and not (follow_symlinks and stat.is_symlink()):
+        return stat.is_dir()
+    if follow_symlinks:
+        return path.is_dir()
+    return path.is_dir() and not path.is_symlink()

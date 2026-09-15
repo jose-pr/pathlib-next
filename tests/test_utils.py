@@ -1,7 +1,9 @@
+import calendar
 import pathlib
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -88,11 +90,49 @@ def test_parsedate_unparseable_string_returns_epoch_zero_b23():
 
 
 def test_parsedate_valid_string():
-    # mktime() interprets the parsed struct_time as local time, so this
-    # isn't necessarily exactly epoch 0 -- just confirm it parses to a
-    # real (non-epoch-zero, non-error) timestamp near 1970.
-    result = utils.parsedate("Thu, 01 Jan 1970 00:00:00 GMT")
-    assert 0 <= result < 24 * 3600
+    # Exact UTC epoch seconds. Expected values come from calendar.timegm
+    # (UTC by definition), so the machine's timezone cannot matter: the old
+    # time.mktime() read the GMT date as local time, returning -25200 on a
+    # UTC+7 host (OverflowError on Windows) and a loose range hid it.
+    assert utils.parsedate("Thu, 01 Jan 1970 00:00:00 GMT") == 0
+
+
+_OCT_21_2015_0728_UTC = calendar.timegm((2015, 10, 21, 7, 28, 0))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Wed, 21 Oct 2015 07:28:00 GMT",  # RFC 1123 (Last-Modified)
+        "Wednesday, 21-Oct-15 07:28:00 GMT",  # RFC 850
+        "Wed Oct 21 07:28:00 2015",  # asctime: no zone, GMT per HTTP
+        "Wed, 21 Oct 2015 09:28:00 +0200",  # offset east of UTC
+        "Wed, 21 Oct 2015 02:28:00 -0500",  # offset west of UTC
+    ],
+)
+def test_parsedate_string_is_utc_epoch_seconds(text):
+    assert _OCT_21_2015_0728_UTC == 1445412480
+    assert utils.parsedate(text) == _OCT_21_2015_0728_UTC
+
+
+def test_parsedate_numbers_pass_through():
+    assert utils.parsedate(1445412480) == 1445412480
+    assert utils.parsedate(1445412480.5) == 1445412480.5
+    assert utils.parsedate(0) == 0
+
+
+def test_parsedate_struct_time_without_zone_is_utc():
+    zoneless = time.strptime("2015-10-21 07:28:00", "%Y-%m-%d %H:%M:%S")
+    assert utils.parsedate(zoneless) == _OCT_21_2015_0728_UTC
+    assert utils.parsedate((2015, 10, 21, 7, 28, 0, 0, 0, 0)) == 1445412480
+    # Near the epoch: time.mktime raised OverflowError here on Windows east
+    # of UTC.
+    assert utils.parsedate(time.gmtime(0)) == 0
+
+
+def test_parsedate_tuple_with_offset_applies_it():
+    # A parsedate_tz-style 10-tuple carries its offset in seconds.
+    assert utils.parsedate((2015, 10, 21, 9, 28, 0, 0, 1, -1, 7200)) == 1445412480
 
 
 def test_sizeof_fmt_large_units():

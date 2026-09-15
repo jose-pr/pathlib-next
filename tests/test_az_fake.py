@@ -162,3 +162,38 @@ def test_rm_recursive_delete_error_reroutes_to_ignore_error():
         ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
     )
     assert calls == [(OSError, "dir")]
+
+
+# --- a trailing "/" names the directory; interior empty segments stay -------
+
+
+@pytest.mark.parametrize(
+    "uri, container, key",
+    [
+        ("az://account/container/dir/", "container", "dir"),
+        ("az://account/container/dir", "container", "dir"),
+        ("az://account/container/", "container", ""),
+        ("az://account/container", "container", ""),
+        # Literal blob-name bytes: this used to collapse to "a/b", leaving a
+        # blob named "a//b" unreachable.
+        ("az://account/container/a//b", "container", "a//b"),
+        ("az://account/container/dir//", "container", "dir/"),
+    ],
+)
+def test_container_and_key_drop_one_trailing_slash(uri, container, key):
+    p = _az(uri)
+    assert p.container == container
+    assert p.key == key
+
+
+def test_trailing_slash_marker_dir_is_a_directory_and_rm_deletes_tree():
+    backend = _FakeBackend()
+    container = backend.client_obj.container
+    container.objects.update(
+        {"dir/": b"", "dir/a.txt": b"a", "dir/sub/b.txt": b"b", "other.txt": b"k"}
+    )
+    p = _az("az://account/container/dir/", backend)
+    assert p.is_dir()
+    assert not p.is_file()
+    p.rm(recursive=True)
+    assert container.objects == {"other.txt": b"k"}

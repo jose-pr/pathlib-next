@@ -497,7 +497,32 @@ class Uri(Pathname):
         segments = self.segments
         if not segments or len(segments) == 2 and segments[1] == "":
             return self
+        if len(segments) == 2 and segments[0] == "":
+            # "/a" -> "/", not "": the empty path is relative, so the parent
+            # of a top-level FileUri resolved to the current directory and
+            # `parents` never reached the root.
+            return self.with_path("/")
         return self.with_path("/".join(segments[:-1]))
+
+    def _has_authority(self) -> bool:
+        source = self.source
+        return bool(source.host or source.userinfo or source.port)
+
+    def _match_parts(self) -> tuple[bool, list[str]]:
+        # An authority with an empty path ("http://h") is that authority's
+        # root, the same as "http://h/" (RFC 3986). The host itself is never
+        # part of what match() sees.
+        anchored, names = super()._match_parts()
+        return anchored or (not self.path and self._has_authority()), names
+
+    def _prefix_segments(self) -> list[str]:
+        """Segments for `is_relative_to`/`relative_to` prefix comparison:
+        `[""]` for a root (including an authority with an empty path, which
+        `normpath` used to turn into "."), `[]` for the empty relative path."""
+        if not self.path:
+            return [""] if self._has_authority() else []
+        path = self.normalized_path
+        return [] if path == "." else _segments_of(path)
 
     @property
     def normalized_path(self):
@@ -529,8 +554,12 @@ class Uri(Pathname):
             return False
         # Segment-wise prefix comparison: a naive startswith() on the raw
         # strings would report "/foo/bar2" as relative to "/foo/bar".
-        _other = _segments_of(other.normalized_path)
-        _self = _segments_of(self.normalized_path)
+        _other = other._prefix_segments()
+        _self = self._prefix_segments()
+        if _self[:1] == [""] and _other[:1] != [""]:
+            # An absolute path is never relative to a relative one (the
+            # empty relative path included), as in pathlib.
+            return False
         return _self[: len(_other)] == _other
 
     def relative_to(self, other: UriLike, *, walk_up=False):
@@ -554,8 +583,8 @@ class Uri(Pathname):
         # ("/") a spurious 2-tuple ("", "") instead of ("",), which used to
         # make relative_to(<root>) drop the child's only real segment
         # (found via property testing, polish_perf/06).
-        self_segs = _segments_of(self.normalized_path)
-        path_segs = _segments_of(path.normalized_path)
+        self_segs = self._prefix_segments()
+        path_segs = path._prefix_segments()
         parts = [".."] * step + self_segs[len(path_segs) :]
         return self._from_parsed_parts(
             _NOSOURCE, "/".join(parts), self.query, self.fragment

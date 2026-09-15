@@ -1,9 +1,10 @@
+import calendar as _calendar
 import collections
 import functools as _functools
 import operator as _operator
 import time as _time
 import typing as _ty
-from email.utils import parsedate as _parsedate
+from email.utils import parsedate_tz as _parsedate_tz
 from pathlib import PureWindowsPath as _PureWindowsPath
 from threading import RLock
 
@@ -129,17 +130,40 @@ class LRU(_ty.Generic[K, V]):
         return self(*args)
 
 
-def parsedate(date: _ty.Union[str, _time.struct_time, tuple, float]):
+def parsedate(date: _ty.Union[str, _time.struct_time, tuple, int, float, None]):
+    """Convert a date to UTC epoch seconds, independent of the host timezone.
+
+    - `str` (RFC 1123, RFC 850 or asctime, as in `Last-Modified`): parsed
+      with `email.utils.parsedate_tz`, and its zone offset applied. A string
+      with no zone is read as UTC -- HTTP dates are GMT by definition.
+    - `int`/`float`: already epoch seconds, returned unchanged.
+    - `struct_time`/tuple: read as UTC (`calendar.timegm`), minus its
+      `tm_gmtoff` (or a `parsedate_tz`-style 10th element) when one is set.
+    - `None` or an unparseable string: `0`.
+
+    Local time (`time.mktime`) is never involved: it shifted every HTTP/DAV
+    `st_mtime` by the host's UTC offset and overflowed on Windows for dates
+    near the epoch.
+    """
     # Missing/unparseable dates yield epoch 0, not "now" -- a caller with no
     # Last-Modified header shouldn't have that read as "just modified" and
     # poison checksum/sync freshness comparisons.
     if date is None:
         return 0
+    if isinstance(date, (int, float)):
+        return date
     if isinstance(date, str):
-        date = _parsedate(date)
-        if date is None:
+        try:
+            parsed = _parsedate_tz(date)
+            if parsed is None:
+                return 0
+            return _calendar.timegm(parsed[:6]) - (parsed[9] or 0)
+        except (TypeError, ValueError, IndexError, OverflowError):
             return 0
-    return _time.mktime(date)
+    offset = getattr(date, "tm_gmtoff", None)
+    if offset is None and len(date) > 9:
+        offset = date[9]
+    return _calendar.timegm(tuple(date)[:6]) - (offset or 0)
 
 
 def sizeof_fmt(num: _ty.Union[int, float]) -> str:
