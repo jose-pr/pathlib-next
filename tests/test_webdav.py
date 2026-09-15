@@ -21,6 +21,13 @@ class _FakeResponse:
         self.raw = io.BytesIO(content)
         self.is_redirect = False
 
+    def iter_content(self, chunk_size=1):
+        while True:
+            chunk = self.raw.read(chunk_size)
+            if not chunk:
+                return
+            yield chunk
+
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError(str(self.status_code))
@@ -129,6 +136,20 @@ def test_stat_file():
     st = _dav("dav://host/docs/readme.txt", session).stat()
     assert st.st_size == 11
     assert not st.is_dir()
+    # getlastmodified is GMT: independent of the host's timezone.
+    assert st.st_mtime == 1767268800  # calendar.timegm((2026, 1, 1, 12, 0, 0))
+
+
+def test_session_headers_merge_with_request_headers():
+    session = _FakeSession()
+    session.responses[("PROPFIND", "http://host/docs/readme.txt", "0")] = _FakeResponse(
+        207, _MULTISTATUS_FILE
+    )
+    backend = HttpBackend(session, {"headers": {"X-Token": "t", "Depth": "infinity"}})
+    DavPath("dav://host/docs/readme.txt", backend=backend).stat()
+    headers = session.calls[-1][2]["headers"]
+    assert headers["X-Token"] == "t"
+    assert headers["Depth"] == "0"
 
 
 def test_stat_dir():

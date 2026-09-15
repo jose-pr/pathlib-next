@@ -293,3 +293,142 @@ def test_github_rate_limit_raises_clear_oserror(status_server):
         p.stat()
     assert excinfo.value.errno == errno.EAGAIN
     assert "rate limit" in str(excinfo.value)
+
+
+# --- gittools-api-base-drops-port-and-brackets ---
+
+
+@pytest.mark.parametrize(
+    "uri, expected",
+    [
+        ("gitlab://gitlab.internal:8929/o/r", "https://gitlab.internal:8929/api/v4"),
+        ("gitlab://[fd00::5]/o/r", "https://[fd00::5]/api/v4"),
+        ("gitlab://[fd00::5]:8443/o/r", "https://[fd00::5]:8443/api/v4"),
+        ("github://ghe.internal:8443/o/r", "https://ghe.internal:8443/api/v3"),
+        ("github://[fd00::5]/o/r", "https://[fd00::5]/api/v3"),
+        ("github://github.com/o/r", "https://api.github.com"),
+    ],
+)
+def test_api_base_keeps_port_and_brackets(uri, expected):
+    assert UriPath(uri)._api_base == expected
+
+
+def test_repo_backend_headers_merge_with_request_headers():
+    class _Session:
+        def request(self, method, url, **kwargs):
+            self.kwargs = kwargs
+
+    session = _Session()
+    backend = RepoBackend(token="T", session=session, headers={"X-A": "1"})
+    backend.request("GET", "http://h/x", headers={"Accept": "raw"})
+    assert session.kwargs["headers"] == {
+        "X-A": "1",
+        "Accept": "raw",
+        "Authorization": "Bearer T",
+    }
+
+
+# --- gittools-gitlab-tree-pagination-truncates ---
+
+
+def test_gitlab_listing_over_one_page_is_complete(gitlab_api_server, fixture_tree):
+    many = fixture_tree / "many"
+    many.mkdir()
+    for i in range(130):
+        (many / f"f{i:03}.txt").write_text("x")
+    for i in range(150):
+        (fixture_tree / "pkgs" / f"pkg{i:03}").mkdir(parents=True)
+        (fixture_tree / "pkgs" / f"pkg{i:03}" / "m.py").write_text("m")
+
+    assert len(list(_gitlab(gitlab_api_server, "many").iterdir())) == 130
+    assert len(list(_gitlab(gitlab_api_server, "many").glob("*.txt"))) == 130
+    names = {p.name for p in _gitlab(gitlab_api_server, "pkgs").iterdir()}
+    assert names == {f"pkg{i:03}" for i in range(150)}
+    assert _gitlab(gitlab_api_server, "pkgs/pkg149").is_dir()
+    assert _gitlab(gitlab_api_server, "pkgs/pkg100").stat().is_dir()
+
+
+# --- gittools-gitlab-stat-answers-from-uri-shape ---
+
+
+def test_gitlab_root_stat_asks_the_server(gitlab_api_server):
+    base_url, _owner, _repo = gitlab_api_server
+    backend = RepoBackend(api_base=f"{base_url}/api/v4")
+    assert _gitlab(gitlab_api_server).is_dir()
+    for uri in (
+        "gitlab://gitlab.com/nobody/ghost",
+        "gitlab://gitlab.com/acme",
+        "gitlab://gitlab.com/acme/widgets?ref=no-such-ref",
+    ):
+        p = GitLabPath(uri, backend=backend)
+        assert not p.exists(), uri
+        assert not p.is_dir(), uri
+
+
+def test_gitlab_trailing_slash_directory_stat(gitlab_api_server):
+    assert _gitlab(gitlab_api_server, "sub/").is_dir()
+    assert _gitlab(gitlab_api_server, "sub/nested/").stat().is_dir()
+    with pytest.raises(FileNotFoundError):
+        _gitlab(gitlab_api_server, "missing/").stat()
+
+
+# --- gittools-gitlab-subgroups-unaddressable ---
+
+
+def test_gitlab_subgroup_project_via_separator(gitlab_api_server):
+    base_url, _owner, _repo = gitlab_api_server
+    backend = RepoBackend(api_base=f"{base_url}/api/v4")
+    p = GitLabPath("gitlab://gitlab.com/acme/team/widgets/-/sub/c.py", backend=backend)
+    assert (p.owner, p.repo, p.repo_path) == ("acme/team", "widgets", "sub/c.py")
+    assert p.read_bytes() == b"c"
+    assert p.stat().st_size == 1
+
+    root = GitLabPath("gitlab://gitlab.com/acme/team/widgets/-", backend=backend)
+    assert root.is_dir()
+    sub = next(c for c in root.iterdir() if c.name == "sub")
+    assert sub.as_uri() == "gitlab://gitlab.com/acme/team/widgets/-/sub"
+    assert sorted(c.name for c in sub.iterdir()) == ["c.py", "nested"]
+
+    # Without the separator the first two segments stay owner/repo.
+    two = GitLabPath("gitlab://gitlab.com/acme/widgets/sub/c.py", backend=backend)
+    assert (two.owner, two.repo, two.repo_path) == ("acme", "widgets", "sub/c.py")
+    sep = GitLabPath("gitlab://gitlab.com/acme/widgets/-/sub/c.py", backend=backend)
+    assert (sep.owner, sep.repo, sep.repo_path) == ("acme", "widgets", "sub/c.py")
+
+
+def test_gitlab_directory_named_dash_stays_addressable(gitlab_api_server, fixture_tree):
+    (fixture_tree / "-").mkdir()
+    (fixture_tree / "-" / "inside.txt").write_text("dash")
+    root = _gitlab(gitlab_api_server)
+    dash = next(c for c in root.iterdir() if c.name == "-")
+    assert dash.repo_path == "-"
+    assert dash.is_dir()
+    assert [c.name for c in dash.iterdir()] == ["inside.txt"]
+    assert next(dash.iterdir()).read_bytes() == b"dash"
+
+
+# --- gittools-github-contents-1000-entry-cap ---
+
+
+def test_github_listing_past_contents_cap_is_complete(github_api_server, fixture_tree):
+    for i in range(1000):
+        (fixture_tree / f"r{i:04}.txt").write_text("")
+    wide = fixture_tree / "sub" / "nested" / "wide"
+    wide.mkdir()
+    for i in range(1001):
+        (wide / f"w{i:04}.txt").write_text("w")
+
+    # The root itself is capped too, so the `sub` tree SHA comes from the
+    # Git Trees API listing of the root (default branch, then a named ref).
+    root_names = {p.name for p in _github(github_api_server).iterdir()}
+    assert len(root_names) == 1005
+    assert {"sub", "a.txt"} <= root_names
+    other = {p.name for p in _github(github_api_server, "?ref=other-branch").iterdir()}
+    assert other == root_names
+
+    listing = dict(_github(github_api_server, "sub/nested/wide")._scandir())
+    assert len(listing) == 1001
+    assert listing["w1000.txt"].st_size == 1
+    assert not listing["w1000.txt"].is_dir()
+    nested = dict(_github(github_api_server, "sub/nested")._scandir())
+    assert nested["wide"].is_dir()

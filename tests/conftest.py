@@ -579,22 +579,43 @@ def github_api_server(fixture_tree):
     (JSON object, base64 `content`), and raw file bodies (`Accept:
     .../vnd.github.raw+json`). Two refs are served (`main` the default,
     `other-branch` with a divergent `a.txt`) so ref plumbing is verified
-    end-to-end, not just default-branch reads. Yields
-    `(base_url, owner, repo)`."""
+    end-to-end, not just default-branch reads. Like the real API, a
+    contents listing stops at 1,000 entries with no truncation signal; the
+    Git Trees API (`GET /repos/{owner}/{repo}/git/trees/{sha}`, `sha` from a
+    listing entry or a ref name for the root) and `GET /repos/{owner}/{repo}`
+    (`default_branch`) are served for the uncapped route. The tree is read
+    from `fixture_tree` on every request, so a test may add files first.
+    Yields `(base_url, owner, repo)`."""
     import base64
+    import hashlib
     import json
     import urllib.parse
 
-    main_tree = _build_git_tree(fixture_tree)
-    other_tree = dict(main_tree)
-    other_tree["a.txt"] = b"a-on-other-branch"
-    refs = {"main": main_tree, "other-branch": other_tree}
     owner, repo = "acme", "widgets"
+
+    def _refs():
+        main_tree = _build_git_tree(fixture_tree)
+        other_tree = dict(main_tree)
+        other_tree["a.txt"] = b"a-on-other-branch"
+        return {"main": main_tree, "other-branch": other_tree}
+
+    def _dir_sha(ref, path):
+        return hashlib.sha1(f"{ref}:{path}".encode()).hexdigest()
 
     class _GitHubApiHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             split = urllib.parse.urlsplit(self.path)
             qs = urllib.parse.parse_qs(split.query)
+            refs = _refs()
+
+            if split.path == f"/repos/{owner}/{repo}":
+                self._send_json(200, {"default_branch": "main"})
+                return
+            trees = f"/repos/{owner}/{repo}/git/trees/"
+            if split.path.startswith(trees):
+                self._send_tree(refs, urllib.parse.unquote(split.path[len(trees) :]))
+                return
+
             ref = qs.get("ref", ["main"])[0]
             tree = refs.get(ref)
             if tree is None:
@@ -621,11 +642,44 @@ def github_api_server(fixture_tree):
                     childpath = f"{subpath}/{name}" if subpath else name
                     size = len(tree.get(childpath, b"")) if kind == "file" else 0
                     entries.append(
-                        {"name": name, "path": childpath, "type": kind, "size": size}
+                        {
+                            "name": name,
+                            "path": childpath,
+                            "type": kind,
+                            "size": size,
+                            "sha": _dir_sha(ref, childpath) if kind == "dir" else None,
+                        }
                     )
-                self._send_json(200, entries)
+                self._send_json(200, entries[:1000])
                 return
 
+            self._send_json(404, {"message": "Not Found"})
+
+        def _send_tree(self, refs, sha):
+            for ref, tree in refs.items():
+                dirs = {""}
+                for key in tree:
+                    parts = key.split("/")[:-1]
+                    dirs.update("/".join(parts[: i + 1]) for i in range(len(parts)))
+                for path in dirs:
+                    if (path == "" and sha == ref) or (
+                        path and sha == _dir_sha(ref, path)
+                    ):
+                        entries = []
+                        for name, kind in sorted(
+                            _git_tree_children(tree, path).items()
+                        ):
+                            childpath = f"{path}/{name}" if path else name
+                            entry = {"path": name, "mode": "100644"}
+                            if kind == "dir":
+                                entry.update(type="tree", sha=_dir_sha(ref, childpath))
+                            else:
+                                entry.update(type="blob", size=len(tree[childpath]))
+                            entries.append(entry)
+                        self._send_json(
+                            200, {"sha": sha, "tree": entries, "truncated": False}
+                        )
+                        return
             self._send_json(404, {"message": "Not Found"})
 
         def _send_file(self, subpath, content):
@@ -676,36 +730,52 @@ def gitlab_api_server(fixture_tree):
     """Faithful (not mocked) fake of the subset of the GitLab REST API v4
     that `GitLabPath` actually calls: `.../repository/tree` (listing, no
     size -- matches the real endpoint's shape), `.../repository/files/:path`
-    (file metadata) and `.../repository/files/:path/raw` (file body). Yields
-    `(base_url, owner, repo)`."""
+    (file metadata) and `.../repository/files/:path/raw` (file body). Like
+    the real API, the tree listing is paginated (`per_page` capped at 100,
+    `page`, `X-Next-Page`), lists trees before blobs, 404s an unknown
+    project, ref or tree path; only the `main` ref exists. The same tree is
+    also served as the subgroup project `acme/team/widgets`. The tree is
+    read from `fixture_tree` on every request, so a test may add files
+    first. Yields `(base_url, owner, repo)`."""
     import json
     import urllib.parse
 
-    tree = _build_git_tree(fixture_tree)
     owner, repo = "acme", "widgets"
-    project_id = urllib.parse.quote(f"{owner}/{repo}", safe="")
+    project_ids = [
+        urllib.parse.quote(f"{owner}/{repo}", safe=""),
+        urllib.parse.quote(f"{owner}/team/{repo}", safe=""),
+    ]
 
     class _GitLabApiHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             split = urllib.parse.urlsplit(self.path)
             qs = urllib.parse.parse_qs(split.query)
+            tree = _build_git_tree(fixture_tree)
 
             # `GET /projects/:id` (default_branch lookup) -- no "/repository/"
             # suffix, must be checked before the repository-scoped prefix below.
-            if split.path == f"/api/v4/projects/{project_id}":
+            if split.path in [f"/api/v4/projects/{pid}" for pid in project_ids]:
                 self._send_json(200, {"default_branch": "main"})
                 return
 
-            prefix = f"/api/v4/projects/{project_id}/repository/"
-
-            if not split.path.startswith(prefix):
-                self._send_json(404, {"message": "404 Not Found"})
+            for project_id in project_ids:
+                prefix = f"/api/v4/projects/{project_id}/repository/"
+                if split.path.startswith(prefix):
+                    break
+            else:
+                self._send_json(404, {"message": "404 Project Not Found"})
                 return
             rest = split.path[len(prefix) :]
+            if qs.get("ref", ["main"])[0] != "main":
+                self._send_json(404, {"message": "404 Tree Not Found"})
+                return
 
             if rest == "tree":
                 path = qs.get("path", [""])[0]
                 children = _git_tree_children(tree, path)
+                if path and not children:
+                    self._send_json(404, {"message": "404 Tree Not Found"})
+                    return
                 entries = [
                     {
                         "id": f"fake-{name}",
@@ -714,9 +784,17 @@ def gitlab_api_server(fixture_tree):
                         "path": f"{path}/{name}" if path else name,
                         "mode": "040000" if kind == "dir" else "100644",
                     }
-                    for name, kind in sorted(children.items())
+                    for name, kind in sorted(
+                        children.items(), key=lambda item: (item[1] != "dir", item[0])
+                    )
                 ]
-                self._send_json(200, entries)
+                per_page = min(int(qs.get("per_page", ["20"])[0]), 100)
+                page = int(qs.get("page", ["1"])[0])
+                chunk = entries[(page - 1) * per_page : page * per_page]
+                has_next = page * per_page < len(entries)
+                self._send_json(
+                    200, chunk, {"X-Next-Page": str(page + 1) if has_next else ""}
+                )
                 return
 
             if rest.startswith("files/"):
@@ -755,10 +833,12 @@ def gitlab_api_server(fixture_tree):
 
             self._send_json(404, {"message": "404 Not Found"})
 
-        def _send_json(self, status, payload):
+        def _send_json(self, status, payload, headers=None):
             body = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

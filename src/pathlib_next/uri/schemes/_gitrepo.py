@@ -8,6 +8,7 @@ import requests as _req
 
 from ... import utils as _utils
 from .. import Source, UriPath
+from ..source import _compose_host
 
 DEFAULT_TIMEOUT = (10, 60)
 """`(connect, read)` timeout, in seconds, `RepoBackend` sends with every
@@ -89,10 +90,13 @@ class RepoBackend(BaseRepoBackend):
         self.cache = {}
 
     def request(self, method, url, headers=None, **kwargs):
-        headers = dict(headers or {})
+        # `RepoBackend(headers=...)` merged key by key under the request's
+        # own headers, instead of colliding with the `headers=` keyword.
+        headers = {**(self.requests_args.get("headers") or {}), **(headers or {})}
         if self.token:
             headers.setdefault("Authorization", f"Bearer {self.token}")
         args = {**self.requests_args, **kwargs}
+        args.pop("headers", None)
         args.setdefault("timeout", DEFAULT_TIMEOUT)
         return self.session.request(method, url, headers=headers, **args)
 
@@ -154,7 +158,16 @@ class _RepoApiPath(UriPath):
 
     @property
     def repo_path(self) -> str:
-        return "/".join(self.segments[3:])
+        # A trailing "/" (`.../docs/`) names the same directory.
+        return "/".join(self.segments[3:]).rstrip("/")
+
+    def _api_authority(self) -> str:
+        """`host[:port]` of this URI for a self-hosted API root, with an
+        IPv6 literal bracketed."""
+        authority = _compose_host(self.source.host)
+        if self.source.port:
+            authority += f":{self.source.port}"
+        return authority
 
     @property
     def ref(self) -> "str | None":

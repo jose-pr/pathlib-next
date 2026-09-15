@@ -9,6 +9,7 @@ import errno
 import functools
 import http.server
 import threading
+import time
 
 import pytest
 
@@ -16,6 +17,7 @@ pytest.importorskip("requests")
 
 from pathlib_next import LocalPath
 from pathlib_next.uri.schemes.dav import DavPath
+from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes.http import HttpPath
 
 
@@ -184,3 +186,320 @@ def test_dav_copy_missing_source_writes_no_error_page(dav_server, tmp_path):
             LocalPath(out), preserve_metadata=False
         )
     assert not out.exists() or b"<!DOCTYPE" not in out.read_bytes()
+
+
+# --- wave 5: a scriptable loopback server --------------------------------
+
+
+_LOCKED_MULTISTATUS = b"""<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/locked/held%20file.txt</D:href>
+    <D:status>HTTP/1.1 423 Locked</D:status>
+  </D:response>
+</D:multistatus>"""
+
+_PLAIN_BODY = b"line one: the uncompressed body of a text file\n" * 20
+
+
+class _WireHandler(http.server.BaseHTTPRequestHandler):
+    """Routes for the wire-level regressions. `store` holds file bodies
+    (PUT writes into it); `seen` records `(method, path, headers)`."""
+
+    store = None
+    seen = None
+
+    def _send(self, status, body=b"", headers=None):
+        self.send_response(status)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def _get(self):
+        import gzip
+
+        path = self.path
+        accept = self.headers.get("Accept-Encoding", "")
+        if path == "/redirect.txt":
+            return self._send(302, headers={"Location": "/real.txt"})
+        if path == "/dir":
+            return self._send(301, headers={"Location": "/dir/"})
+        if path == "/dir/":
+            return self._send(200, b"<html><body></body></html>")
+        if path == "/lm.txt":
+            return self._send(
+                200, b"x", {"Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"}
+            )
+        if path == "/truncated":
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            self.wfile.write(b"0123456789")
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        if path == "/stall":
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b"01234")
+            self.wfile.flush()
+            time.sleep(3)
+            return
+        body = self.store.get(path)
+        if body is None:
+            return self._send(404)
+        if path.startswith("/always-gz") or "gzip" in accept:
+            return self._send(200, gzip.compress(body), {"Content-Encoding": "gzip"})
+        return self._send(200, body)
+
+    def do_GET(self):
+        self.seen.append((self.command, self.path, dict(self.headers)))
+        self._get()
+
+    do_HEAD = do_GET
+
+    def do_PUT(self):
+        self.seen.append((self.command, self.path, dict(self.headers)))
+        data = self._body()
+        if self.path == "/fail.txt":
+            return self._send(503)
+        self.store[self.path] = data
+        self._send(201)
+
+    def do_DELETE(self):
+        self.seen.append((self.command, self.path, dict(self.headers)))
+        if self.path.startswith("/locked"):
+            return self._send(
+                207, _LOCKED_MULTISTATUS, {"Content-Type": "application/xml"}
+            )
+        self._send(204)
+
+    do_MOVE = do_DELETE
+
+    def do_PROPFIND(self):
+        self.seen.append((self.command, self.path, dict(self.headers)))
+        self._body()
+        self._send(200, b"<html><body>hi<br></body></html>")
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture
+def wire_server():
+    store = {
+        "/gz.txt": _PLAIN_BODY,
+        "/always-gz.txt": _PLAIN_BODY,
+        "/log.txt": _PLAIN_BODY,
+        "/real.txt": _PLAIN_BODY,
+    }
+    seen = []
+    handler = type("_Handler", (_WireHandler,), {"store": store, "seen": seen})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"127.0.0.1:{server.server_port}", store, seen
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+# --- httpdav-gzip-content-encoding-not-decoded ---
+
+
+@pytest.mark.parametrize("scheme", ["http", "dav"])
+@pytest.mark.parametrize("name", ["gz.txt", "always-gz.txt"])
+def test_read_of_compressing_server_returns_uncompressed_body(
+    wire_server, scheme, name
+):
+    host, _store, _seen = wire_server
+    p = UriPath(f"{scheme}://{host}/{name}")
+    assert p.read_bytes() == _PLAIN_BODY
+    # Small reads through the buffered and the unbuffered stream.
+    with p.open("rb") as f:
+        assert b"".join(iter(lambda: f.read(7), b"")) == _PLAIN_BODY
+    with p.open("rb", buffering=0) as f:
+        assert b"".join(iter(lambda: f.read(5), b"")) == _PLAIN_BODY
+
+
+def test_stat_size_of_compressing_server_is_uncompressed(wire_server):
+    host, _store, _seen = wire_server
+    assert HttpPath(f"http://{host}/gz.txt").stat().st_size == len(_PLAIN_BODY)
+
+
+def test_rewrite_append_keeps_plaintext_on_compressing_server(wire_server):
+    host, store, _seen = wire_server
+    with HttpPath(f"http://{host}/log.txt").open("ab") as f:
+        f.write(b"line three\n")
+    assert store["/log.txt"] == _PLAIN_BODY + b"line three\n"
+
+
+# --- httpdav-read-errors-escape-oserror ---
+
+
+def test_truncated_body_raises_oserror(wire_server):
+    host, _store, _seen = wire_server
+    with pytest.raises(OSError):
+        HttpPath(f"http://{host}/truncated").read_bytes()
+
+
+def test_body_stalled_after_headers_raises_timeouterror(wire_server):
+    import requests
+
+    host, _store, _seen = wire_server
+    p = HttpPath(f"http://{host}/stall").with_session(requests.Session(), timeout=1)
+    with pytest.raises(TimeoutError):
+        p.read_bytes()
+
+
+# --- httpdav-stat-redirect-means-directory ---
+
+
+def test_stat_redirect_to_file_is_a_file(wire_server, tmp_path):
+    host, _store, _seen = wire_server
+    p = UriPath(f"http://{host}/redirect.txt")
+    st = p.stat()
+    assert not st.is_dir()
+    assert st.st_size == len(_PLAIN_BODY)
+    assert p.is_file()
+    out = tmp_path / "out.txt"
+    UriPath(f"http://{host}/redirect.txt").copy(LocalPath(out), recursive=True)
+    assert out.is_file()
+    assert out.read_bytes() == _PLAIN_BODY
+
+
+def test_stat_redirect_to_slash_is_a_directory(wire_server):
+    host, _store, _seen = wire_server
+    assert UriPath(f"http://{host}/dir").stat().is_dir()
+
+
+def test_stat_trailing_slash_directory_answered_both_ways(dav_server):
+    # wsgidav answers HEAD /sub and HEAD /sub/ with 200.
+    assert HttpPath(f"{_http(dav_server)}/sub/").stat().is_dir()
+    assert HttpPath(f"{_http(dav_server)}/a.txt").stat().is_file()
+
+
+# --- httpdav-last-modified-parsed-as-local-time ---
+
+
+def test_http_last_modified_is_utc(wire_server):
+    import calendar
+
+    host, _store, _seen = wire_server
+    st = HttpPath(f"http://{host}/lm.txt").stat()
+    assert st.st_mtime == calendar.timegm((2024, 1, 1, 0, 0, 0))
+
+
+# --- httpdav-requests-args-collide-with-internal-kwargs ---
+
+
+def test_with_session_args_do_not_collide(wire_server, dav_server):
+    import requests
+
+    host, _store, seen = wire_server
+    p = HttpPath(f"http://{host}/redirect.txt").with_session(
+        requests.Session(),
+        allow_redirects=True,
+        stream=False,
+        headers={"X-Token": "t"},
+    )
+    assert p.stat().is_file()
+    assert p.read_bytes() == _PLAIN_BODY
+    assert seen and all(headers.get("X-Token") == "t" for _m, _p, headers in seen)
+
+    d = DavPath(f"{dav_server}/sub").with_session(
+        requests.Session(), headers={"X-Token": "t"}
+    )
+    assert d.is_dir()
+    assert sorted(c.name for c in d.iterdir()) == ["c.py", "nested"]
+
+
+# --- httpdav-dav-write-stream-retries-put-on-gc ---
+
+
+def test_dav_failed_put_is_not_resent_at_gc(wire_server):
+    import gc
+
+    host, _store, seen = wire_server
+    f = DavPath(f"dav://{host}/fail.txt").open("wb")
+    f.write(b"stale")
+    with pytest.raises(OSError):
+        f.close()
+    assert f.closed
+    del f
+    gc.collect()
+    assert [m for m, path, _h in seen if path == "/fail.txt"] == ["PUT"]
+
+
+# --- httpdav-dav-errors-untranslated ---
+
+
+def test_dav_write_into_missing_parent_raises_filenotfound(dav_server):
+    with pytest.raises(FileNotFoundError):
+        DavPath(f"{dav_server}/nodir/f.txt").write_bytes(b"x")
+
+
+def test_dav_non_xml_propfind_reads_as_missing(wire_server):
+    host, _store, _seen = wire_server
+    p = DavPath(f"dav://{host}/html")
+    assert p.exists() is False
+    assert p.is_dir() is False
+    with pytest.raises(OSError):
+        p.stat()
+
+
+# --- httpdav-dav-207-multistatus-treated-as-success ---
+
+
+def test_dav_207_delete_with_locked_member_raises(wire_server):
+    host, _store, _seen = wire_server
+    p = DavPath(f"dav://{host}/locked/")
+    with pytest.raises(PermissionError) as excinfo:
+        p.rm(recursive=True)
+    assert "held file.txt" in str(excinfo.value)
+    # The ignore_error policy still applies.
+    p.rm(recursive=True, ignore_error=True)
+    with pytest.raises(PermissionError):
+        DavPath(f"dav://{host}/locked/f.txt")._delete()
+
+
+def test_dav_207_move_with_locked_member_raises(wire_server):
+    host, _store, _seen = wire_server
+    with pytest.raises(PermissionError):
+        DavPath(f"dav://{host}/locked/").rename("/elsewhere/")
+
+
+# --- httpdav-dav-scandir-href-decoding ---
+
+
+def test_dav_directory_with_space_lists_children_not_itself(dav_server, fixture_tree):
+    (fixture_tree / "my dir").mkdir()
+    (fixture_tree / "Team Docs" / "sub").mkdir(parents=True)
+    (fixture_tree / "Team Docs" / "a.txt").write_text("a")
+    (fixture_tree / "x#y.txt").write_text("hash")
+    (fixture_tree / "café.txt").write_text("cafe")
+
+    empty = DavPath(f"{dav_server}/my dir")
+    assert list(empty.iterdir()) == []
+    empty.rmdir()
+    assert not (fixture_tree / "my dir").exists()
+
+    team = DavPath(f"{dav_server}/Team Docs")
+    assert sorted(c.name for c in team.iterdir()) == ["a.txt", "sub"]
+    tops = [(top.name, sorted(dirs)) for top, dirs, _files in team.walk()]
+    assert tops == [("Team Docs", ["sub"]), ("sub", [])]
+
+    root = {c.name: c for c in DavPath(f"{dav_server}/").iterdir()}
+    assert "x#y.txt" in root and "café.txt" in root
+    assert root["x#y.txt"].read_text() == "hash"
+    assert root["café.txt"].read_text() == "cafe"

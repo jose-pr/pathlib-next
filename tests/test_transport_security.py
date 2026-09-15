@@ -216,7 +216,7 @@ def test_http_error_message_keeps_status():
 def test_dav_error_and_move_destination_carry_no_password(recording_http_server):
     host, seen = recording_http_server
     p = DavPath(f"dav://alice:s3cr3t@{host}/501")
-    with pytest.raises(requests.HTTPError) as excinfo:
+    with pytest.raises(OSError) as excinfo:
         p.rename("b.txt")
     assert "s3cr3t" not in _formatted(excinfo.value)
     method, path, headers = seen[-1]

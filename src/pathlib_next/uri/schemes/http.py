@@ -11,9 +11,7 @@ import typing as _ty
 import urllib.parse as _urlparse
 
 import requests as _req
-
-if _ty.TYPE_CHECKING:
-    from urllib3.response import HTTPResponse
+import urllib3.exceptions as _urllib3_exc
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
@@ -26,6 +24,12 @@ timeout=...)` / `requests_args`, or per request); `timeout=None` there
 restores requests' unbounded wait."""
 
 _RE_URL_SCHEME = _re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+_IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
+"""Sent on content GETs and `stat()` probes: requests' session advertises
+gzip/deflate, and a compressing server's reply would otherwise come back
+compressed from `open()` (and a rewrite-mode append would store that blob),
+while `Content-Length` would count encoded bytes."""
 
 
 def _split_userinfo(url: str) -> "tuple[str, tuple[str, str] | None]":
@@ -279,6 +283,7 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
 
         modified = None
         size = None
+        size_exact = True
         description = None
 
         text = (
@@ -300,6 +305,7 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
                 sizestr = match.group(0)
                 if sizestr != "-":
                     size = _human2bytes(sizestr.replace(" ", "").replace(",", ""))
+                    size_exact = _is_exact_size(sizestr)
                 text = text[match.end() :].lstrip()
 
             if text:
@@ -308,7 +314,7 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
                     name += "/"
                     description = None
 
-        self.listing.append(_FileEntry(name, modified, size, description))
+        self.listing.append(_FileEntry(name, modified, size, description, size_exact))
         self.last_href = None
 
     def _process_table(self):
@@ -352,6 +358,7 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
                 file_name = None
                 file_mod = None
                 file_size = None
+                file_size_exact = True
                 file_desc = None
 
                 status = 0
@@ -388,6 +395,7 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
                                 file_size = _human2bytes(
                                     match.group(0).replace(" ", "")
                                 )
+                                file_size_exact = _is_exact_size(match.group(0))
                         status += 1
                     elif header == "description":
                         file_desc = cell_text or None
@@ -397,7 +405,9 @@ class _DirectoryListingParser(_html_parser.HTMLParser):
 
                 if file_name:
                     self.listing.append(
-                        _FileEntry(file_name, file_mod, file_size, file_desc)
+                        _FileEntry(
+                            file_name, file_mod, file_size, file_desc, file_size_exact
+                        )
                     )
 
     def close(self):
@@ -420,6 +430,94 @@ class _FileEntry(_ty.NamedTuple):
     modified: _ty.Optional[_time.struct_time]
     size: _ty.Optional[int]
     description: _ty.Optional[str]
+    # False when `size` came from a human-readable column ("1.2K"): the
+    # value is approximate and must not be reported as `st_size`.
+    size_exact: bool = True
+
+
+def _is_exact_size(sizestr: str) -> bool:
+    sizestr = sizestr.replace(" ", "").replace(",", "")
+    if sizestr[-1:] in ("b", "B"):
+        sizestr = sizestr[:-1]
+    return sizestr.isdigit()
+
+
+class _ResponseReader(_io.RawIOBase):
+    """Raw read stream over a streamed `requests` response body.
+
+    Reads go through `iter_content()`, so a body the server encoded anyway
+    (despite `Accept-Encoding: identity`) is decoded, and a failure in the
+    middle of the body surfaces as `TimeoutError`/`ConnectionError`/
+    `OSError` rather than a urllib3 exception. A decoded chunk larger than
+    the caller's buffer is kept for the next `readinto()`."""
+
+    def __init__(self, path, response: _req.Response, chunk_size: int):
+        super().__init__()
+        self._path = path
+        self._response = response
+        self._chunks = response.iter_content(chunk_size)
+        self._pending = b""
+        self._offset = 0
+
+    def readable(self):
+        return True
+
+    def _next_chunk(self) -> bytes:
+        path = self._path
+        try:
+            return next(self._chunks, b"")
+        except _req.exceptions.RequestException as error:
+            # requests reports a read timeout inside the body as its
+            # ConnectionError: keep it a TimeoutError, like a request that
+            # stalls before its headers.
+            if any(isinstance(a, _urllib3_exc.ReadTimeoutError) for a in error.args):
+                raise TimeoutError(f"Timeout for {path} (ReadTimeoutError)") from None
+            with _translate_http_errors(path):
+                raise
+        except _urllib3_exc.HTTPError as error:
+            raise OSError(
+                _errno.EIO, f"Read failed for {path} ({type(error).__name__})"
+            ) from None
+
+    def _check_complete(self) -> None:
+        # urllib3 1.26 ends a streamed body silently when the connection
+        # closes early; 2.x raises. A short body must never read as a
+        # complete file.
+        length = self._response.headers.get("Content-Length", "")
+        tell = getattr(self._response.raw, "tell", None)
+        if length.isdigit() and callable(tell) and tell() < int(length):
+            raise OSError(
+                _errno.EIO,
+                f"Incomplete read for {self._path}: {tell()} of {length} bytes",
+            )
+
+    def readinto(self, buffer):
+        view = memoryview(buffer).cast("B")
+        if not view:
+            return 0
+        while self._offset >= len(self._pending):
+            chunk = self._next_chunk()
+            if not chunk:
+                self._check_complete()
+                return 0
+            self._pending, self._offset = chunk, 0
+        count = min(len(view), len(self._pending) - self._offset)
+        view[:count] = self._pending[self._offset : self._offset + count]
+        self._offset += count
+        return count
+
+    def close(self):
+        if not self.closed:
+            try:
+                self._response.close()
+            finally:
+                super().close()
+
+
+def _response_reader(path, response: _req.Response, buffering: int):
+    buffer_size = _io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering
+    raw = _ResponseReader(path, response, buffer_size or _io.DEFAULT_BUFFER_SIZE)
+    return raw if buffer_size == 0 else _io.BufferedReader(raw, buffer_size)
 
 
 class HttpWriteStream(_io.BytesIO):
@@ -457,12 +555,17 @@ class HttpAppendStream(_io.BytesIO):
                 existing = b""
             self.write(existing)
         else:
-            # "patch" mode: stat the resource to get its size as start offset
+            # "patch" mode: stat the resource to get its size as start offset.
+            # Drop a listing-derived hint first: an offset taken from a hint
+            # would overwrite the file wherever the listing was wrong.
+            path._pop_stat_hint()
             try:
                 stat = path.stat()
                 self._start_offset = stat.st_size
+                self._existed = True
             except FileNotFoundError:
                 self._start_offset = 0
+                self._existed = False
 
     def close(self):
         if self.closed:
@@ -481,6 +584,17 @@ class HttpAppendStream(_io.BytesIO):
                 # "patch" mode: send only new content via Content-Range
                 with _translate_http_errors(self._path):
                     new_data = self.getvalue()
+                    if not new_data:
+                        # `bytes N-(N-1)/*` is not a valid range: there is
+                        # nothing to append, only a missing file to create.
+                        if not self._existed:
+                            resp = self._path.backend.request(
+                                self._path.backend.write_method,
+                                self._path.as_uri(),
+                                data=b"",
+                            )
+                            resp.raise_for_status()
+                        return
                     start = self._start_offset
                     end = start + len(new_data) - 1
                     headers = {"Content-Range": f"bytes {start}-{end}/*"}
@@ -514,6 +628,12 @@ class HttpBackend(_ty.NamedTuple):
     def request(self, method, uri: "HttpPath|str", **kwargs):
         url, auth = _split_userinfo(uri if isinstance(uri, str) else uri.as_uri(False))
         args = {**self.requests_args, **kwargs}
+        if self.requests_args.get("headers") and kwargs.get("headers"):
+            # Merged key by key: the caller's `with_session(headers=...)`
+            # (an auth token, say) must survive a request that sends its
+            # own headers (PROPFIND `Depth`, MOVE `Destination`); the
+            # request's own values win on a shared key.
+            args["headers"] = {**self.requests_args["headers"], **kwargs["headers"]}
         args.setdefault("timeout", DEFAULT_TIMEOUT)
         if (
             auth is not None
@@ -580,16 +700,29 @@ class HttpPath(UriPath):
                 # normalizes `/d/..` to `/`) and `walk()` loop forever.
                 # Filtered here so every parser branch is covered.
                 continue
-            yield name, FileStat(
-                st_size=0 if is_dir else (entry.size or 0),
-                st_mtime=_utils.parsedate(entry.modified),
-                is_dir=is_dir,
-            )
+            if is_dir:
+                stat = FileStat(
+                    st_size=0, st_mtime=_utils.parsedate(entry.modified), is_dir=True
+                )
+            elif entry.size is not None and entry.size_exact and entry.modified:
+                stat = FileStat(
+                    st_size=entry.size,
+                    st_mtime=_utils.parsedate(entry.modified),
+                    is_dir=False,
+                )
+            else:
+                # No exact byte count or no date in the listing (the stdlib
+                # `<ul>` index, a "1.2K" column): a hint would hand the
+                # child's first `stat()` a made-up size/mtime.
+                stat = None
+            yield name, stat
 
     def _is_dir(self, resp: _req.Response):
+        # Judged on the FINAL response, after redirects: a redirect itself
+        # is no directory signal (http->https, CDN and "latest" download
+        # links all redirect to files).
         return (
-            resp.is_redirect
-            or resp.url.endswith("/")
+            resp.url.endswith("/")
             or resp.url.endswith("/..")
             or resp.url.endswith("/.")
         )
@@ -600,42 +733,47 @@ class HttpPath(UriPath):
             return hint
 
         with _translate_http_errors(self):
+            # The caller's own spelling first: a trailing-slash path the
+            # server answers is a directory, even when the slash-less URL
+            # answers too (wsgidav serves both `/d` and `/d/` with 200).
             check = (
-                [self.with_path(self.path.removesuffix("/")), self]
+                [self, self.with_path(self.path.removesuffix("/"))]
                 if self.path.endswith("/")
                 else [self]
             )
             for uri in check:
-                resp = self.backend.request("HEAD", uri, allow_redirects=False)
+                resp = self.backend.request(
+                    "HEAD", uri, allow_redirects=False, headers=_IDENTITY_ENCODING
+                )
                 resp.close()
                 if resp.status_code == 405:
                     # Some servers reject HEAD outright; fall back to GET.
                     resp = self.backend.request(
-                        "GET", uri, allow_redirects=False, stream=True
+                        "GET",
+                        uri,
+                        allow_redirects=False,
+                        stream=True,
+                        headers=_IDENTITY_ENCODING,
                     )
                     resp.close()
                 if resp.status_code < 400:
                     break
 
-            # is_dir is intentionally derived from this pre-redirect resp,
-            # not re-derived after following the redirect below: a 3xx
-            # response's own `resp.is_redirect` is already sufficient (and
-            # is the only signal available pre-redirect), and the target
-            # should independently satisfy `_is_dir()`'s url.endswith("/")
-            # check too once fetched.
-            is_dir = self._is_dir(resp)
-
             if resp.is_redirect:
-                resp = self.backend.request("HEAD", uri)
+                resp = self.backend.request("HEAD", uri, headers=_IDENTITY_ENCODING)
                 resp.close()
                 if resp.status_code == 405:
                     # Mirror the pre-redirect loop's HEAD-405 fallback --
                     # without this, a server/proxy that rejects HEAD
                     # everywhere (not just pre-redirect) surfaced
                     # PermissionError for an existing, redirect-only path.
-                    resp = self.backend.request("GET", uri, stream=True)
+                    resp = self.backend.request(
+                        "GET", uri, stream=True, headers=_IDENTITY_ENCODING
+                    )
                     resp.close()
             resp.raise_for_status()
+            # From the final URL, once any redirect has been followed.
+            is_dir = self._is_dir(resp)
 
         st_size = 0 if is_dir else int(resp.headers.get("Content-Length", 0))
         lm = resp.headers.get("Last-Modified")
@@ -662,17 +800,16 @@ class HttpPath(UriPath):
         buffering=-1,
     ):
         if "r" in mode:
-            buffer_size = _io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering
             with _translate_http_errors(self):
-                req = self.backend.request("GET", self.as_uri(), stream=True)
-                req.raise_for_status()
-            resp: "HTTPResponse" = req.raw
-            resp.auto_close = False
-            return (
-                resp
-                if buffer_size == 0
-                else _io.BufferedReader(resp, buffer_size=buffer_size)
-            )
+                req = self.backend.request(
+                    "GET", self.as_uri(), stream=True, headers=_IDENTITY_ENCODING
+                )
+                try:
+                    req.raise_for_status()
+                except BaseException:
+                    req.close()
+                    raise
+            return _response_reader(self, req, buffering)
         if mode == "a":
             return HttpAppendStream(self)
         if mode not in ("w", "x"):

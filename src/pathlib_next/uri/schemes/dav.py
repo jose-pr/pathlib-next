@@ -11,7 +11,13 @@ from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import Uri
 from ..source import _compose_uri
-from .http import HttpPath, _split_userinfo, _translate_http_errors
+from .http import (
+    _IDENTITY_ENCODING,
+    HttpPath,
+    _response_reader,
+    _split_userinfo,
+    _translate_http_errors,
+)
 
 _NS = {"D": "DAV:"}
 
@@ -41,7 +47,57 @@ def _parse_response(elem) -> "tuple[str, bool, int, str]":
     lm = (
         prop.findtext("D:getlastmodified", namespaces=_NS) if prop is not None else None
     )
-    return _urlparse.unquote(href), is_dir, size, lm
+    # Still percent-encoded: decoding before `urlsplit()` would read a
+    # literal "#" or "?" in a name as URL syntax.
+    return href, is_dir, size, lm
+
+
+def _status_code(text: "str | None") -> "int | None":
+    # "HTTP/1.1 423 Locked"
+    parts = (text or "").split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
+def _multistatus_failures(content: bytes) -> "list[tuple[str, int]] | None":
+    """`(href, status)` of every failed member of a 207 reply, or `None`
+    when the body is not a parseable multistatus."""
+    try:
+        root = _ET.fromstring(content)
+    except _ET.ParseError:
+        return None
+    failures = []
+    for response in root.findall("D:response", _NS):
+        href = _urlparse.unquote(response.findtext("D:href", namespaces=_NS) or "")
+        statuses = [response.findtext("D:status", namespaces=_NS)] + [
+            propstat.findtext("D:status", namespaces=_NS)
+            for propstat in response.findall("D:propstat", _NS)
+        ]
+        for text in statuses:
+            code = _status_code(text)
+            if code is not None and code >= 400:
+                failures.append((href, code))
+                break
+    return failures
+
+
+def _raise_for_multistatus(resp, path) -> None:
+    """RFC 4918 9.6.1/9.9.4: DELETE and MOVE answer 207 when a member of
+    the collection could not be processed -- a partial failure, not a
+    success."""
+    failures = _multistatus_failures(resp.content)
+    if failures == []:
+        return
+    detail = (
+        ", ".join(f"{href} (HTTP {code})" for href, code in failures)
+        if failures
+        else "unparseable 207 Multi-Status reply"
+    )
+    message = f"Partial failure for {path}: {detail}"
+    if failures and all(code in (401, 403, 423) for _href, code in failures):
+        raise PermissionError(_errno.EACCES, message)
+    raise OSError(_errno.EIO, message)
 
 
 class _DavWriteStream(_io.BytesIO):
@@ -50,12 +106,17 @@ class _DavWriteStream(_io.BytesIO):
         self._path = path
 
     def close(self):
-        if not self.closed:
-            resp = self._path.backend.request(
-                "PUT", self._path._wire_uri(), data=self.getvalue()
+        if self.closed:
+            return
+        try:
+            # 409: an intermediate collection is missing (RFC 4918 9.7.1).
+            self._path._dav_request(
+                "PUT", data=self.getvalue(), statuses={409: FileNotFoundError}
             )
-            resp.raise_for_status()
-        super().close()
+        finally:
+            # Mark closed even on a failed upload, as `HttpWriteStream`
+            # does: otherwise `IOBase.__del__` sends the PUT again at GC.
+            super().close()
 
 
 class DavPath(HttpPath):
@@ -95,19 +156,43 @@ class DavPath(HttpPath):
             self.fragment or None,
         )
 
+    def _dav_request(self, method, *, statuses=None, **kwargs):
+        """Send `method` to this resource with pathlib exception types:
+        `statuses` maps a status code to the exception class raised for it
+        (called with `self`), ahead of `_translate_http_errors`' generic
+        mapping; a 207 to DELETE/MOVE raises for its failed members; 423
+        Locked is a PermissionError."""
+        statuses = {
+            404: FileNotFoundError,
+            401: PermissionError,
+            403: PermissionError,
+            423: PermissionError,
+            **(statuses or {}),
+        }
+        with _translate_http_errors(self):
+            resp = self.backend.request(method, self._wire_uri(), **kwargs)
+            error = statuses.get(resp.status_code)
+            if error is not None:
+                resp.close()
+                raise error(self)
+            if resp.status_code == 207 and method in ("DELETE", "MOVE"):
+                _raise_for_multistatus(resp, self)
+            resp.raise_for_status()
+        return resp
+
     def _propfind(self, depth="0"):
-        resp = self.backend.request(
+        resp = self._dav_request(
             "PROPFIND",
-            self._wire_uri(),
             headers={"Depth": depth, "Content-Type": "application/xml"},
             data=_PROPFIND_BODY,
         )
-        if resp.status_code == 404:
-            raise FileNotFoundError(self)
-        if resp.status_code == 403:
-            raise PermissionError(self)
-        resp.raise_for_status()
-        return _ET.fromstring(resp.content)
+        try:
+            return _ET.fromstring(resp.content)
+        except _ET.ParseError:
+            # A non-WebDAV endpoint or proxy answering 200 with HTML: an
+            # I/O error, so `exists()`/`is_dir()` report False instead of
+            # leaking a SyntaxError subclass.
+            raise OSError(_errno.EIO, f"Invalid PROPFIND response for {self}") from None
 
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
@@ -124,16 +209,21 @@ class DavPath(HttpPath):
         # One PROPFIND (Depth: 1) already carries type/size/mtime for every
         # child -- reuse it instead of `iterdir()` + a stat per child.
         root = self._propfind(depth="1")
-        self_path = _urlparse.urlsplit(self._wire_uri()).path.rstrip("/")
+        # Both sides compared decoded: the wire path is percent-encoded, so
+        # a directory named "my dir" otherwise listed itself as a child.
+        self_path = _urlparse.unquote(_urlparse.urlsplit(self._wire_uri()).path).rstrip(
+            "/"
+        )
         for elem in root.findall("D:response", _NS):
             href, is_dir, size, lm = _parse_response(elem)
-            href_path = _urlparse.urlsplit(href).path.rstrip("/")
+            # Split first, decode after: a literal "#"/"?" in a name arrives
+            # encoded and must stay part of the name.
+            href_path = _urlparse.unquote(_urlparse.urlsplit(href).path).rstrip("/")
             if not href_path or href_path == self_path:
                 continue  # the "." entry describing self, per RFC 4918
             name = href_path.rsplit("/", 1)[-1]
-            # The href is untrusted and already percent-decoded: an entry
-            # such as `%2E%2E/` decodes to "..", which let a recursive copy
-            # write outside its destination.
+            # The href is untrusted: an entry such as `%2E%2E/` decodes to
+            # "..", which let a recursive copy write outside its destination.
             if _utils.is_safe_child_name(name):
                 yield name, FileStat(
                     st_size=size, st_mtime=_utils.parsedate(lm), is_dir=is_dir
@@ -145,9 +235,10 @@ class DavPath(HttpPath):
 
     def _open(self, mode="r", buffering=-1):
         if "r" in mode:
-            buffer_size = _io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering
             with _translate_http_errors(self):
-                req = self.backend.request("GET", self._wire_uri(), stream=True)
+                req = self.backend.request(
+                    "GET", self._wire_uri(), stream=True, headers=_IDENTITY_ENCODING
+                )
                 try:
                     req.raise_for_status()
                 except BaseException:
@@ -156,13 +247,7 @@ class DavPath(HttpPath):
                     # the body unread and the pooled connection held.
                     req.close()
                     raise
-            resp = req.raw
-            resp.auto_close = False
-            return (
-                resp
-                if buffer_size == 0
-                else _io.BufferedReader(resp, buffer_size=buffer_size)
-            )
+            return _response_reader(self, req, buffering)
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
@@ -170,12 +255,14 @@ class DavPath(HttpPath):
         return _DavWriteStream(self)
 
     def _mkdir(self, mode):
-        resp = self.backend.request("MKCOL", self._wire_uri())
-        if resp.status_code == 409:
-            raise FileNotFoundError(self)
-        if resp.status_code in (405, 501):
-            raise FileExistsError(self)
-        resp.raise_for_status()
+        self._dav_request(
+            "MKCOL",
+            statuses={
+                409: FileNotFoundError,
+                405: FileExistsError,
+                501: FileExistsError,
+            },
+        )
 
     def unlink(self, missing_ok=False):
         # WebDAV DELETE on a collection is recursive (RFC 4918), so a bare
@@ -198,12 +285,11 @@ class DavPath(HttpPath):
     def _delete(self, missing_ok=False):
         # The raw DELETE, with no collection guard: `rmdir()` has already
         # verified an empty directory before calling it.
-        resp = self.backend.request("DELETE", self._wire_uri())
-        if resp.status_code == 404:
-            if missing_ok:
-                return
-            raise FileNotFoundError(self)
-        resp.raise_for_status()
+        try:
+            self._dav_request("DELETE")
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
 
     def rmdir(self):
         # Same fix as HttpPath.rmdir():
@@ -231,12 +317,11 @@ class DavPath(HttpPath):
         # WebDAV DELETE is recursive by spec (RFC 4918): one request here
         # replaces the base implementation's client-side stat+walk+unlink.
         try:
-            resp = self.backend.request("DELETE", self._wire_uri())
-            if resp.status_code == 404:
+            try:
+                self._dav_request("DELETE")
+            except FileNotFoundError:
                 if not missing_ok:
-                    raise FileNotFoundError(self)
-                return
-            resp.raise_for_status()
+                    raise
         except Exception as error:
             onerror = (
                 ignore_error
@@ -252,11 +337,12 @@ class DavPath(HttpPath):
         # `auth=` (see `HttpBackend.request`), and a header value ends up in
         # server and proxy logs.
         dest = _split_userinfo(self.with_path(target.path)._wire_uri())[0]
-        resp = self.backend.request(
-            "MOVE", self._wire_uri(), headers={"Destination": dest, "Overwrite": "F"}
+        self._dav_request(
+            "MOVE",
+            headers={"Destination": dest, "Overwrite": "F"},
+            statuses={
+                # 409: the destination's parent collection is missing.
+                409: lambda _self: FileNotFoundError(target),
+                412: lambda _self: FileExistsError(target),
+            },
         )
-        if resp.status_code == 404:
-            raise FileNotFoundError(self)
-        if resp.status_code == 412:
-            raise FileExistsError(target)
-        resp.raise_for_status()

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import typing as _ty
 
 from .. import LocalPath, UriPath
-from ..utils.sync import PathSyncer
+from ..utils.sync import PathSyncer, SyncEvent
+
+_CHUNK_SIZE = 1024 * 1024
 
 
 def _looks_like_uri(value: str) -> bool:
@@ -35,30 +38,43 @@ def _stdout(stdout):
     return stdout if stdout is not None else sys.stdout.buffer
 
 
-def _read_all(path_arg: str, *, stdin=None) -> bytes:
-    if path_arg == "-":
-        return _stdin(stdin).read()
-    return _path(path_arg).read_bytes()
-
-
-def _write_all(path_arg: str, data: bytes, *, stdout=None) -> None:
-    if path_arg == "-":
-        _stdout(stdout).write(data)
+def _copy_stream(source: str, target: str, *, stdin=None, stdout=None) -> None:
+    """Copy `source` to `target` in chunks; either may be `-` (stdin or
+    stdout). Never holds the whole object in memory."""
+    if source == "-":
+        reader = _stdin(stdin)
+        _write_stream(reader, target, stdout=stdout)
         return
-    _path(path_arg).write_bytes(data)
+    with _path(source).open("rb") as reader:
+        _write_stream(reader, target, stdout=stdout)
+
+
+def _write_stream(reader, target: str, *, stdout=None) -> None:
+    if target == "-":
+        writer = _stdout(stdout)
+        shutil.copyfileobj(reader, writer, _CHUNK_SIZE)
+        writer.flush()
+        return
+    with _path(target).open("wb") as writer:
+        shutil.copyfileobj(reader, writer, _CHUNK_SIZE)
 
 
 def _cmd_read(args, *, stdin=None, stdout=None) -> int:
-    _write_all("-", _read_all(args.path, stdin=stdin), stdout=stdout)
+    _copy_stream(args.path, "-", stdin=stdin, stdout=stdout)
     return 0
 
 
 def _cmd_write(args, *, stdin=None, stdout=None) -> int:
     if args.data is None:
-        data = _stdin(stdin).read()
+        _copy_stream("-", args.path, stdin=stdin, stdout=stdout)
+        return 0
+    data = args.data.encode(args.encoding)
+    if args.path == "-":
+        writer = _stdout(stdout)
+        writer.write(data)
+        writer.flush()
     else:
-        data = args.data.encode(args.encoding)
-    _write_all(args.path, data, stdout=stdout)
+        _path(args.path).write_bytes(data)
     return 0
 
 
@@ -73,8 +89,7 @@ def _cmd_rm(args, *, stdin=None, stdout=None) -> int:
 
 def _cmd_cp(args, *, stdin=None, stdout=None) -> int:
     if args.source == "-" or args.target == "-":
-        data = _read_all(args.source, stdin=stdin)
-        _write_all(args.target, data, stdout=stdout)
+        _copy_stream(args.source, args.target, stdin=stdin, stdout=stdout)
         return 0
 
     _path(args.source).copy(
@@ -87,17 +102,44 @@ def _cmd_cp(args, *, stdin=None, stdout=None) -> int:
     return 0
 
 
+_SYNC_ACTIONS = {
+    SyncEvent.Copy: "copy",
+    SyncEvent.RemovedMissing: "remove",
+    SyncEvent.CreatedDirectory: "mkdir",
+    SyncEvent.TypeMismatch: "replace",
+    SyncEvent.Symlink: "symlink",
+}
+
+
 def _cmd_sync(args, *, stdin=None, stdout=None) -> int:
-    checksum = lambda entry: entry.stat.st_size
+    # The default policy compares content (a native digest, or a streamed
+    # md5), so a same-size edit is copied; `--size-only` keeps the cheap
+    # size comparison.
+    checksum = (lambda entry: entry.stat.st_size) if args.size_only else None
+    writer = _stdout(stdout)
+
+    def report(source, target, event, dry_run):
+        action = _SYNC_ACTIONS.get(event)
+        if action is None or not (dry_run or args.verbose):
+            return
+        prefix = "would " if dry_run else ""
+        if event is SyncEvent.Copy:
+            line = f"{prefix}{action} {source.path} -> {target.path}"
+        else:
+            line = f"{prefix}{action} {target.path}"
+        writer.write(line.encode("utf-8", "backslashreplace") + b"\n")
+
     PathSyncer(
         checksum,
         remove_missing=args.remove_missing,
         follow_symlinks=args.follow_symlinks,
+        hook=report,
     ).sync(
         _path(args.source),
         _path(args.target),
         dry_run=args.dry_run,
     )
+    writer.flush()
     return 0
 
 
@@ -144,11 +186,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp.set_defaults(func=_cmd_cp)
 
-    sync = subparsers.add_parser("sync", help="sync SOURCE tree to TARGET")
+    sync = subparsers.add_parser(
+        "sync",
+        help="sync SOURCE tree to TARGET, comparing file content",
+    )
     sync.add_argument("source")
     sync.add_argument("target")
-    sync.add_argument("--dry-run", action="store_true")
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would change without changing anything",
+    )
     sync.add_argument("--remove-missing", action="store_true")
+    sync.add_argument(
+        "--size-only",
+        action="store_true",
+        help="compare file sizes only (misses same-size edits)",
+    )
+    sync.add_argument(
+        "-v", "--verbose", action="store_true", help="print each change made"
+    )
     sync.add_argument(
         "--no-follow-symlinks",
         dest="follow_symlinks",

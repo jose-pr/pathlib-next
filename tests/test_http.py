@@ -479,6 +479,9 @@ def test_http_append_write_stream_marks_closed_on_failure(monkeypatch):
             if self.status_code >= 400:
                 raise requests.exceptions.HTTPError(response=self)
 
+        def close(self):
+            pass
+
     call_count = [0]
 
     def mock_request(self, method, url, **kwargs):
@@ -512,3 +515,89 @@ def test_http_append_default_is_rewrite(monkeypatch):
         session=requests.Session(), requests_args={}, write_method="PUT"
     )
     assert backend.append_mode == "rewrite"
+
+
+# --- httpdav-scandir-stat-hint-fabricates-size ---
+
+
+def test_listing_without_sizes_gives_no_fabricated_stat(http_server, fixture_tree):
+    # The stdlib `<ul>` index carries neither sizes nor dates.
+    (fixture_tree / "big.bin").write_bytes(b"x" * 12345)
+    root = UriPath(f"{http_server}/")
+    child = next(c for c in root.iterdir() if c.name == "big.bin")
+    first = child.stat()
+    assert first.st_size == 12345
+    assert first.st_mtime != 0
+    sub = next(c for c in root.iterdir() if c.name == "sub")
+    assert sub.is_dir()
+
+
+def test_approximate_listing_size_is_not_a_stat_hint(monkeypatch):
+    import time
+
+    from pathlib_next.uri.schemes.http import HttpPath, _FileEntry
+
+    monkeypatch.setattr(
+        HttpPath,
+        "_listdir",
+        lambda self: [
+            _FileEntry("f.txt", time.gmtime(0), 1228, None, False),
+            _FileEntry("g.txt", time.gmtime(0), 7, None, True),
+        ],
+    )
+    entries = dict(HttpPath("http://example.com/d/")._scandir())
+    assert entries["f.txt"] is None
+    assert entries["g.txt"].st_size == 7
+
+
+def test_listing_parser_marks_human_readable_sizes_approximate():
+    from pathlib_next.uri.schemes.http import _DirectoryListingParser
+
+    parser = _DirectoryListingParser()
+    parser.feed(
+        "<html><head><title>Index of /d/</title></head><body><pre>"
+        '<a href="a.txt">a.txt</a>   11-Jul-2026 10:23  1.2K\n'
+        '<a href="b.txt">b.txt</a>   11-Jul-2026 10:23  1,024\n'
+        "</pre></body></html>"
+    )
+    parser.close()
+    listing = {e.name: e for e in parser.listing}
+    assert listing["a.txt"].size_exact is False
+    assert listing["b.txt"].size_exact is True
+
+
+def test_patch_append_offset_ignores_listing_hint(monkeypatch):
+    import time
+
+    import requests
+
+    from pathlib_next.uri.schemes.http import HttpPath, _FileEntry
+
+    recorded = []
+
+    def mock_request(self, method, url, **kwargs):
+        recorded.append((method, kwargs.get("headers") or {}))
+        if method == "HEAD":
+            return _MockHttpResponse(200, headers={"Content-Length": "1000"}, url=url)
+        return _MockHttpResponse(204, url=url)
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+    monkeypatch.setattr(
+        HttpPath,
+        "_listdir",
+        lambda self: [_FileEntry("f.txt", time.gmtime(0), 1228, None, True)],
+    )
+    root = UriPath("http://example.com/d/").with_session(
+        requests.Session(), append_mode="patch"
+    )
+    child = next(root.iterdir())
+    with child.open("ab") as f:
+        f.write(b"hello!")
+    patches = [headers for method, headers in recorded if method == "PATCH"]
+    assert patches == [{"Content-Range": "bytes 1000-1005/*"}]
+
+    # An empty append to an existing file sends no (invalid) range.
+    recorded.clear()
+    with child.open("ab"):
+        pass
+    assert [method for method, _headers in recorded] == ["HEAD"]

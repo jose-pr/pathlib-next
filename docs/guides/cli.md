@@ -24,11 +24,11 @@ Commands:
 
 | Command | Behavior |
 | --- | --- |
-| `read PATH` | Writes `PATH` bytes to stdout. `PATH=-` copies stdin to stdout. |
+| `read PATH` | Writes `PATH` bytes to stdout. `PATH=-` copies stdin to stdout. Streams in chunks, like every `-` source or target. |
 | `write PATH [DATA]` | Writes `DATA` as text, or stdin bytes when `DATA` is omitted. |
 | `rm PATH` | Removes a file or empty directory. Add `--recursive`, `--missing-ok`, or `--ignore-error` as needed. |
 | `cp SOURCE TARGET` | Copies bytes or paths. Supports `--recursive`, `--overwrite`, `--no-follow-symlinks`, and `--no-preserve-metadata`. |
-| `sync SOURCE TARGET` | Uses `PathSyncer` with a size checksum. Supports `--dry-run`, `--remove-missing`, and `--no-follow-symlinks`. |
+| `sync SOURCE TARGET` | Uses `PathSyncer` with its default content comparison (a backend-native digest or a streamed md5), so same-size edits are copied. `--dry-run` prints each planned change (`would copy SRC -> DST`, `would remove`, `would mkdir`) without changing anything; `-v`/`--verbose` prints the changes a real run makes. `--size-only` compares sizes only and misses same-size edits. Also supports `--remove-missing` and `--no-follow-symlinks`. |
 
 Plain filesystem paths use `LocalPath`; URI-looking paths use `UriPath`
 scheme dispatch.

@@ -29,6 +29,9 @@ class GitHubPath(_RepoApiPath):
     __slots__ = ()
 
     _RAW_ACCEPT = "application/vnd.github.raw+json"
+    # The contents API returns at most this many entries per directory, with
+    # no pagination and no truncation flag.
+    _CONTENTS_LIMIT = 1000
 
     @property
     def _api_base(self) -> str:
@@ -36,13 +39,17 @@ class GitHubPath(_RepoApiPath):
         if override:
             return override
         host = self.source.host or "github.com"
-        if host in ("github.com", "www.github.com"):
+        if str(host).lower() in ("github.com", "www.github.com"):
             return "https://api.github.com"
-        return f"https://{host}/api/v3"
+        return f"https://{self._api_authority()}/api/v3"
 
-    def _contents_url(self) -> str:
-        url = f"{self._api_base}/repos/{self.owner}/{self.repo}/contents"
-        path = self.repo_path
+    @property
+    def _repo_url(self) -> str:
+        return f"{self._api_base}/repos/{self.owner}/{self.repo}"
+
+    def _contents_url(self, path: "str | None" = None) -> str:
+        url = f"{self._repo_url}/contents"
+        path = self.repo_path if path is None else path
         if path:
             url += f"/{_urlparse.quote(path)}"
         return url
@@ -51,10 +58,13 @@ class GitHubPath(_RepoApiPath):
         ref = self.ref
         return {"ref": ref} if ref else {}
 
-    def _request(self, headers=None):
+    def _request(self, headers=None, url=None, params=None):
         with _translate_repo_errors(self):
             resp = self.backend.request(
-                "GET", self._contents_url(), params=self._params(), headers=headers
+                "GET",
+                url or self._contents_url(),
+                params=self._params() if params is None else params,
+                headers=headers,
             )
             if (
                 resp.status_code == 403
@@ -77,11 +87,54 @@ class GitHubPath(_RepoApiPath):
             return FileStat(is_dir=True)
         return FileStat(st_size=data.get("size", 0) or 0, is_dir=False)
 
-    def _scandir(self):
-        data = self._request().json()
+    def _entries(self, path: str) -> "list[dict]":
+        """Contents-API-shaped entries of the directory `path`. A listing
+        that hits the contents API's 1,000-entry cap is re-read through the
+        Git Trees API, which has no such cap."""
+        data = self._request(url=self._contents_url(path)).json()
         if not isinstance(data, list):
             raise NotADirectoryError(self)
-        for entry in data:
+        if len(data) >= self._CONTENTS_LIMIT:
+            data = self._tree_entries(self._tree_sha(path))
+        return data
+
+    def _tree_sha(self, path: str) -> str:
+        if not path:
+            return self.ref or self._default_branch()
+        parent, _, name = path.rpartition("/")
+        for entry in self._entries(parent):
+            if entry["name"] == name and entry["type"] == "dir":
+                return entry["sha"]
+        raise FileNotFoundError(self)
+
+    def _default_branch(self) -> str:
+        cache = getattr(self.backend, "cache", {})
+        key = ("github_default_branch", self._repo_url)
+        if key not in cache:
+            data = self._request(url=self._repo_url, params={}).json()
+            cache[key] = data["default_branch"]
+        return cache[key]
+
+    def _tree_entries(self, sha: str) -> "list[dict]":
+        url = f"{self._repo_url}/git/trees/{_urlparse.quote(sha)}"
+        data = self._request(url=url, params={}).json()
+        if data.get("truncated"):
+            # Only for trees far past any directory listing (100,000
+            # entries); never return a partial listing as a complete one.
+            raise OSError(_errno.EIO, f"Git tree listing truncated for {self}")
+        kinds = {"tree": "dir", "blob": "file", "commit": "submodule"}
+        return [
+            {
+                "name": entry["path"],
+                "type": kinds.get(entry["type"], entry["type"]),
+                "size": entry.get("size", 0) or 0,
+                "sha": entry.get("sha"),
+            }
+            for entry in data.get("tree", [])
+        ]
+
+    def _scandir(self):
+        for entry in self._entries(self.repo_path):
             is_dir = entry["type"] == "dir"
             yield entry["name"], FileStat(
                 st_size=0 if is_dir else (entry.get("size", 0) or 0), is_dir=is_dir

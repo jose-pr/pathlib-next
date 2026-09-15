@@ -14,9 +14,13 @@ from ._gitrepo import (
 class GitLabPath(_RepoApiPath):
     """`gitlab:` scheme: read-only access to a GitLab project's repository
     tree via the REST API v4 (project identified as URL-encoded
-    `owner/repo`). `host` defaults to `gitlab.com`; a self-hosted instance
-    is just a different host, always at `https://{host}/api/v4` (no
-    enterprise/SaaS API-path split like GitHub). The tree-listing endpoint
+    `owner/repo`). A project in a subgroup is addressed with GitLab's own
+    `/-/` separator, as in its web URLs:
+    `gitlab://host/group/subgroup/project/-/path/in/repo`; without the
+    separator the first two segments are owner/repo. `host` defaults to
+    `gitlab.com`; a self-hosted instance is just a different host (and
+    port), always at `https://{host}/api/v4` (no enterprise/SaaS API-path
+    split like GitHub). The tree-listing endpoint
     doesn't carry file size, so `_scandir()` only pre-seeds a stat hint for
     `tree` (directory) entries (`size=0` is truthful for a directory, not a
     placeholder) -- `blob` (file) entries get a real `stat()` lazily
@@ -32,8 +36,49 @@ class GitLabPath(_RepoApiPath):
         override = getattr(self.backend, "api_base", None)
         if override:
             return override
-        host = self.source.host or "gitlab.com"
-        return f"https://{host}/api/v4"
+        if not self.source.host:
+            return "https://gitlab.com/api/v4"
+        return f"https://{self._api_authority()}/api/v4"
+
+    def _separator_index(self) -> "int | None":
+        # GitLab's `/-/` ends the project path; it needs at least
+        # `owner/repo` in front of it.
+        try:
+            return self.segments.index("-", 3)
+        except ValueError:
+            return None
+
+    @property
+    def owner(self) -> str:
+        index = self._separator_index()
+        if index is None:
+            return super().owner
+        return "/".join(self.segments[1 : index - 1])
+
+    @property
+    def repo(self) -> str:
+        index = self._separator_index()
+        if index is None:
+            return super().repo
+        return self.segments[index - 1]
+
+    @property
+    def repo_path(self) -> str:
+        index = self._separator_index()
+        if index is None:
+            return super().repo_path
+        return "/".join(self.segments[index + 1 :]).rstrip("/")
+
+    def _make_child_relpath(self, name: str, **kwargs):
+        parent = self
+        if name == "-" and self._separator_index() is None and len(self.segments) > 2:
+            # A directory literally named "-" would read as the separator:
+            # spell the parent with `/-/` so the child stays that directory.
+            segments = self.segments[:3] + ("-",) + self.segments[3:]
+            parent = self._from_parsed_parts(
+                self.source, "/".join(segments), self.query, self.fragment
+            )
+        return super(GitLabPath, parent)._make_child_relpath(name, **kwargs)
 
     @property
     def _project_id(self) -> str:
@@ -86,10 +131,20 @@ class GitLabPath(_RepoApiPath):
         return resp.json()
 
     def _tree_entries(self, path: str):
-        resp = self._request(
-            "GET", self._tree_url(), params=self._params(path=path, per_page=100)
-        )
-        return resp.json()
+        # The tree endpoint is paginated (at most 100 per page): follow
+        # `X-Next-Page` until the last page.
+        page = 1
+        while True:
+            resp = self._request(
+                "GET",
+                self._tree_url(),
+                params=self._params(path=path, per_page=100, page=page),
+            )
+            yield from resp.json()
+            next_page = resp.headers.get("X-Next-Page", "")
+            if not next_page.isdigit() or int(next_page) <= page:
+                return
+            page = int(next_page)
 
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
@@ -97,17 +152,24 @@ class GitLabPath(_RepoApiPath):
             return hint
         path = self.repo_path
         if not path:
+            # Ask the server: a missing project, owner-only URI or unknown
+            # ref must not read as an existing directory.
+            self._request("GET", self._tree_url(), params=self._params(per_page=1))
             return FileStat(is_dir=True)
         meta = self._get_file_meta(path)
         if meta is not None:
             return FileStat(st_size=meta.get("size", 0) or 0, is_dir=False)
-        # Not a file at this exact path -- the tree-listing endpoint alone
-        # can't tell "empty directory" from "doesn't exist" (both are `[]`),
-        # so check the PARENT's listing for a same-named entry instead.
-        parent, _, name = path.rpartition("/")
-        for entry in self._tree_entries(parent):
-            if entry["name"] == name:
-                return FileStat(is_dir=entry["type"] == "tree")
+        # Not a file at this exact path. Git has no empty directories, so a
+        # path whose tree listing has any entry is a directory; an empty
+        # listing (or a 404) means it does not exist.
+        try:
+            resp = self._request(
+                "GET", self._tree_url(), params=self._params(path=path, per_page=1)
+            )
+        except FileNotFoundError:
+            raise FileNotFoundError(self) from None
+        if resp.json():
+            return FileStat(is_dir=True)
         raise FileNotFoundError(self)
 
     def _scandir(self):
