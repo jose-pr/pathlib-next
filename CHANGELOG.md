@@ -276,7 +276,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   native checksum probed an extension OpenSSH does not implement, paying extra
   round trips per file.
 
+- **`rename()` returned `None`** on `dav:`, `s3:`, `gs:`, `az:`, `ftp:` and
+  `sftp:`; it now returns the new path, as pathlib does.
+- **Wrong exception types on `sftp:`, `dav:`, `gitlab:` and `MemPath`.**
+  Listing or `rmdir()` of a file raises `NotADirectoryError`, `rmdir()` of a
+  non-empty directory `OSError(ENOTEMPTY)` (`MemPath` raised
+  `FileExistsError`), opening or unlinking a directory `IsADirectoryError`;
+  `dav:` reading a collection raised nothing and returned its HTML index, and
+  `rmdir()` of a missing path raised `NotADirectoryError`. paramiko
+  `open("x")` returned a file that could not be written.
+- **`Path.rm(recursive=True, ignore_error=callable)`** offered a declined
+  error to the callable again from every enclosing directory.
+- **`uripath` crashed at import without the `uri` extra**, even for local
+  files. Local paths and `-` now work; a URI argument reports the extra to
+  install.
+- **`import pathlib_next` imported `netimps`** (a host-name query at import,
+  slow on Windows), and the first `file:`/`data:` path imported `requests`
+  and `botocore`; both now load on first use. `GsPath`/`AzPath` are exported
+  from `pathlib_next.uri.schemes`.
+- **`*.local.*` files shipped in the sdist and wheel.**
+- **The SFTP/FTP/WebDAV examples** built URIs from unencoded credentials (a
+  password containing `/`, `#`, `?` or `@` changed the host) and printed the
+  password.
+- **`benchmarks/bench.py` crashed at import on Python 3.9.**
+- **Docs**: the CI benchmark table had its Ubuntu, Windows and macOS columns
+  rotated; the paramiko single-file write/copy slowdown was on Ubuntu.
+
 ### Changed
+- **Package metadata uses PEP 639** (`License-Expression: MIT`) instead of
+  the `License ::` classifier, and adds `Typing :: Typed`,
+  `Development Status :: 4 - Beta` and Python 3.9-3.14 classifiers. Building
+  from source needs `hatchling>=1.27`.
+- **`pathlib_next.testing` contracts are stricter**: 48 `PathContract` tests
+  (was 20) covering pathlib error types, glob, walk, rename, open modes and
+  recursive copy. A backend that cannot meet a rule sets a capability
+  attribute to `False` (`supports_listing`, `supports_empty_directories`,
+  `distinguishes_file_types`, `supports_rename`, `supports_append`,
+  `supports_exclusive_create`, `enforces_directory_hierarchy`). The contract
+  root must be a fresh, function-scoped directory populated with
+  `populate_fixture_tree()`. `test_iterdir_lists_children` no longer passes
+  when `iterdir()` is unimplemented.
 - **`Uri.query` is the percent-encoded query as received** and is sent
   unchanged; `Query(...).decode()`/`to_dict()` decode each name and value
   once. A `str` passed to `with_query()` is taken as already encoded; a
@@ -333,6 +372,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   thread raises `RuntimeError` instead of hanging.
 
 ### Added
+- `pathlib_next.testing.populate_fixture_tree(root)` and `FIXTURE_TREE`.
+- `benchmarks/bench.py --save` (min/median/max ms per call as JSON under
+  `benchmarks/results/`) and `--samples`.
 - `SyncEvent.Compare` and `SyncEvent.Skipped`; `uripath sync --size-only` and
   `-v/--verbose`.
 - `glob.parse_pattern()`, `glob.select()`, `glob.NonRelativePatternError`;
@@ -1164,6 +1206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 [0.9.3]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jose-pr/pathlib-next/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/jose-pr/pathlib-next/compare/v0.8.6...v0.9.0
 [0.8.6]: https://github.com/jose-pr/pathlib-next/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/jose-pr/pathlib-next/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/jose-pr/pathlib-next/compare/v0.8.3...v0.8.4
@@ -1174,6 +1217,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 [0.7.0]: https://github.com/jose-pr/pathlib-next/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jose-pr/pathlib-next/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jose-pr/pathlib-next/compare/v0.4.1...v0.5.0
-[0.4.1]: https://github.com/jose-pr/pathlib-next/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/jose-pr/pathlib-next/releases/tag/v0.4.0
-[0.3.5]: https://github.com/jose-pr/pathlib-next/releases/tag/v0.3.5
+[0.4.1]: https://github.com/jose-pr/pathlib-next/compare/82caebc61dbd87928474425d7fd784baf6a4aaab...v0.4.1
+[0.4.0]: https://github.com/jose-pr/pathlib-next/compare/22cbb198d6b0c5c187d6f0dcc35990ace8eb2950...82caebc61dbd87928474425d7fd784baf6a4aaab
+[0.3.5]: https://github.com/jose-pr/pathlib-next/tree/22cbb198d6b0c5c187d6f0dcc35990ace8eb2950
