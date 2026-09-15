@@ -47,6 +47,11 @@ class BaseSftpBackend(object):
     @_utils.notimplemented
     def client(self, source: Source): ...
 
+    def close(self) -> None:
+        """Close every connection this backend has cached. A no-op here;
+        both real backends override it. The backend stays usable: the next
+        `client()` call reconnects."""
+
     @_utils.notimplemented
     def checksum(self, path: "SftpPath", algorithm: str) -> str:
         """Backend-native digest for `path`'s content, e.g. via the
@@ -67,6 +72,10 @@ class BaseSftpBackend(object):
 # The default-config sentinel is paramiko-free (lives in `_sshconfig`) so
 # importing this scheme never pulls paramiko in just to have the sentinel.
 from ._sshconfig import _DEFAULT_SSH_CONFIG
+
+# "No ssh_config argument given" -- distinct from _DEFAULT_SSH_CONFIG so a
+# later lazy `_init()` keeps a value captured at construction.
+_UNSET_SSH_CONFIG = object()
 
 # --- backend selection -----------------------------------------------------
 # Precedence, highest to lowest (each layer only consulted if the one above
@@ -204,9 +213,28 @@ class SftpPath(UriPath):
     if _ty.TYPE_CHECKING:
         backend: BaseSftpBackend
 
+    def __new__(cls, *args, ssh_config=_UNSET_SSH_CONFIG, **kwargs):
+        # A direct `SftpPath(url, ssh_config=...)` parses lazily and never
+        # passes its keywords to `_init()`, so capture the value here.
+        inst = super().__new__(cls, *args, **kwargs)
+        if isinstance(inst, SftpPath):
+            if ssh_config is _UNSET_SSH_CONFIG:
+                # Inherit from a path segment, the way the backend is.
+                ssh_config = _DEFAULT_SSH_CONFIG
+                for segment in reversed(args):
+                    if isinstance(segment, SftpPath):
+                        ssh_config = segment._ssh_config
+                        break
+            inst._ssh_config = ssh_config
+        return inst
+
     def _initbackend(self):
         cls = self._default_backend_cls or _resolve_default_backend_cls()
         return cls.default(ssh_config=self._ssh_config)
+
+    def _from_parsed_parts(self, source, path, query, fragment, /, **kwargs):
+        kwargs.setdefault("ssh_config", self._ssh_config)
+        return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
 
     def _init(
         self,
@@ -216,10 +244,11 @@ class SftpPath(UriPath):
         fragment,
         /,
         backend=None,
-        ssh_config=_DEFAULT_SSH_CONFIG,
+        ssh_config=_UNSET_SSH_CONFIG,
         **kwargs,
     ):
-        self._ssh_config = ssh_config
+        if ssh_config is not _UNSET_SSH_CONFIG:
+            self._ssh_config = ssh_config
         return super()._init(
             source,
             path,
@@ -436,13 +465,19 @@ class SftpPath(UriPath):
                 else lambda _err, _path: bool(ignore_error)
             )
 
+        # Connect on THIS thread: the coroutine runs on the bridge loop,
+        # where opening the connection would block the loop it needs.
+        aclient = self._sftpclient._aclient
+        # A whole-tree operation: no wall-clock bound (single requests are).
         return _run(
             _concurrent_rm(
                 self,
                 max_concurrency=self.backend.max_concurrency,
                 missing_ok=missing_ok,
                 on_error=on_error,
-            )
+                aclient=aclient,
+            ),
+            None,
         )
 
     def copy(
@@ -459,16 +494,23 @@ class SftpPath(UriPath):
         """Copy with concurrent fan-out on the asyncssh backend.
 
         When using the asyncssh backend with `recursive=True` on a
-        directory, child copies are fanned out over worker threads,
-        bounded by `backend.max_concurrency`. `progress` is honored on the
+        directory, child copies are fanned out as concurrent native requests,
+        bounded by `backend.max_concurrency` (requests in flight, and files
+        open at once); the whole copy has no wall-clock timeout. `progress`
+        is honored on the
         generic single-file fallback path below, but **not** called during
         the concurrent native fan-out itself -- see `docs/divergences.md`'s
         "Deliberate extensions" section for the documented limitation.
         """
-        from ._asyncssh import AsyncsshSftpBackend, _concurrent_copy, _run
+        try:
+            from ._asyncssh import AsyncsshSftpBackend, _concurrent_copy, _run
+        except ImportError:
+            # paramiko-only install ('sftp' extra): generic copy.
+            AsyncsshSftpBackend = None
 
         if (
-            not isinstance(self.backend, AsyncsshSftpBackend)
+            AsyncsshSftpBackend is None
+            or not isinstance(self.backend, AsyncsshSftpBackend)
             or not recursive
             # The fan-out writes every destination file over THIS path's
             # connection: only a target on the same host may use it.
@@ -505,5 +547,7 @@ class SftpPath(UriPath):
             preserve_metadata=preserve_metadata,
             max_concurrency=self.backend.max_concurrency,
             ignore_error=ignore_error,
+            # Resolved on this thread, never on the bridge loop (see rm()).
+            aclient=self._sftpclient._aclient,
         )
-        return _run(coro)
+        return _run(coro, None)

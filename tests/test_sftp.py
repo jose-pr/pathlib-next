@@ -13,9 +13,25 @@ from pathlib_next.uri import Source, Uri
 from pathlib_next.uri.schemes.sftp import BaseSftpBackend, SftpBackend, SftpPath
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_home(tmp_path, monkeypatch):
+    # SftpBackend reads ~/.ssh/config and ~/.ssh/known_hosts by default: a
+    # developer's own `Host *` / `Port 2200` / ProxyCommand must not change
+    # what these tests see. Path.home() reads USERPROFILE on Windows, HOME
+    # elsewhere.
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
+
+
 class _FakeSock:
     def __init__(self, active=True):
+        # paramiko's Channel: `active` is set once on open and never
+        # cleared; `closed` is what a dropped connection actually sets.
         self.active = active
+        self.closed = False
 
 
 class _FakeAttr:
@@ -31,6 +47,7 @@ class _FakeAttr:
 class _FakeSftpClient:
     def __init__(self):
         self.sock = _FakeSock(True)
+        self.close_calls = 0
         self.rename_calls = []
         self.chmod_calls = []
         self.chown_calls = []
@@ -40,6 +57,9 @@ class _FakeSftpClient:
         # "unchanged") has something to read back for the other field.
         self.stat_uid = 501
         self.stat_gid = 20
+
+    def close(self):
+        self.close_calls += 1
 
     def rename(self, path, target):
         self.rename_calls.append((path, target))
@@ -225,16 +245,20 @@ def test_sftp_backend_client_cached_across_calls(monkeypatch):
     assert len(transport.clients) == 1
 
 
-def test_sftp_backend_client_recreated_when_socket_inactive(monkeypatch):
+def test_sftp_backend_client_recreated_when_channel_closed(monkeypatch):
+    # A dropped paramiko connection leaves `Channel.active` truthy and sets
+    # `closed`; the stale client must be replaced AND closed, not dropped.
     backend = SftpBackend({}, None)
     transport = _FakeTransport()
     monkeypatch.setattr(SftpBackend, "transport", lambda self, source: transport)
     source = Source("sftp", None, "host", None)
     client1 = backend.client(source)
-    client1.sock.active = False
+    client1.sock.closed = True
     client2 = backend.client(source)
     assert client2 is not client1
     assert len(transport.clients) == 2
+    assert client1.close_calls == 1
+    assert client2.close_calls == 0
 
 
 def test_sftp_backend_client_different_sources_not_shared(monkeypatch):
@@ -314,21 +338,23 @@ def test_sftp_backend_connect_and_client():
 
     mock_ssh.get_transport.return_value = mock_transport
     mock_transport.open_sftp_client.return_value = mock_sftp
+    # A live channel: MagicMock attributes are truthy, so `closed` would
+    # otherwise read as a dropped connection.
+    mock_sftp.sock.closed = False
 
     with unittest.mock.patch("paramiko.SSHClient", return_value=mock_ssh):
-        backend = SftpBackend({"timeout": 10}, "policy")
+        backend = SftpBackend({"timeout": 10}, "policy", ssh_config=None)
         source = Source("sftp", "user:pass", "host", 2222)
 
         # Test transport()
         transport = backend.transport(source)
         assert transport is mock_transport
         mock_ssh.set_missing_host_key_policy.assert_called_with("policy")
-        # Assert the arguments this test is ABOUT, not the whole call: the
-        # backend also merges the developer's real ~/.ssh/config, so a machine
-        # with an `identityfile` entry adds `key_filename=` and an exact-call
-        # assertion fails there while passing on a key-less CI runner.
         connect_kwargs = mock_ssh.connect.call_args.kwargs
         assert connect_kwargs["timeout"] == 10
+        # connect_opts wins for `timeout`; the other bounds keep the default.
+        assert connect_kwargs["banner_timeout"] == SftpBackend.DEFAULT_TIMEOUT
+        assert connect_kwargs["auth_timeout"] == SftpBackend.DEFAULT_TIMEOUT
         assert connect_kwargs["hostname"] == "host"
         assert connect_kwargs["port"] == 2222
         assert connect_kwargs["username"] == "user"
@@ -339,10 +365,12 @@ def test_sftp_backend_connect_and_client():
         assert client is mock_sftp
         mock_transport.open_sftp_client.assert_called_once()
 
-        # Test transport raising if None
+        # Test transport raising if None -- and the client is closed.
         mock_ssh.get_transport.return_value = None
+        mock_ssh.close.reset_mock()
         with pytest.raises(Exception):
             backend.transport(source)
+        mock_ssh.close.assert_called_once()
 
 
 def test_sftppath_operations():

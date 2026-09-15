@@ -504,6 +504,7 @@ def benchmark_sftp_backends(mode="all"):
         return SftpBackend(
             {"allow_agent": False, "look_for_keys": False},
             paramiko.AutoAddPolicy(),
+            known_hosts=None,
         )
 
     def make_asyncssh_backend():
@@ -517,6 +518,9 @@ def benchmark_sftp_backends(mode="all"):
                 "gss_kex": False,
                 "gss_auth": False,
                 "preferred_auth": "none,password",
+                # Throwaway loopback server with a fresh key every run: opt out
+                # of host-key verification explicitly (it is on by default).
+                "known_hosts": None,
             },
             max_concurrency=8,
             sftp_version=4,
@@ -849,6 +853,9 @@ def benchmark_sftp_backends(mode="all"):
                                 "gss_kex": False,
                                 "gss_auth": False,
                                 "preferred_auth": "none,password",
+                                # Throwaway loopback server, fresh key per run:
+                                # opt out of host-key verification explicitly.
+                                "known_hosts": None,
                             },
                             max_concurrency=max_concurrency,
                             sftp_version=4,
@@ -925,6 +932,9 @@ def benchmark_sftp_backends(mode="all"):
                                 "gss_kex": False,
                                 "gss_auth": False,
                                 "preferred_auth": "none,password",
+                                # Throwaway loopback server, fresh key per run:
+                                # opt out of host-key verification explicitly.
+                                "known_hosts": None,
                             },
                             max_concurrency=max_concurrency,
                             sftp_version=4,

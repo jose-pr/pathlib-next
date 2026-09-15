@@ -442,7 +442,7 @@ def s3_server(fixture_tree):
 
 
 @pytest.fixture
-def sftp_server(fixture_tree):
+def sftp_server(fixture_tree, tmp_path_factory, monkeypatch):
     """In-process SFTP server backed by fixture_tree, using asyncssh's own
     `SFTPServer` (chrooted) -- a full local-filesystem-backed SFTP server
     for free, replacing what used to be a ~150-line hand-rolled paramiko
@@ -453,12 +453,24 @@ def sftp_server(fixture_tree):
     loop/thread, independent of `AsyncsshSftpBackend`'s shared bridge loop
     (server and client are logically separate machines in reality; keeping
     them on separate loops here mirrors that instead of coupling test
-    infrastructure to backend-internal state)."""
+    infrastructure to backend-internal state).
+
+    Both client backends verify host keys by default, so for the test's
+    duration the home directory is a fresh one whose `.ssh/known_hosts`
+    trusts exactly this server's per-test key (and which has no
+    `.ssh/config`): clients connect with verification ON, and nothing from
+    the developer's real `~/.ssh` leaks in."""
     asyncssh = pytest.importorskip("asyncssh")
     import asyncio
     import sys
 
     root = str(fixture_tree)
+    host_key = asyncssh.generate_private_key("ssh-rsa")
+    home = tmp_path_factory.mktemp("sftp-home")
+    (home / ".ssh").mkdir()
+    # Path.home()/expanduser read USERPROFILE on Windows, HOME elsewhere.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
     class _NoAuth(asyncssh.SSHServer):
         def begin_auth(self, username):
@@ -472,7 +484,7 @@ def sftp_server(fixture_tree):
             "127.0.0.1",
             0,
             server_factory=_NoAuth,
-            server_host_keys=[asyncssh.generate_private_key("ssh-rsa")],
+            server_host_keys=[host_key],
             sftp_factory=_sftp_factory,
             process_factory=None,
         )
@@ -490,6 +502,10 @@ def sftp_server(fixture_tree):
     thread.start()
     server = asyncio.run_coroutine_threadsafe(_start(), loop).result()
     port = server.sockets[0].getsockname()[1]
+    public_key = host_key.export_public_key("openssh").decode().split()
+    (home / ".ssh" / "known_hosts").write_text(
+        f"[127.0.0.1]:{port} {public_key[0]} {public_key[1]}\n"
+    )
     try:
         # A password is included even though the server's begin_auth()
         # accepts everything unconditionally: paramiko's SSHClient.connect()

@@ -359,10 +359,36 @@ def test_aconnect_merges_source_credentials_and_connect_opts(monkeypatch):
     assert calls["kwargs"]["config"] is None
     assert calls["kwargs"]["client_keys"] is None
     assert calls["kwargs"]["agent_path"] is None
-    assert calls["kwargs"]["known_hosts"] is None
+    # Host-key verification stays on: nothing may inject known_hosts=None
+    # (which disables asyncssh's check) unless the caller asked for it.
+    assert "known_hosts" not in calls["kwargs"]
     assert calls["kwargs"]["username"] == "user"
     assert calls["kwargs"]["password"] == "pass"
     assert calls["sftp_version"] == 4
+
+
+def test_aconnect_passes_explicit_known_hosts_opt_out_through(monkeypatch):
+    import asyncio
+
+    calls = {}
+
+    class _FakeConn:
+        async def start_sftp_client(self, *, sftp_version):
+            return object()
+
+    async def _fake_connect(host, port, **kwargs):
+        calls["kwargs"] = kwargs
+        return _FakeConn()
+
+    monkeypatch.setattr(backend_mod._asyncssh, "connect", _fake_connect)
+    backend = backend_mod.AsyncsshSftpBackend({"known_hosts": None})
+    asyncio.run(
+        backend_mod._aconnect(
+            Source("sftp", None, "host", 22), connect_opts=backend.connect_opts
+        )
+    )
+    assert "known_hosts" in calls["kwargs"]
+    assert calls["kwargs"]["known_hosts"] is None
 
 
 class _FakeAsyncCopyFile:
@@ -545,9 +571,21 @@ def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
         recorded["target"] = target
         recorded["kwargs"] = kwargs
 
+    run_timeouts = []
+
+    def _fake_run(coro, timeout="unset"):
+        run_timeouts.append(timeout)
+        return asyncio.run(coro)
+
+    aclient = object()
     monkeypatch.setattr(backend_mod, "_concurrent_copy", _fake_concurrent_copy)
-    monkeypatch.setattr(backend_mod, "_run", lambda coro: asyncio.run(coro))
+    monkeypatch.setattr(backend_mod, "_run", _fake_run)
     monkeypatch.setattr(sftp_pkg.SftpPath, "is_dir", lambda self: True)
+    monkeypatch.setattr(
+        backend_mod.AsyncsshSftpBackend,
+        "client",
+        lambda self, source: SimpleNamespace(_aclient=aclient),
+    )
 
     src = sftp_pkg.SftpPath(
         "sftp://host/src", backend=backend_mod.AsyncsshSftpBackend(max_concurrency=5)
@@ -565,6 +603,10 @@ def test_sftppath_copy_recursive_uses_concurrent_helper(monkeypatch):
     assert recorded["path"] is src
     assert recorded["target"] is target
     assert recorded["kwargs"]["max_concurrency"] == 5
+    # The client was resolved on the calling thread, not inside the coroutine.
+    assert recorded["kwargs"]["aclient"] is aclient
+    # A whole-tree operation carries no wall-clock bound.
+    assert run_timeouts == [None]
 
 
 # --- concurrent remove tests ---------------------------------------------
@@ -763,8 +805,20 @@ def test_sftppath_rm_recursive_uses_concurrent_helper(monkeypatch):
         recorded["path"] = path
         recorded["kwargs"] = kwargs
 
+    run_timeouts = []
+
+    def _fake_run(coro, timeout="unset"):
+        run_timeouts.append(timeout)
+        return asyncio.run(coro)
+
+    aclient = object()
     monkeypatch.setattr(backend_mod, "_concurrent_rm", _fake_concurrent_rm)
-    monkeypatch.setattr(backend_mod, "_run", lambda coro: asyncio.run(coro))
+    monkeypatch.setattr(backend_mod, "_run", _fake_run)
+    monkeypatch.setattr(
+        backend_mod.AsyncsshSftpBackend,
+        "client",
+        lambda self, source: SimpleNamespace(_aclient=aclient),
+    )
 
     src = sftp_pkg.SftpPath(
         "sftp://host/src", backend=backend_mod.AsyncsshSftpBackend(max_concurrency=6)
@@ -775,6 +829,8 @@ def test_sftppath_rm_recursive_uses_concurrent_helper(monkeypatch):
     assert recorded["kwargs"]["max_concurrency"] == 6
     assert recorded["kwargs"]["missing_ok"] is True
     assert recorded["kwargs"]["on_error"](ValueError("ignored"), src) is True
+    assert recorded["kwargs"]["aclient"] is aclient
+    assert run_timeouts == [None]
 
 
 # --- default max_concurrency -------------------------------------------------

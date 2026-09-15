@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio as _asyncio
+import collections as _collections
+import concurrent.futures as _futures
 import errno as _errno
 import functools as _functools
 import io as _io
@@ -40,6 +42,9 @@ _loop_thread: "_thread.Thread | None" = None
 _loop_pid: "int | None" = None
 _loop_lock = _thread.Lock()
 
+#: Default wall-clock bound, in seconds, on one SFTP request (a stat, an
+#: open, a connect) run through `_run()`. Whole-tree operations and
+#: streaming file reads/writes are not bounded by it.
 _DEFAULT_TIMEOUT = 60.0
 
 
@@ -84,13 +89,50 @@ def _ensure_loop() -> "_asyncio.AbstractEventLoop":
         return loop
 
 
-def _run(coro, timeout: "float | None" = _DEFAULT_TIMEOUT):
-    # No timeout would block the calling thread forever on a half-dead TCP
-    # connection or a server that never responds -- a generous default
-    # beats an unconditional infinite wait.
+def _on_loop_thread() -> bool:
+    thread = _loop_thread
+    return thread is not None and thread is _thread.current_thread()
+
+
+_UNSET_TIMEOUT: _ty.Any = object()
+
+
+def _run(coro, timeout: "float | None" = _UNSET_TIMEOUT):
+    """Run `coro` on the bridge loop and block the calling thread for its
+    result.
+
+    `timeout` (default `_DEFAULT_TIMEOUT`, read at call time) is meant for a
+    single request -- without one, a half-dead TCP connection or a server
+    that never answers blocks the caller forever. Pass `None` for anything
+    whose duration grows with the data (tree operations, streaming
+    reads/writes). On timeout the coroutine is cancelled on the loop and the
+    builtin `TimeoutError` is raised on every Python version.
+
+    Raises `RuntimeError` immediately when called on the bridge-loop thread
+    itself (a sync `Path` method inside a coroutine or callback running
+    there): blocking would deadlock the loop the coroutine needs.
+    """
+    if timeout is _UNSET_TIMEOUT:
+        timeout = _DEFAULT_TIMEOUT
     loop = _ensure_loop()
+    if _on_loop_thread():
+        if _asyncio.iscoroutine(coro):
+            coro.close()
+        raise RuntimeError(
+            "synchronous SFTP call made on the asyncssh bridge-loop thread -- "
+            "it would deadlock the loop; await the asyncssh client directly "
+            "or run the call in a worker thread (asyncio.to_thread)"
+        )
     future = _asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout)
+    try:
+        return future.result(timeout)
+    except _futures.TimeoutError:
+        if not future.cancel() and future.done() and not future.cancelled():
+            # Finished between the timeout and the cancel: keep the result.
+            return future.result()
+        raise TimeoutError(
+            f"SFTP request did not complete within {timeout} seconds"
+        ) from None
 
 
 # --- error translation ---------------------------------------------------
@@ -231,28 +273,39 @@ class _SyncSftpFile(_io.RawIOBase):
     files are always binary -- a text-mode stream here would return `str`
     from every read and blow up every downstream `read_bytes()` caller."""
 
-    def __init__(self, afile: "_asyncssh.SFTPClientFile"):
+    def __init__(
+        self,
+        afile: "_asyncssh.SFTPClientFile",
+        timeout: "float | None" = _UNSET_TIMEOUT,
+    ):
         super().__init__()
         self._afile = afile
+        self._timeout = timeout
 
+    # read()/write() carry whole payloads (read_bytes() is one read(-1)), so
+    # their duration grows with the data: no wall-clock bound.
     @_reraise_sftp_errors
     def read(self, size: int = -1) -> bytes:
-        return _run(self._afile.read(size))
+        return _run(self._afile.read(size), None)
 
     @_reraise_sftp_errors
     def write(self, data: bytes) -> int:
-        return _run(self._afile.write(data))
+        return _run(self._afile.write(data), None)
 
     @_reraise_sftp_errors
     def seek(self, offset: int, whence: int = 0) -> int:
-        return _run(self._afile.seek(offset, whence))
+        return _run(self._afile.seek(offset, whence), self._timeout)
 
     def tell(self) -> int:
-        return _run(self._afile.tell())
+        return _run(self._afile.tell(), self._timeout)
 
     def close(self) -> None:
         if not self.closed:
-            _run(self._afile.close())
+            if _on_loop_thread():
+                # A finalizer can run here; closing must not block the loop.
+                _loop.create_task(self._afile.close())
+            else:
+                _run(self._afile.close(), self._timeout)
         super().close()
 
     def readable(self) -> bool:
@@ -282,24 +335,32 @@ class _SyncSftpClient:
     what makes everything above "just add one more mirrored method" rather
     than new plumbing in `SftpPath` itself."""
 
-    __slots__ = ("_aclient",)
+    __slots__ = ("_aclient", "_timeout")
 
-    def __init__(self, aclient: "_asyncssh.SFTPClient"):
+    def __init__(
+        self,
+        aclient: "_asyncssh.SFTPClient",
+        timeout: "float | None" = _UNSET_TIMEOUT,
+    ):
         self._aclient = aclient
+        self._timeout = timeout
+
+    def _run(self, coro):
+        return _run(coro, self._timeout)
 
     @_reraise_sftp_errors
     def stat(self, path: str) -> _StatAdapter:
-        return _StatAdapter(_run(self._aclient.stat(path)))
+        return _StatAdapter(self._run(self._aclient.stat(path)))
 
     @_reraise_sftp_errors
     def lstat(self, path: str) -> _StatAdapter:
-        return _StatAdapter(_run(self._aclient.lstat(path)))
+        return _StatAdapter(self._run(self._aclient.lstat(path)))
 
     @_reraise_sftp_errors
     def listdir_attr(self, path: str) -> "list[_StatAdapter]":
         # asyncssh has no listdir_attr() of its own -- readdir() returns
         # SFTPName(filename, longname, attrs), the same conceptual shape.
-        names = _run(self._aclient.readdir(path))
+        names = self._run(self._aclient.readdir(path))
         return [
             _StatAdapter(name.attrs, filename=name.filename)
             for name in names
@@ -313,8 +374,8 @@ class _SyncSftpClient:
         # asyncio.run_coroutine_threadsafe() rejects outright ("A coroutine
         # object is required"). Wrapping the `await` in a real `async def`
         # helper produces a genuine coroutine object that IS accepted.
-        afile = _run(_aopen(self._aclient, path, mode))
-        return _SyncSftpFile(afile)
+        afile = self._run(_aopen(self._aclient, path, mode))
+        return _SyncSftpFile(afile, self._timeout)
 
     @_reraise_sftp_errors
     def mkdir(self, path: str, mode: "int | None" = None) -> None:
@@ -323,11 +384,11 @@ class _SyncSftpClient:
             if mode is not None
             else _asyncssh.SFTPAttrs()
         )
-        _run(self._aclient.mkdir(path, attrs))
+        self._run(self._aclient.mkdir(path, attrs))
 
     @_reraise_sftp_errors
     def chmod(self, path: str, mode: int, *, follow_symlinks: bool = True) -> None:
-        _run(self._aclient.chmod(path, mode, follow_symlinks=follow_symlinks))
+        self._run(self._aclient.chmod(path, mode, follow_symlinks=follow_symlinks))
 
     @_reraise_sftp_errors
     def chown(
@@ -337,30 +398,30 @@ class _SyncSftpClient:
         # SFTPv3's paired UIDGID attribute -- both values always go on the
         # wire together, which is why SftpPath._chown() reads the current
         # owner for whichever field the caller left as "unchanged".
-        _run(self._aclient.chown(path, uid, gid, follow_symlinks=follow_symlinks))
+        self._run(self._aclient.chown(path, uid, gid, follow_symlinks=follow_symlinks))
 
     @_reraise_sftp_errors
     def remove(self, path: str) -> None:
-        _run(self._aclient.remove(path))
+        self._run(self._aclient.remove(path))
 
     @_reraise_sftp_errors
     def rmdir(self, path: str) -> None:
-        _run(self._aclient.rmdir(path))
+        self._run(self._aclient.rmdir(path))
 
     @_reraise_sftp_errors
     def rename(self, oldpath: str, newpath: str) -> None:
-        _run(self._aclient.rename(oldpath, newpath))
+        self._run(self._aclient.rename(oldpath, newpath))
 
     @_reraise_sftp_errors
     def symlink(self, source: str, dest: str) -> None:
         # asyncssh's docstring confirms it auto-corrects for OpenSSH's
         # well-known swapped wire argument order internally -- the natural
         # "create dest pointing at source" call is already correct as-is.
-        _run(self._aclient.symlink(source, dest))
+        self._run(self._aclient.symlink(source, dest))
 
     @_reraise_sftp_errors
     def readlink(self, path: str) -> str:
-        target = _run(self._aclient.readlink(path))
+        target = self._run(self._aclient.readlink(path))
         return target.decode() if isinstance(target, bytes) else target
 
     @_reraise_sftp_errors
@@ -371,7 +432,7 @@ class _SyncSftpClient:
         # _reraise_sftp_errors still maps whatever comes back to some
         # OSError subclass; SftpPath.hardlink_to() is responsible for the
         # NotImplementedError fallback policy, not this wrapper.
-        _run(self._aclient.link(source, dest))
+        self._run(self._aclient.link(source, dest))
 
 
 # --- connection cache --------------------------------------------------
@@ -381,12 +442,9 @@ class _SyncSftpClient:
 # SSHClientConnection + SFTPClient can serve concurrent calls from any
 # calling thread.
 #
-# Not `utils.LRU`: an evicted entry there is just discarded (`popitem`) and
-# left to GC. Tolerable for paramiko (its own GC closes the socket, worst
-# case a lingering thread) but an asyncssh connection GC'd off-loop emits
-# "unclosed connection"/loop warnings and leaks the server-side session
-# until TCP notices -- eviction here must actively close the connection on
-# the bridge loop instead.
+# Not `utils.LRU`: closing an evicted entry has to run on the bridge loop,
+# and concurrent misses on one key must wait for a single connection instead
+# of each opening (and orphaning) their own.
 
 
 class _ConnectionEntry(_ty.NamedTuple):
@@ -407,47 +465,87 @@ async def _aclose_entry(entry: "_ConnectionEntry") -> None:
         pass
 
 
+def _entry_is_alive(entry: "_ConnectionEntry") -> bool:
+    if entry.conn.is_closed():
+        return False
+    # The SFTP channel can close while the SSH connection stays up (server
+    # ChannelTimeout, sftp-server crash); asyncssh clears the handler's
+    # writer when it does.
+    handler = getattr(entry.client._aclient, "_handler", None)
+    return handler is None or getattr(handler, "_writer", True) is not None
+
+
+def _close_entries(entries: "_ty.Iterable[_ConnectionEntry]") -> None:
+    for entry in entries:
+        try:
+            _run(_aclose_entry(entry))
+        except Exception:
+            pass
+
+
 class _ConnectionCache:
-    __slots__ = ("_entries", "_order", "_lock", "maxsize")
+    __slots__ = ("_entries", "_pending", "_lock", "maxsize")
 
     def __init__(self, maxsize: int = 128):
-        self._entries: "dict[tuple, _ConnectionEntry]" = {}
-        self._order: "list[tuple]" = []
+        self._entries: "_collections.OrderedDict[tuple, _ConnectionEntry]" = (
+            _collections.OrderedDict()
+        )
+        self._pending: "dict[tuple, _futures.Future]" = {}
         self._lock = _thread.Lock()
         self.maxsize = maxsize
 
     def get_or_create(
         self, key, factory: "_ty.Callable[[], _ConnectionEntry]"
     ) -> _ConnectionEntry:
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                if not entry.conn.is_closed():
-                    self._order.remove(key)
-                    self._order.append(key)
-                    return entry
-                # stale -- fall through and recreate
-                self._entries.pop(key, None)
-                self._order.remove(key)
-        entry = factory()
-        evicted = None
+        while True:
+            stale = None
+            with self._lock:
+                entry = self._entries.get(key)
+                if entry is not None:
+                    if _entry_is_alive(entry):
+                        self._entries.move_to_end(key)
+                        return entry
+                    stale = self._entries.pop(key)
+                pending = self._pending.get(key)
+                owner = pending is None
+                if owner:
+                    pending = self._pending[key] = _futures.Future()
+            if stale is not None:
+                _close_entries([stale])
+            if owner:
+                break
+            # Another thread is connecting this key: share its connection
+            # (or its failure) instead of opening a second one.
+            pending.result()
+
+        try:
+            entry = factory()
+        except BaseException as error:
+            with self._lock:
+                self._pending.pop(key, None)
+            pending.set_exception(error)
+            raise
+        evicted = []
         with self._lock:
             self._entries[key] = entry
-            self._order.append(key)
-            if len(self._order) > self.maxsize:
-                evicted_key = self._order.pop(0)
-                evicted = self._entries.pop(evicted_key, None)
-        if evicted is not None:
-            _run(_aclose_entry(evicted))
+            self._pending.pop(key, None)
+            while len(self._entries) > self.maxsize:
+                evicted.append(self._entries.popitem(last=False)[1])
+        pending.set_result(None)
+        _close_entries(evicted)
         return entry
 
     def invalidate(self, key) -> None:
         with self._lock:
             entry = self._entries.pop(key, None)
-            if key in self._order:
-                self._order.remove(key)
         if entry is not None:
-            _run(_aclose_entry(entry))
+            _close_entries([entry])
+
+    def close_backend(self, backend) -> None:
+        with self._lock:
+            keys = [key for key in self._entries if key[0] is backend]
+            entries = [self._entries.pop(key) for key in keys]
+        _close_entries(entries)
 
     def reset(self) -> None:
         # Used only by _ensure_loop() on a detected PID change (fork()'d
@@ -456,7 +554,7 @@ class _ConnectionCache:
         # coroutine on).
         with self._lock:
             self._entries.clear()
-            self._order.clear()
+            self._pending.clear()
 
 
 _CACHE = _ConnectionCache()
@@ -466,9 +564,12 @@ async def _aconnect(
     source: "Source",
     connect_opts: "_ty.Mapping[str, _ty.Any] | None" = None,
     sftp_version: int = 4,
+    timeout: "float | None" = _UNSET_TIMEOUT,
 ) -> _ConnectionEntry:
     user, password = source.parsed_userinfo()
-    kwargs: "dict[str, _ty.Any]" = {"known_hosts": None}
+    # No `known_hosts` default: asyncssh then verifies the server key against
+    # ~/.ssh/known_hosts and the ssh_config's UserKnownHostsFile.
+    kwargs: "dict[str, _ty.Any]" = {}
     if connect_opts:
         kwargs.update(connect_opts)
     if user:
@@ -478,11 +579,15 @@ async def _aconnect(
     conn = await _asyncssh.connect(
         str(source.host), source.port or _netimps.get_default_port("sftp"), **kwargs
     )
-    # asyncssh currently supports SFTP protocol versions 3 and 4 here --
-    # request the configured maximum and let the server negotiate down
-    # (real-world OpenSSH still stays at v3).
-    aclient = await conn.start_sftp_client(sftp_version=sftp_version)
-    return _ConnectionEntry(conn, _SyncSftpClient(aclient))
+    try:
+        # asyncssh currently supports SFTP protocol versions 3 and 4 here --
+        # request the configured maximum and let the server negotiate down
+        # (real-world OpenSSH still stays at v3).
+        aclient = await conn.start_sftp_client(sftp_version=sftp_version)
+    except BaseException:
+        conn.close()
+        raise
+    return _ConnectionEntry(conn, _SyncSftpClient(aclient, timeout))
 
 
 class AsyncsshSftpBackend(BaseSftpBackend):
@@ -493,9 +598,26 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     `(self, source)` (see `_ConnectionCache` above) and served through a
     single shared background asyncio loop (see `_run` above) -- not
     fork-safe (a `fork()`ed child inherits a dead loop thread; detected via
-    stored PID, loop+cache lazily recreated when `os.getpid()` changes)."""
+    stored PID, loop+cache lazily recreated when `os.getpid()` changes).
+    `close()` closes every connection the backend opened.
 
-    __slots__ = ("connect_opts", "max_concurrency", "sftp_version")
+    Host keys are verified by default: asyncssh checks the server key
+    against `~/.ssh/known_hosts` and the ssh_config's `UserKnownHostsFile`,
+    and an unknown or changed key fails the connection. **Opt-out**, in code
+    only: `AsyncsshSftpBackend(connect_opts={"known_hosts": None})` accepts
+    any server key -- a network man-in-the-middle then receives the URI
+    password. Any other asyncssh `known_hosts` value (a file, a list of
+    keys) is passed through as given.
+
+    `timeout` (default `_DEFAULT_TIMEOUT`, 60 s) bounds a single request --
+    connect, stat, open, mkdir, rename, ... -- and a timed-out request is
+    cancelled and raises `TimeoutError`. Recursive `copy()`/`rm()` and
+    streaming file reads/writes (`read_bytes()`, `write_bytes()`, chunked
+    copies) have no wall-clock bound; asyncssh's own `connect_timeout`,
+    `login_timeout` and `keepalive_interval` connect options detect a dead
+    peer there. `timeout=None` disables the per-request bound too."""
+
+    __slots__ = ("connect_opts", "max_concurrency", "sftp_version", "timeout")
 
     #: asyncssh's chmod() takes follow_symlinks natively.
     supports_lchmod = True
@@ -523,6 +645,7 @@ class AsyncsshSftpBackend(BaseSftpBackend):
         max_concurrency: "int | None" = None,
         sftp_version: int = 4,
         ssh_config=_DEFAULT_SSH_CONFIG,
+        timeout: "float | None" = _DEFAULT_TIMEOUT,
     ):
         if max_concurrency is None:
             max_concurrency = self.DEFAULT_MAX_CONCURRENCY
@@ -534,6 +657,7 @@ class AsyncsshSftpBackend(BaseSftpBackend):
                 self.connect_opts["config"] = ssh_config
         self.max_concurrency = max_concurrency
         self.sftp_version = sftp_version
+        self.timeout = timeout
 
     def client(self, source: "Source") -> _SyncSftpClient:
         entry = _CACHE.get_or_create(
@@ -543,10 +667,16 @@ class AsyncsshSftpBackend(BaseSftpBackend):
                     source,
                     connect_opts=self.connect_opts,
                     sftp_version=self.sftp_version,
-                )
+                    timeout=self.timeout,
+                ),
+                self.timeout,
             ),
         )
         return entry.client
+
+    def close(self) -> None:
+        """Close every cached connection this backend opened."""
+        _CACHE.close_backend(self)
 
     @classmethod
     def default(cls, ssh_config=_DEFAULT_SSH_CONFIG) -> "AsyncsshSftpBackend":
@@ -561,10 +691,23 @@ async def _concurrent_copy(
     preserve_metadata: bool,
     max_concurrency: int,
     ignore_error,
+    aclient=None,
 ):
-    """Concurrent recursive child copies, bounded by max_concurrency."""
+    """Concurrent recursive child copies, bounded by max_concurrency.
+
+    `aclient` must be resolved on the calling thread (`SftpPath.copy` does):
+    looking it up here, on the bridge loop, would open the connection
+    through a blocking `_run()` on the loop thread itself.
+    """
     semaphore = _asyncio.Semaphore(max(1, max_concurrency))
-    aclient = path._sftpclient._aclient
+    # Separate from `semaphore`, which every request inside copy_file also
+    # takes: holding a slot of that one for a whole file deadlocks once
+    # max_concurrency files are open. This one caps files open at once
+    # (two remote handles each) instead of letting every queued task open
+    # its handles before the first file finishes.
+    file_semaphore = _asyncio.Semaphore(max(1, max_concurrency))
+    if aclient is None:
+        aclient = path._sftpclient._aclient
 
     async def sftp_call(make_awaitable):
         async with semaphore:
@@ -615,19 +758,20 @@ async def _concurrent_copy(
                 raise FileExistsError(dst)
             await unlink(dst)
 
-        src_file = await sftp_call(lambda: _aopen(aclient, src.path, "rb"))
-        try:
-            dst_file = await sftp_call(lambda: _aopen(aclient, dst.path, "wb"))
+        async with file_semaphore:
+            src_file = await sftp_call(lambda: _aopen(aclient, src.path, "rb"))
             try:
-                while True:
-                    chunk = await sftp_call(lambda: src_file.read(1024 * 1024))
-                    if not chunk:
-                        break
-                    await sftp_call(lambda chunk=chunk: dst_file.write(chunk))
+                dst_file = await sftp_call(lambda: _aopen(aclient, dst.path, "wb"))
+                try:
+                    while True:
+                        chunk = await sftp_call(lambda: src_file.read(1024 * 1024))
+                        if not chunk:
+                            break
+                        await sftp_call(lambda chunk=chunk: dst_file.write(chunk))
+                finally:
+                    await sftp_call(lambda: dst_file.close())
             finally:
-                await sftp_call(lambda: dst_file.close())
-        finally:
-            await sftp_call(lambda: src_file.close())
+                await sftp_call(lambda: src_file.close())
 
     async def copy_with_sync_fallback(src, dst):
         async with semaphore:
@@ -680,7 +824,9 @@ async def _concurrent_copy(
             results = await _asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception):
-                    ignore_error(result)
+                    # User code: off the loop thread, so it may call sync
+                    # Path methods (which _run() back onto this loop).
+                    await _asyncio.to_thread(ignore_error, result)
             return
 
         pending = set(tasks)
@@ -711,10 +857,22 @@ async def _concurrent_rm(
     max_concurrency: int,
     missing_ok: bool,
     on_error,
+    aclient=None,
 ):
-    """Native asyncssh recursive remove, bounded by max_concurrency."""
+    """Native asyncssh recursive remove, bounded by max_concurrency.
+
+    `aclient` must be resolved on the calling thread (`SftpPath.rm` does):
+    see `_concurrent_copy`. `on_error` runs in a worker thread, so it may
+    call sync `Path` methods.
+    """
     semaphore = _asyncio.Semaphore(max(1, max_concurrency))
-    aclient = path._sftpclient._aclient
+    if aclient is None:
+        aclient = path._sftpclient._aclient
+
+    async def handled(error, current) -> bool:
+        if on_error is None:
+            return False
+        return bool(await _asyncio.to_thread(on_error, error, current))
 
     async def sftp_call(make_awaitable):
         async with semaphore:
@@ -779,10 +937,10 @@ async def _concurrent_rm(
         except FileNotFoundError as error:
             if allow_missing:
                 return
-            if on_error is None or not on_error(error, current):
+            if not await handled(error, current):
                 raise
         except Exception as error:
-            if on_error is None or not on_error(error, current):
+            if not await handled(error, current):
                 raise
 
     await rm_one(path, allow_missing=missing_ok)
