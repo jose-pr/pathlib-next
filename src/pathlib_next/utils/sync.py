@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import enum as _enum
+import errno as _errno
 import logging as _logging
+import pathlib as _pathlib
 import typing as _ty
 
 from .. import utils as _utils
+from ..mempath import MemPath as _MemPath
 from ..path import Path
 from ..utils.stat import FileStat
 from . import checksum as _checksum
@@ -134,6 +137,51 @@ def _quick_check_in_sync(source: "PathAndStat", target: "PathAndStat") -> bool:
         source_stat.st_size == target_stat.st_size
         and source_stat.st_mtime == target_stat.st_mtime
     )
+
+
+def _child_name(path: Path) -> str:
+    # A directory child of a `UriPath` can end in "/", leaving `.name`
+    # empty; its last real component is then the parent's name.
+    return path.name or path.parent.name
+
+
+def _paths_overlap(source: Path, target: Path) -> bool:
+    """Whether `source` and `target` are the same tree or one contains the
+    other. Only decided for two paths of the same implementation: different
+    implementations (e.g. `LocalPath` vs `FileUri`) are never reported.
+    `MemPath` equality ignores the backend, so two trees on different
+    `MemPathBackend`s are not overlapping even with equal segments.
+    `LocalPath` is resolved first so a symlink cannot hide the overlap."""
+    if type(source) is not type(target):
+        return False
+    if isinstance(source, _MemPath) and source.backend is not target.backend:
+        return False
+    # Equal URIs reached through two distinct explicit backends (separate
+    # connections, or fakes standing in for two hosts) are not provably the
+    # same tree; only refuse what is.
+    source_backend = getattr(source, "_backend", None)
+    target_backend = getattr(target, "_backend", None)
+    if (
+        source_backend is not None
+        and target_backend is not None
+        and source_backend is not target_backend
+    ):
+        return False
+    if isinstance(source, _pathlib.Path):
+        resolved = []
+        for path in (source, target):
+            try:
+                path = path.resolve()
+            except (OSError, RuntimeError):
+                pass
+            # Python < 3.10 on Windows returns a relative path unchanged
+            # when no part of it exists.
+            resolved.append(path if path.is_absolute() else path.absolute())
+        source, target = resolved
+    try:
+        return target.is_relative_to(source) or source.is_relative_to(target)
+    except (TypeError, ValueError, NotImplementedError):
+        return False
 
 
 class SyncEvent(_enum.Enum):
@@ -354,6 +402,13 @@ class PathSyncer(object):
                         PathAndStat(child, follow_symlink=self.follow_symlinks)
                     )
                 else:
+                    # `None` means "stat unknown" (GitLab blobs, FTP's NLST
+                    # fallback), not "missing": ask the path itself before
+                    # remove_missing can treat the entry as gone.
+                    if stat is None:
+                        stat = FileStat.from_path(
+                            child, follow_symlink=self.follow_symlinks
+                        )
                     children.append(PathAndStat.from_stat(child, stat))
                 continue
 
@@ -386,13 +441,34 @@ class PathSyncer(object):
         constructor-supplied policy and was *called* directly by the symlink
         branch (`TypeError: 'bool' object is not callable`). Passing a
         callable explicitly behaves exactly as before.
+
+        The root call is checked before anything is touched: a `source`
+        that does not exist raises `FileNotFoundError` (only a child that
+        vanishes mid-sync takes the `remove_missing` path), and a `source`
+        and `target` of the same implementation where one contains the
+        other raise `ValueError`. Both go through `ignore_error`; a
+        tolerated error ends the call without changes. Child names that
+        would not stay a single component inside `target` (`..`, a
+        separator or drive on a Windows target) raise `ValueError` the
+        same way, and symlinks found inside `target` are replaced, never
+        written, listed or deleted through.
         """
-        checksum = self.checksum
         _ignore_error = (
             self.ignore_error
             if ignore_error is None
             else _utils.as_error_handler(ignore_error)
         )
+        return self._sync(source, target, dry_run, _ignore_error, True)
+
+    def _sync(
+        self,
+        source: Path | PathAndStat,
+        target: Path | PathAndStat,
+        dry_run: bool,
+        _ignore_error: _OnPathSyncerError,
+        root: bool,
+    ):
+        checksum = self.checksum
 
         def start():
             nonlocal source, target
@@ -401,14 +477,39 @@ class PathSyncer(object):
                 if not isinstance(source, PathAndStat)
                 else source
             )
+            # `follow_symlinks` describes the SOURCE traversal. Below the
+            # root, a target entry is always lstat'd so a link inside the
+            # destination is replaced rather than followed out of it. The
+            # root target is the one the caller named, and keeps the
+            # caller's setting.
             target = (
-                PathAndStat(target, follow_symlink=self.follow_symlinks)
+                PathAndStat(
+                    target, follow_symlink=self.follow_symlinks if root else False
+                )
                 if not isinstance(target, PathAndStat)
                 else target
             )
 
         if self.hook(source, target, SyncEvent.SyncStart, False, start, _ignore_error):
             return
+
+        if root:
+            error = None
+            if not source.exists():
+                # A typo, unmounted share or HTTP 404 must not read as "an
+                # empty source" and wipe the target under remove_missing.
+                error = FileNotFoundError(
+                    _errno.ENOENT, "sync source does not exist", str(source.path)
+                )
+            elif _paths_overlap(source.path, target.path):
+                error = ValueError(
+                    f"cannot sync {source.path} onto {target.path}: "
+                    "source and target overlap"
+                )
+            if error is not None:
+                if not _ignore_error(error, source, target, SyncEvent.SyncStart):
+                    raise error
+                return
 
         if not source.exists():
             if self.remove_missing:
@@ -519,7 +620,10 @@ class PathSyncer(object):
                 ):
                     return
         else:
-            if target.is_file():
+            # A symlink inside the destination is replaced by a real
+            # directory: listing, writing or removing through it would act
+            # on whatever it points at. unlink() removes only the link.
+            if target.is_file() or (target.is_symlink() and not root):
                 if self.hook(
                     source,
                     target,
@@ -544,6 +648,21 @@ class PathSyncer(object):
                     return
 
             source_children = None
+            windows_target = _utils.is_windows_flavoured(target.path)
+
+            def unsafe_name(name, source_entry, target_entry, event):
+                # Names come from a listing the destination does not
+                # control; one that is not a single component inside
+                # `target` ("..", or "\\"/":" on a Windows target) must
+                # never be joined onto it. Reported, not silently skipped.
+                if _utils.is_safe_child_name(name, windows=windows_target):
+                    return False
+                error = ValueError(
+                    f"refusing unsafe child name {name!r} under {target.path}"
+                )
+                if not _ignore_error(error, source_entry, target_entry, event):
+                    raise error
+                return True
 
             def get_source_children():
                 nonlocal source_children
@@ -558,6 +677,13 @@ class PathSyncer(object):
                     for child in self._children(target):
 
                         def checkchild():
+                            if unsafe_name(
+                                _child_name(child.path),
+                                source,
+                                child,
+                                SyncEvent.RemovedMissing,
+                            ):
+                                return
                             if child.path.name not in source_names:
                                 self.hook(
                                     source,
@@ -588,6 +714,9 @@ class PathSyncer(object):
 
             def sync_children():
                 for child in get_source_children():
+                    name = _child_name(child.path)
+                    if unsafe_name(name, child, target, SyncEvent.SyncChild):
+                        continue
                     self.hook(
                         source,
                         target,
@@ -596,11 +725,12 @@ class PathSyncer(object):
                         # Propagate the resolved policy into the recursive
                         # call so a per-call override applies to the whole
                         # subtree, not just this level.
-                        lambda child=child: self.sync(
+                        lambda child=child, name=name: self._sync(
                             child,
-                            target.path / (child.path.name or child.path.parent.name),
+                            target.path / name,
                             dry_run,
                             _ignore_error,
+                            False,
                         ),
                         _ignore_error,
                     )
