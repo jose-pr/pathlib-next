@@ -339,7 +339,28 @@ Built-in scheme modules live under `uri/schemes/` — see the table in the
 <https://github.com/jose-pr/pathlib-next>. `PATHLIB_NEXT_SFTP_BACKEND` env var (`"paramiko"` /
 `"asyncssh"` / `"auto"`, default `"auto"`) selects the `sftp:` backend;
 precedence is an explicit class attribute > this env var > auto-detect
-(prefers asyncssh if importable). `gs:` honors `STORAGE_EMULATOR_HOST` (set
+(prefers asyncssh if importable).
+
+Transport defaults (each overridable in code only, never by env var):
+`sftp:` verifies host keys on both backends — `SftpBackend(connect_opts=None,
+hostkeypolicy=None, ssh_config=..., *, known_hosts=<~/.ssh/known_hosts +
+ssh_config UserKnownHostsFile>, timeout=30.0)` (policy default
+`paramiko.RejectPolicy()`; opt-out `SftpBackend(opts, paramiko.AutoAddPolicy(),
+known_hosts=None)`), `AsyncsshSftpBackend(connect_opts=None, ..., timeout=60.0)`
+(opt-out `connect_opts={"known_hosts": None}`; `timeout` bounds single
+requests, not tree operations or transfers); both have `close()`. The paramiko
+backend expands ssh_config `Include` and raises `NotImplementedError` for
+`ProxyJump`. `http(s):`/`dav(s):`/`github:`/`gitlab:` send
+`timeout=(10, 60)` unless given one (`with_session(..., timeout=...)`,
+`RepoBackend(timeout=...)`); URL userinfo goes out as `auth=`, not in the
+request URL, and translated errors do not chain the `requests` exception.
+`github:`/`gitlab:`/`git:` take the token from the userinfo password slot
+(`x-access-token:TOKEN@host`) or a bare `TOKEN@host`, and redact the whole
+userinfo from `str()`/`repr()`/`as_uri(sanitize=True)`. `ftps:`
+(`FtpBackend(timeout=30.0, ssl_context=None, verify=True)`) verifies
+certificates by default and reuses the TLS session for data connections.
+`utils.LRU(func, maxsize=128, on_evict=None)` calls `on_evict(key, value)` for
+entries it drops (`discard(*args)` removes one). `gs:` honors `STORAGE_EMULATOR_HOST` (set
 into `os.environ` for the `google-cloud-storage` client, e.g. for a local
 emulator) when configured on the path/backend.
 

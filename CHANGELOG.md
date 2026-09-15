@@ -117,7 +117,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   in-memory filesystem**, and `move()` then deleted the source. A `str`
   destination now stays on the source's backend.
 
+- **`SftpPath.copy()` raised `ModuleNotFoundError` without asyncssh**
+  (paramiko-only `sftp` extra), including every single-file download and
+  `PathSyncer` with an SFTP source.
+- **SFTP connections leaked or went stale.** A first-call asyncssh
+  `rm(recursive=True)` hung for 60 s and deleted nothing; dropped paramiko
+  connections and closed asyncssh SFTP channels were never replaced, so every
+  later call failed and `exists()` returned `False`; evicted connections,
+  failed logins and failed SFTP starts leaked sockets and threads; concurrent
+  first calls opened duplicate connections; a recursive copy held two remote
+  handles open per file in the tree; `SftpPath(url, ssh_config=...)` ignored
+  `ssh_config`; the paramiko backend ignored ssh_config `Include`.
+- **`UriPath("ftps://...")` returned a stub `UriPath` in a fresh process**
+  instead of `FtpPath`.
+- **URL credentials leaked into HTTP errors and redirects.** They are now sent
+  as Basic `auth=` instead of inside the request URL, WebDAV `MOVE`
+  `Destination` no longer carries them, and translated errors no longer chain
+  the `requests` exception (`__cause__` is `None`; the message carries the
+  HTTP status and reason). URL credentials now take priority over a matching
+  `~/.netrc` entry.
+- **`github:`/`gitlab:` tokens leaked through `str()`/`repr()`/errors**, and
+  `user:TOKEN@host` authenticated with the username. The token is now read
+  from the password slot when present, and these schemes redact the whole
+  userinfo.
+
+### Changed
+- **SFTP host keys are verified by default on both backends.** Before, any
+  server key was accepted (asyncssh even overrode ssh_config pinning), so a
+  man-in-the-middle received the URI password. Now an unknown or changed key
+  fails before credentials are sent. paramiko uses `~/.ssh/known_hosts`,
+  ssh_config `UserKnownHostsFile` and `RejectPolicy`. **To keep the old
+  behaviour** add the host to `known_hosts`, or opt out explicitly:
+  `SftpBackend(connect_opts, paramiko.AutoAddPolicy(), known_hosts=None)` /
+  `AsyncsshSftpBackend(connect_opts={"known_hosts": None})`.
+- **`ftps:` verifies the server certificate and host name by default.**
+  Before, any certificate was accepted and the password sent to it. For a
+  private CA pass `FtpBackend(ssl_context=ssl.create_default_context(cafile=...))`;
+  `FtpBackend(verify=False)` disables verification. Data connections now reuse
+  the TLS session (vsftpd, FileZilla Server).
+- **Network operations have default timeouts.** HTTP/WebDAV/github/gitlab:
+  `(10, 60)` s connect/read (`with_session(..., timeout=...)`,
+  `RepoBackend(timeout=...)`); FTP: 30 s (`FtpBackend(timeout=...)`); paramiko
+  connect/banner/auth/channel-open: 30 s (`SftpBackend(..., timeout=...)`).
+  `timeout=None` restores the unbounded wait. Before, a stalled server hung
+  the caller forever.
+- **asyncssh timeouts apply to single requests only**
+  (`AsyncsshSftpBackend(timeout=...)`, default 60 s). Recursive
+  `copy()`/`rm()` and `read_bytes()`/`write_bytes()` no longer raise after
+  60 s while the work continued in the background. A timed-out request is
+  cancelled and raises the builtin `TimeoutError` on every Python version (on
+  3.9/3.10 it was `concurrent.futures.TimeoutError`).
+- **paramiko backend: ssh_config `ProxyJump` raises `NotImplementedError`.**
+  Before, it was ignored and the connection went direct. Use asyncssh, a
+  `ProxyCommand`, or `connect_opts["sock"]`.
+- **asyncssh `rm()`/`copy()` error callbacks run in a worker thread**, so they
+  may call ordinary path methods; a sync SFTP call made on the bridge-loop
+  thread raises `RuntimeError` instead of hanging.
+
 ### Added
+- `close()` on `SftpBackend`/`AsyncsshSftpBackend`; `FtpBackend(timeout=,
+  ssl_context=, verify=)`; `RepoBackend(timeout=)`; `utils.LRU(on_evict=...)`
+  and `LRU.discard()`.
 - `utils.is_safe_child_name(name, *, windows=False)` and
   `utils.is_windows_flavoured(path)`: check that an untrusted name stays a
   single component inside its parent before joining it onto a destination.

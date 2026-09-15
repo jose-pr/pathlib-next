@@ -26,7 +26,7 @@ Notes:
   subclass (Track A of [Extending](extending.md)), backed by nested dicts
   (`MemPathBackend`). No `as_uri()` scheme is registered for it; construct
   it directly via `MemPath(...)`.
-- **`http(s):`** supports writing via `PUT` (default, configurable to `POST` or other verbs via `with_session(..., write_method=...)`) and deleting via `DELETE` (where `rmdir()` checks empty status first). Directory listing parses Apache/nginx-style HTML indexes using a fast, zero-dependency parser. Append mode (`open("a")`) is supported via two strategies: the default "rewrite" mode (GET existing + PUT full body, safe on any server but non-atomic) and an opt-in "patch" mode using HTTP's `Content-Range` PATCH verb for real appends (see `with_session(..., append_mode="patch")`). Patch mode raises `PermissionError` if the server rejects it, never silently falls back to rewrite.
+- **`http(s):`** supports writing via `PUT` (default, configurable to `POST` or other verbs via `with_session(..., write_method=...)`) and deleting via `DELETE` (where `rmdir()` checks empty status first). Directory listing parses Apache/nginx-style HTML indexes using a fast, zero-dependency parser. Append mode (`open("a")`) is supported via two strategies: the default "rewrite" mode (GET existing + PUT full body, safe on any server but non-atomic) and an opt-in "patch" mode using HTTP's `Content-Range` PATCH verb for real appends (see `with_session(..., append_mode="patch")`). Patch mode raises `PermissionError` if the server rejects it, never silently falls back to rewrite. Requests time out after `(10, 60)` seconds (connect, read) unless `with_session(..., timeout=...)` says otherwise. Credentials in the URL (`http://user:pw@host/`) are sent as Basic `auth=`, never inside the request URL, so they do not appear in `Response.url` or error messages.
 - **`sftp:`** has the fullest capability set of the URI schemes (it's a
   real remote filesystem protocol), and is the one scheme with **two
   selectable backends**: paramiko (sync, the `sftp` extra) and asyncssh
@@ -47,7 +47,19 @@ Notes:
   `chmod(follow_symlinks=False)` work on the asyncssh backend only
   (paramiko's `SFTPClient` has no hard-link or `lchmod` equivalent at
   all -- both raise `NotImplementedError` immediately, no server round
-  trip). See `pathlib_next.uri.schemes.sftp`.
+  trip). **Host keys are verified by default** on both backends (paramiko:
+  `~/.ssh/known_hosts` plus ssh_config `UserKnownHostsFile`, with
+  `RejectPolicy`; asyncssh: its own `known_hosts`/ssh_config handling), so an
+  unknown or changed key fails before any password is sent. The opt-out is
+  explicit, in code: `SftpBackend(connect_opts, paramiko.AutoAddPolicy(),
+  known_hosts=None)` or `AsyncsshSftpBackend(connect_opts={"known_hosts":
+  None})`. paramiko connect/banner/auth timeouts default to 30 s
+  (`SftpBackend(..., timeout=...)`); asyncssh bounds single requests at 60 s
+  (`AsyncsshSftpBackend(timeout=...)`) while recursive `copy()`/`rm()` and
+  file transfers are not wall-clock bounded. Both backends have `close()`.
+  The paramiko backend expands ssh_config `Include` and refuses `ProxyJump`
+  (use asyncssh, a `ProxyCommand`, or `connect_opts["sock"]`). See
+  `pathlib_next.uri.schemes.sftp`.
 - **`data:`** (RFC 2397) has no server or connection at all -- the entire
   "file" content lives in the URI string itself
   (`data:[<mediatype>][;base64],<data>`). It's always a single file, never a
@@ -57,7 +69,11 @@ Notes:
   gives type/size/modify in one round trip -- and falls back to NLST/SIZE on
   servers that don't support it (that fallback path can't distinguish "file
   doesn't exist" from "is a directory" for `stat()`, since SIZE only works on
-  files).
+  files). `ftps:` verifies the server certificate and host name by default
+  and reuses the TLS session on data connections; pass
+  `FtpBackend(ssl_context=...)` for a private CA or `FtpBackend(verify=False)`
+  to disable verification. FTP sockets time out after 30 s by default
+  (`FtpBackend(timeout=...)`).
 - **`zip:`/`tar:`** address an entry *inside* an archive:
   `zip:<archive-uri>!/<inner-path>` (Java-style `!/` separator, as in JAR
   URLs / NIO `ZipFileSystem`). The `<archive-uri>` half is itself any
@@ -117,7 +133,10 @@ Notes:
   `gitlab.com`; any other host is treated as GitHub Enterprise (API at
   `https://{host}/api/v3`) or a self-hosted GitLab (`https://{host}/api/v4`).
   Auth: a bearer token via `RepoBackend(token=...)` or embedded as URI
-  userinfo (`github://TOKEN@github.com/owner/repo`). `GitHubPath` gets full
+  userinfo, either as the password (`github://x-access-token:TOKEN@github.com/owner/repo`)
+  or bare (`github://TOKEN@github.com/...`); these schemes redact the whole
+  userinfo from `str()`, `repr()` and error messages. Requests time out after
+  `(10, 60)` seconds by default (`RepoBackend(timeout=...)`). `GitHubPath` gets full
   listing metadata (type/size) from one contents-API call per directory and
   fetches file bodies via the `raw` media type (skips base64 and its ~1MB
   inline-content cap); `GitLabPath`'s tree API has no size field, so only
