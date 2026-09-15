@@ -215,8 +215,9 @@ pathlib_next`.
   is unchanged `shutil.copyfileobj` behavior).
 - **`checksum.NativeChecksum`** — `Protocol`. `checksum(algorithm="md5") ->
   str` (not implemented by default). Optional, backend-native file digest
-  (e.g. `SftpPath` against the OpenSSH `check-file@openssh.com` SFTP
-  extension) computed server-side instead of streaming content through
+  (e.g. `SftpPath` against a server implementing the filexfer draft's
+  `check-file-handle` extension; OpenSSH does not, and a refusal is cached
+  per connection) computed server-side instead of streaming content through
   `open("rb")`. Not mixed into the base `Path`/`Pathname` ABC — a plain
   `Path` has no `.checksum` attribute at all; a subclass opts in by mixing
   this protocol in and implementing the method. MUST raise
@@ -246,8 +247,10 @@ extra that depends on it).
   (right to left, stopping at the first absolute segment) — this is **not**
   RFC 3986 reference resolution, and `..` is never resolved during join (see
   `docs/divergences.md`). Properties: `source -> Source`, `path -> str`,
-  `query -> str`, `fragment -> str`, `parts -> (source, path, query,
-  fragment)`, `normalized_path` (posixpath-normalized `path`), `segments`,
+  `query -> str` (**as received, still percent-encoded**, and sent
+  unchanged; `Query(query).to_dict()`/`decode()` decode names and values),
+  `fragment -> str`, `parts -> (source, path, query, fragment)` (URI
+  components, not path segments — use `segments`), `normalized_path` (posixpath-normalized `path`), `segments`,
   `suffix`, `stem`, `parent`. Methods: `as_uri(sanitize=False)` (sanitize
   strips password from userinfo before formatting), `with_source(source)`,
   `with_segments(*segments)`, `with_path(path)`, `with_query(query)`,
@@ -457,7 +460,12 @@ Subclass one of these with your own `root` fixture to verify a custom
   deleted through. `hook`/`.log()`/subclassing
   `.log()` are the progress/logging seams; `SyncEvent` enum names the
   events fired (`SyncEvent.Symlink` covers symlink creation, replacement,
-  and the not-implemented/error path alike).
+  and the not-implemented/error path alike; `SyncEvent.Compare` reports a
+  failure while comparing a file pair; `SyncEvent.Skipped` fires for FIFOs,
+  sockets, devices and entries without a file type, which are never
+  synced). `ignore_error` is asked once per error, with the failing entry's
+  own paths; a changed file is written to a hidden temporary sibling and
+  renamed over the target where the target backend supports `rename()`.
   **`sync.PathAndStat`** — a `Path` + cached `stat()` (`None` if missing);
   `is_*` attribute access delegates to the cached stat, returning a
   false-returning callable when the path doesn't exist.

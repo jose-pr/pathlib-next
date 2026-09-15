@@ -189,7 +189,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   other `client_options`. Keyword arguments now go to `storage.Client`
   unchanged; for an emulator also pass `use_auth_w_custom_endpoint=False`.
 
+- **URI queries were corrupted on the wire.** They were percent-decoded at
+  parse time and re-encoded with `&`, `=` and `+` treated as safe, so a signed
+  URL's `sig=ab%2Bcd%3D%3D` reached the server as `ab+cd==` and an escaped `&`
+  split a value; `with_query(dict)` double-encoded. `Uri.query` is now kept as
+  received and sent unchanged (see Changed).
+- **A remote path joined with a relative `pathlib.Path` became a local
+  file.** `UriPath("sftp://h/srv/") / pathlib.Path("etc/x")` produced
+  `file:/srv/etc/x`, so reads and writes hit the local disk. A relative path
+  now joins like a `PurePath` and stays on the remote; only an absolute local
+  path becomes `file:`. `UriPath.joinpath()` picks the class from the scheme.
+- **URIs with non-UTF-8 percent-escapes** (`caf%E9.html`) raised
+  `UnicodeDecodeError`; they now construct and round-trip. `data:` payloads
+  are no longer dot-normalized or decoded twice, and binary payloads work.
+- **Windows `file:` URIs**: `file://localhost/C:/...` could not be printed,
+  hashed or compared; a `file://<host>/share` whose host is this machine
+  mapped to the current drive instead of a UNC path.
+- **Scheme registry**: a `UriPath` subclass defined after the first dispatch
+  was never found, and every unknown scheme rescanned entry points.
+- **`open()` modes**: `rt`/`wt` failed on every non-local backend and invalid
+  modes raised `NotImplementedError`; modes are now validated like the
+  built-in `open()` (`ValueError`). `open("r+")` on buffered backends (FTP,
+  S3, GCS, Azure, local zip members) returned a writable buffer whose writes
+  were discarded; writes are now uploaded on close (or `NotImplementedError`
+  where impossible).
+- **`copy()`**: `copy(recursive=True)` into its own subtree recursed without
+  limit; `copy(follow_symlinks=False)` copied the link target's content with
+  the link's 0o777 mode (it now recreates the link, as pathlib 3.14 does);
+  `overwrite=False` was decided by `exists()`, which reads a transient 503 as
+  "missing". Downstream classes mixing a concrete stdlib path with `Path` now
+  also get pathlib_next's `stat`/`chmod`/`glob`/`walk`/`_scandir`.
+- **`MemPath`**: `iterdir()` on a missing path raised `NotADirectoryError`;
+  files always reported `st_mtime=0`, so `PathSyncer` skipped same-size edits.
+- **Archives (`zip:`/`tar:`/`archive:`)**: children of the archive root were
+  named `/name` and matched no member, so `iterdir`/`glob`/recursive `copy`
+  from the root failed; tarballs with `./` members (`tar -C dir .`,
+  `shutil.make_archive`) were unreadable; adding a zip member rewrote the
+  central directory in place (a crash corrupted the archive); a cached handle
+  ignored changes by other writers and kept the file locked on Windows;
+  archive URIs did not round-trip names with `#`, `?` or `%`; concurrent tar
+  reads returned wrong bytes; stored member modes were ignored; `iterdir()` on
+  a file returned `[]`. `utils.make_archive()` now accepts any `Path` source,
+  writes the target only when complete and supports zip64;
+  `utils.unpack_archive()` accepts non-seekable streams and extracts tar links.
+- **HTTP/WebDAV**: gzip-encoded responses were returned compressed (and
+  rewrite-mode append re-uploaded them); a redirect made `stat()` report a
+  directory; listing hints fabricated sizes used as the patch-append offset;
+  mid-body read failures raised urllib3 exceptions; `DavPath` listed a
+  directory with a space in its name as its own child, treated a 207
+  Multi-Status with failed members as success, re-sent a failed PUT at garbage
+  collection and raised raw `requests.HTTPError`s; `with_session(headers=...)`
+  was replaced by internal headers.
+- **GitHub/GitLab**: GitLab listings stopped after 100 entries (and `stat()`
+  called later subdirectories missing); GitHub listings stopped at 1,000;
+  self-hosted API roots dropped the port; GitLab root `stat()` answered from
+  the URI shape without asking the server.
+- **`uripath` CLI**: `sync` compared sizes only, so same-size edits were never
+  copied; `--dry-run` printed nothing; `read`/`cp -` buffered whole objects.
+- **FTP**: every separately built path opened its own connection; an error
+  mid-transfer desynchronized the cached connection for good; a write whose
+  connection timed out while idle lost its data; without MLSD, directories
+  stat'ed as missing; MLSD mtimes were read as local time; permission errors
+  surfaced as `FileNotFoundError` and raw `ftplib` errors escaped.
+- **S3/GCS/Azure**: botocore `ClientError` escaped `exists()`/`walk()` and a
+  403 read as "missing"; GCS/Azure turned every exception (including a missing
+  SDK) into "does not exist", so `copy(overwrite=False)` could overwrite;
+  `iterdir()` on a missing path returned `[]` and `rmdir()`/`unlink()` accepted
+  wrong-type targets; a failed upload was retried at garbage collection over
+  newer data; prefix-directory `move()` failed; S3 objects above 5 GiB could
+  not be written or renamed; `open("x")` was a check-then-put race;
+  `AzPath` without `backend=` ignored the URI's account; Azure recursive `rm()`
+  stopped at the first failing blob in a batch.
+- **`PathSyncer`**: an interrupted copy lost the previous version (it now
+  writes a temporary sibling and renames); preserve mode deleted the target
+  before discovering symlinks were unsupported; dry runs crashed on new
+  subdirectories; `RemovedMissing` events carried the parent directory;
+  `ignore_error` was called once per ancestor with the wrong paths; two
+  unknown (0) mtimes counted as "in sync"; FIFOs and devices replaced the
+  target with an empty directory.
+- **SFTP**: `rename()` onto an existing file failed with a bare
+  `OSError("Failure")`; `unlink(missing_ok=True)` skipped dangling symlinks;
+  a relative `readlink()` result could not be printed; asyncssh file handles
+  made one round trip per byte in `readline()` and an unclosed handle hung
+  interpreter exit for 60 s; the asyncssh recursive copy called a bool
+  `ignore_error` and ignored the own-subtree and symlink rules; paramiko's
+  native checksum probed an extension OpenSSH does not implement, paying extra
+  round trips per file.
+
 ### Changed
+- **`Uri.query` is the percent-encoded query as received** and is sent
+  unchanged; `Query(...).decode()`/`to_dict()` decode each name and value
+  once. A `str` passed to `with_query()` is taken as already encoded; a
+  mapping's keys now escape `=`. Code that read `.query` expecting decoded
+  text must decode it.
+- **Archive paths raise pathlib's POSIX exception types** (`iterdir()` on a
+  file, reading or `unlink()`ing a directory, `rmdir()` on a file), and
+  `mkdir()`/new zip members need an existing parent. Zip `rename()` returns the
+  new path. Archive `as_uri()` percent-encodes the member path.
+- **`uripath sync` compares file content by default**; `--size-only` restores
+  the old comparison. `--dry-run` prints planned changes and `-v/--verbose`
+  prints changes made.
+- **`gitlab:` reads a `-` segment at position 3 or later as GitLab's `/-/`
+  separator** (`gitlab://host/group/sub/project/-/path`).
+- **`SftpPath.rename()` replaces an existing target** where the server
+  supports `posix-rename@openssh.com`, else raises `FileExistsError`.
+- **`DavPath` maps request errors to pathlib exceptions** (PUT/MOVE into a
+  missing parent: `FileNotFoundError`; 423: `PermissionError`).
 - **`Path.glob()`/`rglob()`/`LocalPath.glob()` include hidden files and
   directories by default**, as pathlib does. Pass `include_hidden=False` for
   the old results. `glob("")` now raises `ValueError` and an absolute pattern
@@ -228,6 +333,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   thread raises `RuntimeError` instead of hanging.
 
 ### Added
+- `SyncEvent.Compare` and `SyncEvent.Skipped`; `uripath sync --size-only` and
+  `-v/--verbose`.
 - `glob.parse_pattern()`, `glob.select()`, `glob.NonRelativePatternError`;
   `recurse_symlinks=False` on `glob()`/`rglob()`; `FileStat.mode_known`.
 - `close()` on `SftpBackend`/`AsyncsshSftpBackend`; `FtpBackend(timeout=,

@@ -206,8 +206,8 @@ Legend: `p` = `paramiko`, `a` = `asyncssh`.
   timing run.** The bytes-transferred claim for this feature is structural,
   not something wall-clock benchmarking would usefully confirm: when
   `PathSyncer`'s default policy can use both sides' native digest (e.g.
-  `SftpPath` against an OpenSSH server's `check-file@openssh.com`
-  extension), a file comparison transfers **zero content bytes** for a
+  `SftpPath` against a server implementing the filexfer draft's
+  `check-file-handle` extension; OpenSSH does not), a file comparison transfers **zero content bytes** for a
   match-or-mismatch verdict, versus the streaming fallback's full read on
   *both* sides (`2 * file_size` for an unchanged file that still needs
   comparing). This project's own SFTP test server (asyncssh's `SFTPServer`,
