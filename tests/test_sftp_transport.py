@@ -633,7 +633,13 @@ def test_paramiko_failed_login_closes_the_connection(server_root, home, backends
     try:
 
         def _transports():
-            return sum(isinstance(t, paramiko.Transport) for t in threading.enumerate())
+            # The transport threads themselves, not a count: another test's
+            # connection may still be shutting down, and comparing totals
+            # then fails on whichever side wins the race (measured on the
+            # macOS 3.9 runner, on a commit whose earlier run was green).
+            return {
+                t for t in threading.enumerate() if isinstance(t, paramiko.Transport)
+            }
 
         before = _transports()
         backend = _paramiko_backend(
@@ -644,7 +650,8 @@ def test_paramiko_failed_login_closes_the_connection(server_root, home, backends
                 SftpPath(srv.url("hello.txt"), backend=backend).read_text()
         assert srv.accepted == 3
         assert _wait_until(lambda: not srv.live)
-        assert _wait_until(lambda: _transports() == before)
+        # Every transport this test opened is gone; older ones are not ours.
+        assert _wait_until(lambda: not (_transports() - before), timeout=30)
     finally:
         srv.stop()
 
