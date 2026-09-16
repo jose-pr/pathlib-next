@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Writing over an archive member spelled `./f.txt` appended a second
+  entry instead of rewriting it**, and `unlink()` then deleted that second
+  entry and reported success while the original content came back. 0.9.5
+  handed the normalized name to a backend keyed on the raw one; writes now
+  address the entry the archive really holds.
+- **Renaming a directory in such an archive silently did nothing**, or
+  split it in two when its members were spelled inconsistently, while
+  `rename()` returned the new path as though it had worked. The backend now
+  receives the exact raw-name mapping instead of a normalized prefix.
+- **Every archive operation rebuilt the member index**, so a listing, stat,
+  read or write on a 20k-member archive scanned all 20k names: measured
+  10x-224x slower than 0.9.4. The index is cached per open handle and
+  dropped whenever the handle is, which every mutation and every external
+  change already go through.
+- **`glob(None)` ignored `native=`, never auto-detected `**`, and answered
+  differently from `rglob(None)`** for the same path, because that branch
+  bypassed the pattern parser: `LocalPath("/x/**/*.py").glob(None)` returned
+  a shallow subset with no error. `native=False` also left the trailing-`**`
+  rule following the interpreter, so it did not deliver the one-answer
+  promise it documents; it now pins that rule too.
+- **`/` mangled a `data:` payload** (`data:,a/../b` joined to `data:b/x`,
+  not a data URI at all), dropped a scheme's own child handling (`gitlab:`'s
+  reserved `-`), still parsed a `bytes` name as URI syntax, and lost
+  per-instance scheme state such as `SftpPath`'s `ssh_config`. Joins now
+  walk segments through the same builder a listing uses.
+- **A relative `str` destination whose first segment merely contained a
+  colon** (`notes:draft`, `Fedora-42:latest.tar`) was read as a URI scheme
+  by `copy()`/`move()`; the scheme must now be one a class registers, as
+  the `uripath` CLI already required. A Windows drive path (`C:/Temp/x`)
+  restarts the join for a `file:` path, as `PureWindowsPath` does.
+- **`rename()` and `copy()`/`move()` resolved a relative `str` differently**
+  (`rename("../b")` sent a literal `sub/../b`, a different key on an object
+  store); both now resolve it the same way. A same-endpoint URI destination
+  reuses the configured connection instead of opening a second, bare one.
+
 ### Changed
 - **`UriPath / "name"` and `joinpath()` read a `str` as a decoded path**,
   not as URI syntax. `base / "cache?v=2"` is now the file `cache?v=2`

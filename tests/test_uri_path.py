@@ -287,3 +287,73 @@ def test_str_destination_reuses_the_backend_of_the_same_endpoint():
     requests = pytest.importorskip("requests")
     base = UriPath("http://h/api/a.txt").with_session(requests.Session())
     assert base._coerce_target("b.txt").backend is base.backend
+
+
+# --- join review findings (2026-09-16) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "base,joined",
+    [("data:,a/./b", "data:,a/./b/x"), ("data:,a/../b", "data:,a/../b/x")],
+)
+def test_join_never_normalizes_a_data_payload(base, joined):
+    """An RFC 2397 payload is an opaque octet string -- `_parse_uri` says so
+    and skips dot-segment removal for `data:`. Normalizing the joined result
+    ate the `,` that separates the payload, producing `data:b/x`, which is
+    not a data URI at all."""
+    assert str(UriPath(base) / "x") == joined
+
+
+def test_join_uses_the_same_child_builder_as_a_listing():
+    """`/` walks segments through `_make_child_relpath()`, so a scheme that
+    gives a name special meaning sees it. `gitlab:` reserves "-": built by
+    hand the child used to address the repository root instead of the
+    directory the listing yields."""
+    gitlab = pytest.importorskip("pathlib_next.uri.schemes.gitlab")
+    repo = gitlab.GitLabPath("gitlab://gitlab.com/owner/repo")
+    assert (repo / "-").path == repo._make_child_relpath("-").path
+
+
+def test_join_reads_bytes_as_a_decoded_path_too():
+    """`bytes` was the one plain-name form still going through the parser."""
+    base = UriPath("sftp://host/mnt")
+    assert (base / b"cache?v=2").path == (base / "cache?v=2").path == "/mnt/cache?v=2"
+
+
+@pytest.mark.parametrize(
+    "value,is_uri",
+    [
+        ("s3://bucket/key", True),
+        ("data:,abc", True),
+        ("file:/x", True),
+        # A relative name whose first segment merely contains a colon.
+        ("notes:draft", False),
+        ("Fedora-42:latest.tar", False),
+        ("12:30.txt", False),
+        ("C:/Temp", False),  # a drive, not a one-letter scheme
+    ],
+)
+def test_a_str_destination_is_only_a_uri_for_a_registered_scheme(value, is_uri):
+    from pathlib_next.uri import _looks_like_uri
+
+    assert _looks_like_uri(value) is is_uri
+
+
+def test_rename_and_copy_resolve_a_relative_str_the_same_way():
+    """They disagreed on `..`: rename sent the literal `sub/../b.txt`, which
+    an object store reads as a different key than the `/mnt/b.txt` move()
+    writes."""
+    src = UriPath("sftp://user@host/mnt/sub/a.txt")
+    for target in ("b.txt", "../b.txt", "./b.txt"):
+        assert src._rename_target(target).path == src._coerce_target(target).path
+
+
+def test_a_same_endpoint_uri_destination_keeps_the_configured_backend():
+    """`copy("http://same-host/...")` opened a second, unauthenticated
+    session against the host the caller had just authenticated to."""
+    requests = pytest.importorskip("requests")
+    base = UriPath("http://trusted.invalid/api/a.txt").with_session(requests.Session())
+    assert (
+        base._coerce_target("http://trusted.invalid/api/b.txt").backend is base.backend
+    )
+    assert base._coerce_target("http://other.invalid/b.txt").backend is not base.backend

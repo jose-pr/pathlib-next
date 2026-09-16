@@ -151,9 +151,10 @@ def glob(
     *,
     dironly: bool = False,
     root_dir: _Globable | None = None,
-    recursive: bool = False,
+    recursive: bool | None = False,
     include_hidden: bool = False,
     case_sensitive: bool | None = None,
+    native: bool = True,
 ) -> _ty.Iterable[_Globable]:
     """Return an iterator which yields the paths matching a pathname pattern.
 
@@ -164,12 +165,26 @@ def glob(
     by "**" unless `include_hidden` is true.
 
     If recursive is true, the pattern '**' will match any files and
-    zero or more directories and subdirectories.
+    zero or more directories and subdirectories. `recursive=None` decides
+    from the pattern itself, as `Path.glob()` does: a "**" component enables
+    it. `native=` follows the running interpreter's rules, or applies one
+    rule on every version -- see `parse_pattern()`.
     """
     segments = list(path.segments)
     if len(segments) > 1 and segments[-1] == "":
         segments.pop()
-        dironly = True
+        if native and not _TRAILING_SLASH_SELECTS_DIRS:
+            pass  # pathlib ignores a trailing separator before 3.11
+        else:
+            dironly = True
+    if recursive is None:
+        recursive = RECURSIVE in segments
+    if native and not _PARTIAL_DOUBLESTAR_ALLOWED:
+        for segment in segments:
+            if RECURSIVE in segment and segment != RECURSIVE:
+                raise ValueError(
+                    "Invalid pattern: '**' can only be an entire path component"
+                )
     first_wildcard = next(
         (i for i, seg in enumerate(segments) if WILDCARD_PATTERN.search(seg)),
         max(len(segments) - 1, 0),
@@ -189,6 +204,7 @@ def glob(
         recursive=recursive,
         include_hidden=include_hidden,
         case_sensitive=case_sensitive,
+        native=native,
     )
 
 
@@ -200,6 +216,7 @@ def select(
     recursive: bool = True,
     include_hidden: bool = True,
     case_sensitive: bool | None = None,
+    native: bool = True,
 ) -> _ty.Iterator[_Globable]:
     """Yield the paths under `base` matching the pattern components `parts`
     (see `parse_pattern()`); the engine behind `Path.glob()`.
@@ -208,7 +225,9 @@ def select(
     missing or non-directory path selects nothing. "**" (when `recursive`)
     decides recursion from the listing's non-following stat, so it never
     descends into a directory symlink and always terminates. A trailing "**"
-    also selects files on Python 3.13+, directories only before.
+    also selects files on Python 3.13+ and directories only before, which is
+    the third rule `native=False` pins: it then selects files on every
+    version (3.13's rule, the one current pathlib applies).
     """
     default_case = getattr(base, "_is_case_sensitive", True)
     if case_sensitive is None:
@@ -223,7 +242,11 @@ def select(
             steps.append((part, compile_pattern(part, case_sensitive)))
         else:
             steps.append((part, False))
-    opts = _Options(dironly, include_hidden)
+    opts = _Options(
+        dironly,
+        include_hidden,
+        _DOUBLESTAR_SELECTS_FILES if native else True,
+    )
     selected = _select(base, steps, 0, opts, None)
     if sum(1 for _, kind in steps if kind is None) < 2:
         yield from selected
@@ -239,6 +262,7 @@ def select(
 class _Options(_ty.NamedTuple):
     dironly: bool
     include_hidden: bool
+    doublestar_selects_files: bool = _DOUBLESTAR_SELECTS_FILES
 
 
 def _select(
@@ -255,7 +279,7 @@ def _select(
         if is_dir is None and not path.is_dir():
             return
         if last:
-            with_files = _DOUBLESTAR_SELECTS_FILES and not opts.dironly
+            with_files = opts.doublestar_selects_files and not opts.dironly
             yield from _recurse(path, opts.include_hidden, with_files)
             return
         for directory in _recurse(path, opts.include_hidden, False):

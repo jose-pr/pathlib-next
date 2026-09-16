@@ -339,35 +339,69 @@ class Uri(Pathname):
             _NOSOURCE, _remove_dot_segments(path), None, None, **kwargs
         )
 
-    def _joined(self, result: "Uri") -> "Uri":
-        """`result` with its path's dot segments removed.
+    def _is_absolute_decoded(self, path: str) -> bool:
+        """Whether a decoded path string restarts the join. A leading "/"
+        does; `FileUri` also accepts a Windows drive ("C:/x")."""
+        return path.startswith("/")
 
-        The join concatenates, so a leading ".." survives it ("/mnt" /
-        "../up.txt" -> "/mnt/../up.txt") while an interior one was already
-        resolved by `_from_decoded_path`. Normalizing the result keeps one
-        rule -- the RFC 3986 one this type documents -- instead of two that
-        depend on where the ".." sat.
+    def _join_decoded(self, key: str) -> "Uri":
+        """Join `key` as an already-decoded path, one segment at a time.
+
+        Each segment goes through `_make_child_relpath()` -- what
+        `iterdir()` uses -- so a hand-typed name and a listed one are built
+        by the same code, including in schemes that give a name special
+        meaning (`gitlab:`'s "-"). `.` is skipped, `..` takes the parent
+        (RFC 3986 dot-segment removal, which this type documents), and an
+        absolute key restarts from the root of this same source.
+
+        A `data:` payload is an opaque octet string, so it never gets
+        segment treatment: the key is appended verbatim, exactly as
+        `_parse_uri` declines to normalize it.
         """
-        path = _remove_dot_segments(result.path)
-        if path == result.path:
-            return result
-        source, _, query, fragment = result.parts
-        joined = result._from_parsed_parts(source, path, query, fragment)
-        backend = getattr(result, "_backend", None)
-        if backend is not None:
-            joined = joined.with_backend(backend)
-        return joined
+        if not key:
+            return self
+        if self.source.scheme == "data":
+            path = self.path
+            if path and not path.endswith("/"):
+                path += "/"
+            return self._from_parsed_parts(
+                self.source, path + key, self.query, self.fragment
+            )
+        result = self
+        if self._is_absolute_decoded(key):
+            result = self.with_path("/")
+            backend = getattr(self, "_backend", None)
+            if backend is not None:
+                result = result.with_backend(backend)
+        for segment in key.split("/"):
+            if segment in ("", "."):
+                continue
+            if segment == "..":
+                result = result.parent
+                continue
+            result = result._make_child_relpath(segment)
+        if key.endswith("/") and not result.path.endswith("/"):
+            # A trailing "/" is load-bearing: for http/dav it is how a
+            # directory URL is spelled, and `name`/`parent` are documented
+            # to keep it (see docs/divergences.md).
+            backend = getattr(result, "_backend", None)
+            result = result.with_path(result.path + "/")
+            if backend is not None:
+                result = result.with_backend(backend)
+        return result
 
     def _join_arg(self, arg):
-        """A join argument, with a `str` read as an already-decoded path.
+        """A join argument, with a `str`/`bytes` read as an already-decoded
+        path rather than URI syntax.
 
         `/` and `joinpath()` name a child the way `iterdir()` does, so a
-        name containing `?`, `#`, `%` or a leading `C:` joins verbatim
-        instead of being re-read as URI syntax (see `_from_decoded_path`).
-        A `Uri` argument keeps full URI semantics -- that is how a caller
-        asks for a scheme-aware join, e.g. `base / Uri("s3://bucket/key")`.
+        name containing `?`, `#`, `%` or a leading `C:` joins verbatim. A
+        `Uri` argument keeps full URI semantics -- that is how a caller asks
+        for a scheme-aware join, e.g. `base / Uri("s3://bucket/key")`.
         """
-        return Uri()._from_decoded_path(arg) if isinstance(arg, str) else arg
+        if isinstance(arg, bytes):
+            arg = arg.decode()
+        return arg
 
     def _rename_target(self, target: UriLike) -> "Uri":
         """Normalize a `rename()`/`replace()` destination to a `Uri`.
@@ -385,10 +419,16 @@ class Uri(Pathname):
             result = target
         else:
             if isinstance(target, str):
-                target = self._from_decoded_path(target)
-            # target is a Uri by now, so this join re-uses `_load_parts`'
-            # existing right-to-left semantics without re-parsing anything.
-            result = Uri(self.parent, target)
+                # The same join `copy()`/`move()` use for a path destination,
+                # so one argument names one place for all three: dot
+                # segments resolve here too, instead of `rename("../b")`
+                # sending a literal "sub/../b" that an object store reads as
+                # a different key than the one `move()` writes.
+                result = self.parent._join_decoded(target)
+            else:
+                # target is a Uri by now, so this join re-uses `_load_parts`'
+                # existing right-to-left semantics without re-parsing it.
+                result = Uri(self.parent, target)
         if not self._same_location(result):
             # Every scheme renames over its own connection or bucket using
             # only `target.path`, so a target elsewhere (another host, bucket,
@@ -532,8 +572,6 @@ class Uri(Pathname):
         return self._fragment
 
     def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
-        cls = type(self)
-        inst = cls.__new__(cls)
         # Ensure exactly one "/" joins path and name -- a directory's own
         # path conventionally carries a trailing "/" for some schemes
         # (http/dav listings, or any Uri explicitly constructed that way);
@@ -541,15 +579,17 @@ class Uri(Pathname):
         # doubled the slash (e.g. path="/" + name "sub" => "//sub").
         path = self.path
         if not path:
-            # An empty path with an authority present is the same root as
-            # "/" (RFC 3986: "http://host" and "http://host/" are
-            # equivalent) -- treat it the same way so a child gets
-            # "/name", not a bare, schemeless-looking "name".
-            new_path = f"/{name}" if self.source else name
+            # An empty path with an AUTHORITY is the same root as "/" (RFC
+            # 3986: "http://host" and "http://host/" are equivalent), so a
+            # child gets "/name". Without one ("file:", "data:") the path is
+            # relative and stays that way: "file:" / "test" is "file:test".
+            new_path = f"/{name}" if self._has_authority() else name
         else:
             new_path = (path if path.endswith("/") else f"{path}/") + name
-        inst._init(self.source, new_path, "", "", **kwargs)
-        return inst
+        # Through `_from_parsed_parts`, so a scheme that carries per-instance
+        # state rebuilds it (`SftpPath._ssh_config`); building the instance
+        # directly dropped it, and `/` now walks segments through here.
+        return self._from_parsed_parts(self.source, new_path, "", "", **kwargs)
 
     def with_source(self, source: Source):
         """Return a new URI with the source replaced."""
@@ -729,13 +769,24 @@ class Uri(Pathname):
         """`uri / "name"`. A `str` is a decoded path segment, never URI
         syntax: "a?b.txt" is a filename, not a query (`Uri._join_arg`)."""
         try:
-            return self._joined(type(self)(self, self._join_arg(key)))
+            key = self._join_arg(key)
+            if isinstance(key, str):
+                return self._join_decoded(key)
+            return type(self)(self, key)
         except (TypeError, NotImplementedError):
             return NotImplemented
 
     def joinpath(self, *args):
         """Combine this URI with segments; a `str` is a decoded path."""
-        return self._joined(type(self)(self, *(self._join_arg(arg) for arg in args)))
+        result = self
+        for arg in args:
+            arg = result._join_arg(arg)
+            result = (
+                result._join_decoded(arg)
+                if isinstance(arg, str)
+                else type(result)(result, arg)
+            )
+        return result
 
     def __rtruediv__(self, key: str):
         """`"prefix" / uri`. The str is a decoded path joined in front of
@@ -762,14 +813,26 @@ class Uri(Pathname):
 def _looks_like_uri(value: str) -> bool:
     """Whether a destination string is URI syntax rather than a path.
 
-    Needs an RFC 3986 scheme of at least two characters (a one-letter one is
-    a Windows drive: `C:/Temp`), or an explicit `://`. Mirrors the rule
+    Needs an RFC 3986 scheme prefix; without `://` the scheme must also be
+    one a class registers, so an ordinary relative name whose first segment
+    happens to carry a colon (`notes:draft`, `Fedora-42:latest.tar`) stays a
+    path. A one-letter scheme is a Windows drive (`C:/Temp`). Same rule
     `pathlib_next.tools.uripath` applies to command-line arguments.
     """
     match = _URI_SCHEME_RE.match(value)
     if match is None:
         return False
-    return match.end() > 2 or "://" in value
+    if match.end() == 2:  # "C:" -- a drive, not a scheme
+        return False
+    if "://" in value:
+        return True
+    scheme = value[: match.end() - 1].lower()
+    try:
+        return Source(scheme, None, None, None).get_scheme_cls() is not UriPath
+    except Exception:
+        # A scheme plugin that fails to load: treat it as a URI, as the
+        # scheme lookup would have.
+        return True
 
 
 class UriPath(Uri, Path):
@@ -973,7 +1036,13 @@ class UriPath(Uri, Path):
         is a path (the same rule the `uripath` CLI applies).
         """
         if _looks_like_uri(target):
-            return type(self)(target, findclass=True)
+            destination = type(self)(target, findclass=True)
+            backend = getattr(self, "_backend", None)
+            if backend is not None and _same_authority(self.source, destination.source):
+                # Same endpoint: reuse the connection (and whatever auth was
+                # configured on it) rather than opening a second, bare one.
+                destination = destination.with_backend(backend)
+            return destination
         # `/` joins a decoded path on this endpoint and carries the backend.
         return self.parent / target
 
@@ -994,9 +1063,10 @@ class UriPath(Uri, Path):
         # Only converting `key` decides NotImplemented. Catching TypeError
         # around the whole construction turned a bug inside a scheme's
         # __new__/_init into "unsupported operand type(s) for /".
+        key = self._join_arg(key)
         if isinstance(key, str):
-            # A decoded path, not URI syntax (see `Uri._join_arg`).
-            return self._joined(type(self)(self, self._join_arg(key), findclass=True))
+            # A decoded path, not URI syntax (see `Uri._join_decoded`).
+            return self._join_decoded(key)
         converted = Uri.__new__(Uri)
         try:
             converted.__init__(key)
@@ -1016,9 +1086,15 @@ class UriPath(Uri, Path):
 
         Each `str` argument is an already-decoded path (see
         `Uri._join_arg`); pass a `Uri` for a scheme-aware join."""
-        return self._joined(
-            type(self)(self, *(self._join_arg(arg) for arg in args), findclass=True)
-        )
+        result = self
+        for arg in args:
+            arg = result._join_arg(arg)
+            result = (
+                result._join_decoded(arg)
+                if isinstance(arg, str)
+                else type(result)(result, arg, findclass=True)
+            )
+        return result
 
     def with_source(self, source: Source):
         cls = type(self)

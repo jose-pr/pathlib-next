@@ -728,7 +728,13 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         `pattern=None` expands the pattern THIS PATH CARRIES
         (`LocalPath("/etc/*.conf").glob(None)`) instead of applying one to a
         directory: the path is split at its first wildcard and globbed from
-        there (`utils.glob.glob()`). `""` still raises, as pathlib does.
+        there. `""` still raises, as pathlib does. Every keyword means what
+        it does for a pattern argument -- `recursive=None` auto-enables
+        recursion for a carried "**", and `native=` applies. `include_hidden`
+        keeps THIS method's default (True); the module-level
+        `utils.glob.glob()` this delegates to defaults it to False,
+        stdlib-`glob`-style, so the two spellings differ on hidden names
+        unless the keyword is passed.
 
         `native=True` (the default) follows the running interpreter on the
         two rules pathlib changed mid-series: a trailing "/" is ignored
@@ -752,10 +758,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             # argument, which must stay relative to self).
             return _glob.glob(
                 self,
-                recursive=bool(recursive),
+                recursive=recursive,
                 include_hidden=include_hidden,
                 case_sensitive=case_sensitive,
                 dironly=bool(dironly),
+                native=native,
             )
         # Validates eagerly (like pathlib 3.13+); the returned selection is
         # lazy. The pattern is never joined onto self: `self / pattern` let an
@@ -770,6 +777,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             recursive=recursive,
             include_hidden=include_hidden,
             case_sensitive=case_sensitive,
+            native=native,
         )
 
     def rglob(
@@ -796,6 +804,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 recursive=recursive,
                 dironly=dironly,
                 recurse_symlinks=recurse_symlinks,
+                native=native,
             )
         if not (isinstance(pattern, str) and not pattern):
             # Reject an absolute pattern before "**/" hides its anchor;

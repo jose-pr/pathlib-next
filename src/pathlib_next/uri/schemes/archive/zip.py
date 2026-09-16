@@ -231,9 +231,12 @@ class _ZipBackend(_ArchiveBackend):
         with self._lock:
             self._rewrite(exclude={name})
 
-    def rename_member(self, old: str, new: str):
+    def rename_member(self, old: str, new: str, *, members=None):
+        """Rename `old` to `new`. `members` is an explicit raw-name mapping
+        for a directory rename, whose members may be spelled several ways
+        ("./dir/x") and so cannot be found by prefix on one name."""
         with self._lock:
-            self._rewrite(rename={old: new})
+            self._rewrite(rename=dict(members) if members else {old: new})
 
     def _rewrite(
         self,

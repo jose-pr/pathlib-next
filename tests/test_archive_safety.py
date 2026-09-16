@@ -783,3 +783,71 @@ def test_tar_concurrent_reads_return_each_members_bytes(tmp_path):
     finally:
         sys.setswitchinterval(interval)
     assert failures == []
+
+
+# --- writes address the entry the archive really holds --------------------
+
+
+def test_overwriting_a_dot_slash_member_rewrites_it_in_place(tmp_path):
+    """0.9.5 handed the NORMALIZED name to a backend keyed on raw names, so
+    writing over a member spelled `./f.txt` appended a second entry that
+    shadowed it -- and `unlink()` then deleted the shadow, resurrecting the
+    original content while reporting success."""
+    archive = _write_zip(tmp_path / "rt.zip", [("./f.txt", b"OLD")])
+    member = UriPath(_zip_uri(archive)) / "f.txt"
+    member.write_bytes(b"NEW")
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.namelist() == ["./f.txt"]
+    assert member.read_bytes() == b"NEW"
+    member.unlink()
+    assert not member.exists()
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.namelist() == []
+
+
+def test_mkdir_over_a_dot_slash_directory_marker_does_not_duplicate(tmp_path):
+    archive = _write_zip(tmp_path / "md.zip", [("./d/", b""), ("./d/x.txt", b"X")])
+    root = UriPath(_zip_uri(archive))
+    with pytest.raises(FileExistsError):
+        (root / "d").mkdir()
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.namelist() == ["./d/", "./d/x.txt"]
+
+
+@pytest.mark.parametrize(
+    "members,expected",
+    [
+        ([("./d/x.txt", b"X"), ("./d/y.txt", b"Y")], ["e/x.txt", "e/y.txt"]),
+        # Mixed spellings used to split the directory in two.
+        (
+            [("d/", b""), ("./d/x.txt", b"X"), ("d/y.txt", b"Y")],
+            ["e/", "e/x.txt", "e/y.txt"],
+        ),
+    ],
+    ids=["all-dot-slash", "mixed"],
+)
+def test_renaming_a_directory_moves_every_spelling_of_its_members(
+    tmp_path, members, expected
+):
+    """The backend renames by ITS keys, so a prefix match on the normalized
+    marker missed `./d/x` -- renaming nothing, or only half the tree, while
+    returning the new path as if it had worked."""
+    archive = _write_zip(tmp_path / "ren.zip", members)
+    root = UriPath(_zip_uri(archive))
+    (root / "d").rename(root / "e")
+    with zipfile.ZipFile(archive) as zf:
+        assert sorted(zf.namelist()) == sorted(expected)
+    assert sorted(p.path for p in root.iterdir()) == ["e"]
+    assert (root / "e" / "x.txt").read_bytes() == b"X"
+
+
+def test_member_index_cache_sees_a_write_through_another_path_object(tmp_path):
+    """The index is cached per open handle; every mutation closes it. A
+    stale cache would hide a member another path object just wrote."""
+    archive = _write_zip(tmp_path / "c.zip", [("a.txt", b"A")])
+    reader = UriPath(_zip_uri(archive))
+    assert sorted(p.name for p in reader.iterdir()) == ["a.txt"]
+    (UriPath(_zip_uri(archive)) / "b.txt").write_bytes(b"B")
+    assert sorted(p.name for p in reader.iterdir()) == ["a.txt", "b.txt"]
+    (UriPath(_zip_uri(archive)) / "a.txt").unlink()
+    assert sorted(p.name for p in reader.iterdir()) == ["b.txt"]

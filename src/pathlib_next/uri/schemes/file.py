@@ -30,6 +30,17 @@ class FileUri(UriPath):
             return parent.with_path(path + "/")
         return parent
 
+    def _is_absolute_decoded(self, path: str) -> bool:
+        """A drive path restarts a join, as `PureWindowsPath` does: joining
+        "C:/Temp/x" onto "D:/proj" gives "C:/Temp/x", not a child of it.
+        `is_absolute()` already answers True for such a path, so the join
+        has to agree with it."""
+        if _os.name == "nt":
+            drive, sep, _ = path.partition("/")
+            if _is_drive(drive):
+                return bool(sep)
+        return super()._is_absolute_decoded(path)
+
     def is_absolute(self):
         """Also True for a Windows drive path ("C:/x"), which `_init()`
         stores without the "/" a URI path gets in front of it. "C:" alone is
