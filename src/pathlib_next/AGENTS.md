@@ -481,15 +481,24 @@ chained (their text can carry credentials).
   - One shared handle per archive (keyed by the real local path, or the outer
     URI), released when no path references it. A non-local outer is read into
     memory.
-  - Members named with `..`, an absolute path or a drive are never listed.
-    Exception types are POSIX on every platform.
+  - **Member names are normalized POSIX relative paths**, whatever the
+    writer emitted and whichever format: a leading `./` (`tar -C dir .`,
+    `shutil.make_archive`), empty segments (`a//b`) and interior `.`/`..`
+    (`a/./b`, `a/b/../c`) resolve, so one member has one name and a listing
+    and a lookup always agree. The spelling as written still addresses the
+    member. A name that would leave the root -- `../x`, `/abs`, `C:x`, or a
+    `..` with nothing to spend it on -- has no name inside the archive: it
+    is never listed and never readable, and writing to one raises
+    `ValueError`. When two spellings normalize to one name the later member
+    wins, as in `zipfile`/`tarfile`. Exception types are POSIX on every
+    platform.
   - Writes: zip only, and only with a local `file:` outer (else
     `NotImplementedError`). `"w"`/`"x"`/`"r+"`, `mkdir()`, `unlink()`,
     `rmdir()`, `rename()` (same archive; replaces like POSIX `rename`);
     parents must exist; `"a"` unsupported. Every mutation replaces the archive
     atomically (temp file + `os.replace`) and keeps other members' metadata,
-    the comment and any prefix bytes. `tar:` (plain, gz, bz2, xz) is
-    read-only; `./` member prefixes are dropped.
+    the comment and any prefix bytes. A write uses the normalized name.
+    `tar:` (plain, gz, bz2, xz) is read-only.
 
 ## CLI (`uripath`, `pathlib_next.tools.uripath`)
 

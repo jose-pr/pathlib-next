@@ -205,9 +205,14 @@ The `<archive-uri>` is any absolute URI with an explicit scheme, so
 - An archive inside an archive is addressed by nesting
   (`zip:zip:file:///outer.zip!/inner.zip!/x.txt`) and is read-only; a `!/`
   inside a member name is written `%21/`.
-- Members whose names would escape a destination (`..`, absolute or drive
-  paths) are never listed. Exception types are the POSIX ones on every
-  platform.
+- Member names are normalized as POSIX relative paths, the same way for
+  every format: `./x`, `a//b`, `a/./b` and `a/b/../c` all resolve, so a
+  member lists and reads under one name however the archive was written
+  (`tar -C dir .` and `shutil.make_archive` prefix every member with `./`).
+  The spelling as written still works.
+- Members whose names would escape the archive (`..` past the root, absolute
+  or drive paths) have no name inside it: never listed, never readable.
+  Exception types are the POSIX ones on every platform.
 
 ## Git hosting
 

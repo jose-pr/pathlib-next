@@ -39,6 +39,47 @@ def _is_safe_member_name(name: str) -> bool:
     )
 
 
+def _normalize_member_name(name: str) -> "str | None":
+    """`name` as a normalized POSIX relative path, or None if it does not
+    stay inside the archive root.
+
+    A member name is a relative path, and writers spell it several ways for
+    the same file: `./x` (`tar -C dir .`, `TarFile.add(arcname=".")`,
+    `shutil.make_archive`), `a//b`, `a/./b`, `a/b/../c`. Normalizing it the
+    way a URI reference resolves -- RFC 3986 dot-segment removal, with empty
+    segments dropped -- gives one member one name, so a listing and a lookup
+    agree however the archive was written, and the same spelling addresses
+    the same member in a zip and in a tar.
+
+    A name that would leave the root has no normalized form inside the
+    archive and is rejected (None): absolute (`/abs`), drive-qualified
+    (`C:x`), or with more `..` than parts to spend them on. `..` that stays
+    inside is resolved (`pkg/../ok.txt` is `ok.txt`). A trailing `/` (a
+    directory marker) is kept, and the archive root itself normalizes to "".
+    """
+    if name.startswith("/"):
+        return None
+    directory = name.endswith("/")
+    parts: "list[str]" = []
+    for part in name.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                return None  # escapes the archive root
+            parts.pop()
+            continue
+        parts.append(part)
+    normalized = "/".join(parts)
+    if not normalized:
+        return ""  # the archive root ("", ".", "./", "a/..")
+    # Backslash tricks ("..\\..\\x") and drive-qualified parts are caught
+    # here: the loop above only splits on "/".
+    if not _is_safe_member_name(normalized):
+        return None
+    return normalized + "/" if directory else normalized
+
+
 def _nesting_depth(archive_uri: str) -> int:
     """How many archive schemes `archive_uri` starts with: 1 for the
     `zip:file:///outer.zip!/inner.zip` of a nested archive, 0 otherwise."""
@@ -368,18 +409,52 @@ class ArchiveUri(UriPath):
         )
         return f"{self.source.scheme}:{outer_uri}{_SEP}{inner}{tail}"
 
+    def _member_index(self):
+        """Normalized member name -> the key the backend knows it by.
+
+        Built from `backend.names()` on every call, as the old raw scan was.
+        A member whose name escapes the root is left out entirely, so an
+        unsafe member ('../x', '/abs', 'C:x') can be neither listed nor
+        looked up. When two spellings normalize to one name, the later entry
+        wins -- what `zipfile` and `tarfile` do with duplicates themselves.
+        """
+        index = {}
+        for raw in self.backend.names():
+            normalized = _normalize_member_name(raw)
+            if not normalized:  # None (escapes) or "" (the root itself)
+                continue
+            index[normalized] = raw
+        return index
+
     def _names(self):
-        return self.backend.names()
+        return list(self._member_index())
+
+    def _raw_name(self, name: str) -> str:
+        """The backend's own key for a normalized name (the name itself when
+        the archive spells it canonically, or holds no such member yet)."""
+        return self._member_index().get(name, name)
+
+    @property
+    def _member(self) -> "str | None":
+        """This path as a normalized member name, or None if it escapes."""
+        return _normalize_member_name(self.path)
+
+    def _member_for_write(self) -> str:
+        member = self._member
+        if member is None:
+            raise ValueError(f"member name escapes the archive root: {self.path!r}")
+        return member
 
     def _listdir(self):
-        if self.path and not self.stat().is_dir():
+        member = self._member
+        if member is None:
+            raise FileNotFoundError(self)
+        if member and not self.stat().is_dir():
             raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
-        prefix = f"{self.path}/" if self.path else ""
+        prefix = f"{member}/" if member else ""
         seen = set()
         for name in self._names():
-            # An unsafe member ('../x', '/abs', 'C:x', ...) is never listed:
-            # a caller joining a listed name onto a destination must stay in it.
-            if not name.startswith(prefix) or not _is_safe_member_name(name):
+            if not name.startswith(prefix):
                 continue
             rest = name[len(prefix) :]
             if not rest:
@@ -390,16 +465,18 @@ class ArchiveUri(UriPath):
                 yield child
 
     def stat(self, *, follow_symlinks=True):
-        path = self.path
+        path = self._member
+        if path is None:
+            raise FileNotFoundError(self)
         if path == "":
             return FileStat(is_dir=True)
-        names = self._names()
-        if path in names:
-            return self.backend.member_stat(path)
+        index = self._member_index()
+        if path in index:
+            return self.backend.member_stat(index[path])
         dirmarker = f"{path}/"
-        if dirmarker in names:
-            return self.backend.member_stat(dirmarker)
-        if any(n.startswith(dirmarker) for n in names):
+        if dirmarker in index:
+            return self.backend.member_stat(index[dirmarker])
+        if any(n.startswith(dirmarker) for n in index):
             return FileStat(is_dir=True)
         raise FileNotFoundError(self)
 
@@ -441,8 +518,11 @@ class ArchiveUri(UriPath):
         )
 
     def _read_member(self):
+        member = self._member
+        if member is None:
+            raise FileNotFoundError(self)
         try:
-            return self.backend.read_member(self.path)
+            return self.backend.read_member(self._raw_name(member))
         except KeyError as error:
             if self._is_dir_member():
                 raise IsADirectoryError(
@@ -457,7 +537,9 @@ class ArchiveUri(UriPath):
         if "r" in mode:
             # Read-modify-write: what is written reaches the archive on close.
             data = self._read_member().read()
-            return _ArchiveWriteStream(self.backend, self.path, initial=data)
+            return _ArchiveWriteStream(
+                self.backend, self._raw_name(self._member_for_write()), initial=data
+            )
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
         if self._is_dir_member():
@@ -465,38 +547,39 @@ class ArchiveUri(UriPath):
         if mode == "x" and self.exists():
             raise FileExistsError(self)
         self._check_parent()
-        return _ArchiveWriteStream(self.backend, self.path)
+        return _ArchiveWriteStream(self.backend, self._member_for_write())
 
     def _mkdir(self, mode):
         self._require_writable()
         if self.exists():
             raise FileExistsError(self)
         self._check_parent()
-        self.backend.write_member(f"{self.path}/", b"")
+        self.backend.write_member(f"{self._member_for_write()}/", b"")
 
     def unlink(self, missing_ok=False):
         self._require_writable()
-        path = self.path
-        if path not in self._names():
+        path = self._member_for_write()
+        index = self._member_index()
+        if path not in index:
             if self._is_dir_member():
                 raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
             if missing_ok:
                 return
             raise FileNotFoundError(self)
-        self.backend.delete_member(path)
+        self.backend.delete_member(index[path])
 
     def rmdir(self):
         self._require_writable()
-        path = self.path
+        path = self._member_for_write()
         marker = f"{path}/"
-        names = self._names()
-        if any(n != marker and n.startswith(marker) for n in names):
+        index = self._member_index()
+        if any(n != marker and n.startswith(marker) for n in index):
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
-        if marker not in names:
-            if path in names:
+        if marker not in index:
+            if path in index:
                 raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
             raise FileNotFoundError(self)
-        self.backend.delete_member(marker)
+        self.backend.delete_member(index[marker])
 
     def _same_location(self, other: Uri) -> bool:
         # Every archive URI has the same bare "zip:"/"tar:" authority, so the
@@ -516,26 +599,31 @@ class ArchiveUri(UriPath):
         # Returns the new path, as pathlib does.
         self._require_writable()
         target = self._rename_target(target)
-        old_path = self.path
-        new_path = target.path.lstrip("/")
-        names = self._names()
+        old_path = self._member_for_write()
+        new_path = _normalize_member_name(target.path.lstrip("/"))
+        if not new_path:
+            raise ValueError(f"member name escapes the archive root: {target.path!r}")
+        index = self._member_index()
+        names = list(index)
         marker = f"{old_path}/"
         new_marker = f"{new_path}/"
         renamed = self._from_parsed_parts(self.source, new_path, "", "")
-        if old_path in names:
+        if old_path in index:
             if new_path == old_path:
                 return renamed
             if any(n.startswith(new_marker) for n in names):
                 raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
-            self.backend.rename_member(old_path, new_path)
+            self.backend.rename_member(index[old_path], new_path)
         elif any(n.startswith(marker) for n in names):
             if new_marker == marker:
                 return renamed
-            if new_path in names:
+            if new_path in index:
                 raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(target))
             if any(n != new_marker and n.startswith(new_marker) for n in names):
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(target))
-            self.backend.rename_member(marker, new_marker)
+            # A directory can be implicit (no marker entry of its own), so
+            # fall back to the marker itself rather than indexing.
+            self.backend.rename_member(index.get(marker, marker), new_marker)
         else:
             raise FileNotFoundError(self)
         return renamed

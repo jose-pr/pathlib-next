@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Archive member names are normalized**, so the same member is reachable
+  however the archive was written and whichever format it is. A leading
+  `./` (what `tar -C dir .`, `TarFile.add(arcname=".")` and
+  `shutil.make_archive` put on every member), empty segments (`a//b`) and
+  interior `.`/`..` (`a/./b`, `a/b/../c`) now resolve to one name for
+  listing and lookup alike. Previously only `tar:` stripped a leading `./`:
+  a zip written that way listed as empty and none of its members could be
+  read under any spelling, while a name such as `d//e.txt` was readable but
+  absent from listings.
+
+### Changed
+- **A member name that escapes the archive root** (`../x`, `/abs`, `C:x`, a
+  `..` with nothing left to consume) has no name inside the archive: it was
+  already never listed, and is now never readable either; writing to one
+  raises `ValueError` instead of creating it. A `..` that stays inside is
+  resolved rather than rejected (`pkg/../ok.txt` reads `ok.txt`), and when
+  two spellings normalize to one name the later member wins, as in
+  `zipfile`/`tarfile`.
+- **`Uri`'s RFC 3986 dot-segment removal is documented** as a divergence
+  from `pathlib` (`docs/divergences.md`); the behaviour is unchanged.
+
 ## [0.9.4] - 2026-09-16
 
 ### Fixed

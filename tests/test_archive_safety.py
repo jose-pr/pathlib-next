@@ -350,7 +350,6 @@ _CRAFTED_MEMBERS = [
     ("pkg/..\\..\\ESCAPED_BACKSLASH.txt", b"evil"),
     ("pkg/C:../C:../ESCAPED_DRIVE_RELATIVE.txt", b"evil"),
     ("pkg/D:evil.txt", b"evil"),
-    ("pkg/./dot.txt", b"evil"),
     ("/abs.txt", b"evil"),
 ]
 
@@ -375,8 +374,6 @@ def test_archive_listing_skips_unsafe_member_names(tmp_path, fmt):
 
 @pytest.mark.parametrize("fmt", ["zip", "tar"])
 def test_archive_recursive_copy_stays_inside_destination(tmp_path, fmt):
-    # Copies from the "pkg" subdirectory: copying from the archive root is
-    # broken by a separate open finding (root children get a leading "/").
     archive = _crafted(tmp_path / "src", fmt)
     work = tmp_path / "work"
     dest = work / "deep" / "dest"
@@ -397,6 +394,105 @@ def test_archive_safe_names_with_colons_are_still_listed_and_readable(tmp_path, 
     (child,) = UriPath(_URI[fmt](archive, "pkg")).iterdir()
     assert child.name == "12:00.log"
     assert child.read_bytes() == b"noon"
+
+
+# --- member names are normalized POSIX relative paths ---
+
+#: `(member as written, the name it is addressed by)`. A writer may spell
+#: the same file several ways -- `tar -C dir .` and `shutil.make_archive`
+#: prefix `./`, some writers emit `//` or `/./` -- and a `..` that stays
+#: inside the archive is resolved like any URI reference.
+_NORMALIZED_MEMBERS = [
+    ("plain.txt", "plain.txt"),
+    ("./dot-slash.txt", "dot-slash.txt"),
+    ("dir//double.txt", "dir/double.txt"),
+    ("dir/./interior.txt", "dir/interior.txt"),
+    ("dir/sub/../up.txt", "dir/up.txt"),
+    ("./a/./b//c.txt", "a/b/c.txt"),
+]
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+def test_member_names_are_normalized_for_listing_and_lookup(tmp_path, fmt):
+    """However the member was spelled, it lists and is read under its
+    normalized name -- and the spelling as written still addresses it."""
+    members = [(raw, raw.encode()) for raw, _ in _NORMALIZED_MEMBERS]
+    write = _write_zip if fmt == "zip" else _write_tar
+    archive = write(tmp_path / f"spellings.{fmt}", members)
+    root = UriPath(_URI[fmt](archive))
+
+    listed = sorted(p.path for p in root.rglob("*"))
+    # The files under their normalized names, plus the directories those
+    # imply. No "dir/sub": "dir/sub/../up.txt" resolves to "dir/up.txt".
+    assert listed == [
+        "a",
+        "a/b",
+        "a/b/c.txt",
+        "dir",
+        "dir/double.txt",
+        "dir/interior.txt",
+        "dir/up.txt",
+        "dot-slash.txt",
+        "plain.txt",
+    ]
+    for raw, normalized in _NORMALIZED_MEMBERS:
+        assert (root / normalized).read_bytes() == raw.encode(), normalized
+        assert (root / raw).read_bytes() == raw.encode(), raw
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+def test_every_listed_member_can_be_read(tmp_path, fmt):
+    """Listing and lookup agree: a name a listing yields always resolves,
+    and resolves to the member that name was normalized from. Zip used to
+    hide `./x` from listings while still reading it by its raw name."""
+    members = [(raw, raw.encode()) for raw, _ in _NORMALIZED_MEMBERS]
+    members += [(name, b"evil") for name in _UNSAFE_MEMBER_NAMES]
+    write = _write_zip if fmt == "zip" else _write_tar
+    archive = write(tmp_path / f"mixed.{fmt}", members)
+    root = UriPath(_URI[fmt](archive))
+
+    expected = {normalized: raw for raw, normalized in _NORMALIZED_MEMBERS}
+    read = {}
+    for p in root.rglob("*"):
+        if p.is_dir():
+            continue
+        read[p.path] = p.read_bytes().decode()
+    assert read == expected
+
+
+#: Names with no normalized form inside the archive: they are neither listed
+#: nor readable, whatever the spelling.
+_UNSAFE_MEMBER_NAMES = [
+    "../escape.txt",
+    "pkg/../../escape.txt",
+    "/abs.txt",
+    "C:drive.txt",
+    "pkg/..\\..\\back.txt",
+]
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+@pytest.mark.parametrize("name", _UNSAFE_MEMBER_NAMES)
+def test_escaping_member_names_are_not_listed(tmp_path, fmt, name):
+    write = _write_zip if fmt == "zip" else _write_tar
+    archive = write(tmp_path / f"escape.{fmt}", [(name, b"evil"), ("ok.txt", b"ok")])
+    root = UriPath(_URI[fmt](archive))
+    assert [p.path for p in root.rglob("*")] == ["ok.txt"]
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+@pytest.mark.parametrize(
+    "name",
+    # "C:drive.txt" is left out: joining it re-parses "C:" as a scheme (the
+    # documented URI round trip), so it never reaches the archive at all.
+    [n for n in _UNSAFE_MEMBER_NAMES if n[1:2] != ":"],
+)
+def test_escaping_member_names_are_not_readable(tmp_path, fmt, name):
+    write = _write_zip if fmt == "zip" else _write_tar
+    archive = write(tmp_path / f"escape.{fmt}", [(name, b"evil"), ("ok.txt", b"ok")])
+    root = UriPath(_URI[fmt](archive))
+    with pytest.raises(FileNotFoundError):
+        (root / name).read_bytes()
 
 
 # --- memutils-archive-windows-drive-escape ---
