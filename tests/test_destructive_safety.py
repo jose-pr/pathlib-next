@@ -406,3 +406,113 @@ def test_recursive_rm_does_not_descend_into_a_mount_point(tmp_path, monkeypatch)
     assert any(isinstance(error, OSError) for error, _path in errors)
     # The tree's own file was still removed.
     assert not (tmp_path / "tree" / "own.txt").exists()
+
+
+# --- rm(on_links=, on_binds=) ---------------------------------------------
+
+
+@pytest.fixture
+def tree_with_link_and_binding(tmp_path):
+    """A tree holding one symlink and one binding, both pointing at a
+    directory OUTSIDE the tree, plus a file of its own."""
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "keep.txt").write_text("PRECIOUS")
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "tree" / "own.txt").write_text("mine")
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(
+            str(tmp_path / "target"), str(tmp_path / "tree" / "bind")
+        )
+    else:
+        # A bind mount needs privileges; the binding half of these tests is
+        # Windows-only, and `is_mount()` covers the POSIX side elsewhere.
+        pytest.skip("no way to create a binding without privileges")
+    (tmp_path / "tree" / "link").symlink_to(
+        tmp_path / "target", target_is_directory=True
+    )
+    return tmp_path
+
+
+def _tolerate(errors):
+    def handler(error, path):
+        errors.append((type(error).__name__, path.name))
+        return True
+
+    return handler
+
+
+def test_rm_removes_a_link_and_a_binding_not_what_is_behind_them(
+    tree_with_link_and_binding,
+):
+    """The default, and what `rm -r` does: the entry goes, its target does
+    not."""
+    root = tree_with_link_and_binding
+    LocalPath(root / "tree").rm(recursive=True)
+    assert not (root / "tree").exists()
+    assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
+
+
+def test_rm_follow_removes_what_is_behind_them(tree_with_link_and_binding):
+    """Opt in and the contents behind both go too -- what a walker that
+    cannot tell a binding from a directory does by accident."""
+    root = tree_with_link_and_binding
+    LocalPath(root / "tree").rm(recursive=True, on_links="follow", on_binds="follow")
+    assert not (root / "tree").exists()
+    assert not (root / "target" / "keep.txt").exists()
+
+
+def test_rm_ignore_leaves_them_in_place(tree_with_link_and_binding):
+    """`ignore` does not remove the entry either, so the enclosing directory
+    is not empty and says so through `ignore_error`."""
+    root = tree_with_link_and_binding
+    errors = []
+    LocalPath(root / "tree").rm(
+        recursive=True,
+        ignore_error=_tolerate(errors),
+        on_links="ignore",
+        on_binds="ignore",
+    )
+    left = sorted(p.name for p in (root / "tree").iterdir())
+    assert left == ["bind", "link"]
+    assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
+    assert errors  # the tree's own rmdir reported the leftovers
+    assert not (root / "tree" / "own.txt").exists()
+
+
+def test_rm_policy_may_be_decided_per_entry(tree_with_link_and_binding):
+    """A callable is asked per entry, so one tree can keep one binding and
+    remove another."""
+    root = tree_with_link_and_binding
+    LocalPath(root / "tree").rm(
+        recursive=True,
+        ignore_error=True,
+        on_links=lambda path: "rm",
+        on_binds=lambda path: "ignore" if path.name == "bind" else "rm",
+    )
+    assert (root / "tree" / "bind").exists()
+    assert not (root / "tree" / "link").exists()
+    assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
+
+
+@pytest.mark.parametrize("keyword", ["on_links", "on_binds"])
+def test_rm_rejects_an_unknown_policy(tmp_path, keyword):
+    (tmp_path / "d").mkdir()
+    with pytest.raises(ValueError, match="must be one of"):
+        LocalPath(tmp_path / "d").rm(recursive=True, **{keyword: "delete-everything"})
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_rm_of_a_binding_named_directly_removes_the_binding(tmp_path):
+    """Naming the binding itself removes it, not the tree behind it --
+    `rm -r` semantics for the path the caller gave."""
+    import _winapi
+
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "keep.txt").write_text("PRECIOUS")
+    _winapi.CreateJunction(str(tmp_path / "target"), str(tmp_path / "bind"))
+
+    LocalPath(tmp_path / "bind").rm(recursive=True)
+    assert not (tmp_path / "bind").exists()
+    assert (tmp_path / "target" / "keep.txt").read_text() == "PRECIOUS"
