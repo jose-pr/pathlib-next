@@ -198,3 +198,92 @@ def test_from_decoded_path_keeps_backend_and_drops_query_fragment():
     assert not target.query
     assert not target.fragment
     assert target.backend is p.backend
+
+
+# --- a str join is a decoded path, not URI syntax -------------------------
+
+#: `(joined name, resulting .path)`. Every one of these was silently
+#: truncated, decoded or re-anchored when `/` parsed the name as URI syntax.
+_DECODED_JOINS = [
+    ("report.txt", "/mnt/report.txt"),
+    ("cache?v=2", "/mnt/cache?v=2"),
+    ("note#2.txt", "/mnt/note#2.txt"),
+    ("a%20b.txt", "/mnt/a%20b.txt"),
+    ("C:/Temp", "/mnt/C:/Temp"),
+    ("sub/deep.txt", "/mnt/sub/deep.txt"),
+    ("/abs.txt", "/abs.txt"),
+    ("a/../b", "/mnt/b"),
+    ("../up.txt", "/up.txt"),
+]
+
+
+@pytest.mark.parametrize("name,expected", _DECODED_JOINS)
+def test_join_reads_a_str_as_a_decoded_path(name, expected):
+    base = UriPath("sftp://host/mnt")
+    assert (base / name).path == expected
+    assert base.joinpath(name).path == expected
+
+
+def test_join_agrees_with_a_listing_for_the_same_name():
+    """The inconsistency this replaces: `iterdir()` built `cache?v=2`
+    correctly while `/` truncated it at the `?`."""
+    base = UriPath("sftp://host/mnt")
+    assert (base / "cache?v=2").path == base._make_child_relpath("cache?v=2").path
+
+
+def test_join_percent_encodes_a_literal_name_when_rendered():
+    base = UriPath("sftp://host/mnt")
+    assert str(base / "cache?v=2") == "sftp://host/mnt/cache%3Fv=2"
+    assert (base / "cache?v=2").name == "cache?v=2"
+
+
+def test_join_with_a_uri_argument_is_still_scheme_aware():
+    """The escape hatch: pass a `Uri` when URI semantics are wanted."""
+    base = UriPath("sftp://host/mnt")
+    crossed = base / UriPath("s3://bucket/key")
+    assert str(crossed) == "s3://bucket/key"
+    assert crossed.source.scheme == "s3"
+
+
+def test_join_keeps_the_query_of_a_uri_argument():
+    base = UriPath("http://h/a")
+    assert (base / UriPath("b?q=1")).query == "q=1"
+    assert (base / "b?q=1").query in (None, "")
+
+
+# --- copy()/move() read a str destination by its shape --------------------
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [
+        ("b.txt", "sftp://user@host/mnt/b.txt"),
+        ("sub/b.txt", "sftp://user@host/mnt/sub/b.txt"),
+        ("/other/b.txt", "sftp://user@host/other/b.txt"),
+        ("C:/Temp/x", "sftp://user@host/mnt/C:/Temp/x"),
+    ],
+)
+def test_str_destination_without_a_scheme_stays_on_this_endpoint(target, expected):
+    """A plain path names a file on the same URI, as `rename()` does --
+    before, it built a sourceless path that could not do I/O at all."""
+    src = UriPath("sftp://user@host/mnt/a.txt")
+    coerced = src._coerce_target(target)
+    assert str(coerced) == expected
+    assert coerced.source == src.source
+
+
+@pytest.mark.parametrize(
+    "target", ["s3://bucket/key", "file:///tmp/x", "data:,abc", "http://h/x"]
+)
+def test_str_destination_with_a_scheme_is_still_a_uri(target):
+    """The cross-scheme form keeps working; that is why the rule is by
+    shape rather than path-only."""
+    src = UriPath("sftp://user@host/mnt/a.txt")
+    assert src._coerce_target(target).source.scheme == target.split(":", 1)[0]
+
+
+def test_str_destination_reuses_the_backend_of_the_same_endpoint():
+    """No second connection for a destination next to the source."""
+    requests = pytest.importorskip("requests")
+    base = UriPath("http://h/api/a.txt").with_session(requests.Session())
+    assert base._coerce_target("b.txt").backend is base.backend

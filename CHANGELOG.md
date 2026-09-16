@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **`UriPath / "name"` and `joinpath()` read a `str` as a decoded path**,
+  not as URI syntax. `base / "cache?v=2"` is now the file `cache?v=2`
+  instead of `base/cache` with a query; `"note#2.txt"`, `"a%20b.txt"` and
+  `"C:/Temp"` join verbatim too. This is what `iterdir()` always did, so
+  listing a directory and naming the same child by hand finally agree. Pass
+  a `Uri`/`UriPath` argument for a scheme-aware join
+  (`base / UriPath("s3://bucket/key")`); that stays the only form that can
+  cross endpoints, and it still drops a credential-bearing backend on the
+  way. Dot segments are removed from the result as before.
+- **`copy()`/`move()` accept a plain-path `str` destination.** A string with
+  a scheme is a URI, as before, so `copy("s3://bucket/key")` keeps working;
+  one without is a decoded path on the same endpoint (absolute replaces the
+  path, relative is a sibling, as `rename()` resolves it) and reuses this
+  path's source and backend. `move("b.txt")` previously built a sourceless
+  path and failed on its first `exists()` call, and a same-host URI
+  destination opened a second connection. A one-letter scheme is treated as
+  a Windows drive, so `C:/Temp/x` is a path.
+
 ## [0.9.6] - 2026-09-16
 
 ### Added

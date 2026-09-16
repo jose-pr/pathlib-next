@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pathlib as _pathlib
+import re as _re
 import posixpath as _posix
 import typing as _ty
 
@@ -28,6 +29,10 @@ from .source import (
 UriLike: TypeAlias = "str | Uri | os.PathLike"
 
 _NOSOURCE = Source(None, None, None, None)
+
+#: An RFC 3986 scheme followed by its colon, used to tell a URI destination
+#: from a path one (see `_looks_like_uri`).
+_URI_SCHEME_RE = _re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
 
 
 def _authority_key(source: Source) -> tuple:
@@ -333,6 +338,36 @@ class Uri(Pathname):
         return self._from_parsed_parts(
             _NOSOURCE, _remove_dot_segments(path), None, None, **kwargs
         )
+
+    def _joined(self, result: "Uri") -> "Uri":
+        """`result` with its path's dot segments removed.
+
+        The join concatenates, so a leading ".." survives it ("/mnt" /
+        "../up.txt" -> "/mnt/../up.txt") while an interior one was already
+        resolved by `_from_decoded_path`. Normalizing the result keeps one
+        rule -- the RFC 3986 one this type documents -- instead of two that
+        depend on where the ".." sat.
+        """
+        path = _remove_dot_segments(result.path)
+        if path == result.path:
+            return result
+        source, _, query, fragment = result.parts
+        joined = result._from_parsed_parts(source, path, query, fragment)
+        backend = getattr(result, "_backend", None)
+        if backend is not None:
+            joined = joined.with_backend(backend)
+        return joined
+
+    def _join_arg(self, arg):
+        """A join argument, with a `str` read as an already-decoded path.
+
+        `/` and `joinpath()` name a child the way `iterdir()` does, so a
+        name containing `?`, `#`, `%` or a leading `C:` joins verbatim
+        instead of being re-read as URI syntax (see `_from_decoded_path`).
+        A `Uri` argument keeps full URI semantics -- that is how a caller
+        asks for a scheme-aware join, e.g. `base / Uri("s3://bucket/key")`.
+        """
+        return Uri()._from_decoded_path(arg) if isinstance(arg, str) else arg
 
     def _rename_target(self, target: UriLike) -> "Uri":
         """Normalize a `rename()`/`replace()` destination to a `Uri`.
@@ -690,6 +725,18 @@ class Uri(Pathname):
     def __hash__(self):
         return hash(self.as_uri())
 
+    def __truediv__(self, key):
+        """`uri / "name"`. A `str` is a decoded path segment, never URI
+        syntax: "a?b.txt" is a filename, not a query (`Uri._join_arg`)."""
+        try:
+            return self._joined(type(self)(self, self._join_arg(key)))
+        except (TypeError, NotImplementedError):
+            return NotImplemented
+
+    def joinpath(self, *args):
+        """Combine this URI with segments; a `str` is a decoded path."""
+        return self._joined(type(self)(self, *(self._join_arg(arg) for arg in args)))
+
     def __rtruediv__(self, key: str):
         """`"prefix" / uri`. The str is a decoded path joined in front of
         this one, never URI syntax (so "C:/x" is not read as a scheme)."""
@@ -710,6 +757,19 @@ class Uri(Pathname):
             else:
                 posix = f"{host}:{posix}"
         return posix
+
+
+def _looks_like_uri(value: str) -> bool:
+    """Whether a destination string is URI syntax rather than a path.
+
+    Needs an RFC 3986 scheme of at least two characters (a one-letter one is
+    a Windows drive: `C:/Temp`), or an explicit `://`. Mirrors the rule
+    `pathlib_next.tools.uripath` applies to command-line arguments.
+    """
+    match = _URI_SCHEME_RE.match(value)
+    if match is None:
+        return False
+    return match.end() > 2 or "://" in value
 
 
 class UriPath(Uri, Path):
@@ -901,10 +961,21 @@ class UriPath(Uri, Path):
         return self._backend
 
     def _coerce_target(self, target: str) -> "UriPath":
-        # A str destination to copy()/move() is still URI syntax: that is what
-        # makes a cross-scheme `copy("s3://bucket/key")` work. (Tracked: a bare
-        # path string therefore has no source.)
-        return type(self)(target)
+        """A `str` destination for `copy()`/`move()`, read by its shape.
+
+        With a scheme (`s3://bucket/key`, `file:///tmp/x`) it is a URI, so a
+        cross-scheme copy keeps working. Without one it is a decoded path on
+        THIS endpoint -- absolute replaces the path, relative is a sibling,
+        as `rename()` resolves it -- keeping this path's source and backend
+        instead of building a sourceless path plus a second connection.
+
+        A single-letter scheme is a Windows drive, not a scheme: `C:/Temp/x`
+        is a path (the same rule the `uripath` CLI applies).
+        """
+        if _looks_like_uri(target):
+            return type(self)(target, findclass=True)
+        # `/` joins a decoded path on this endpoint and carries the backend.
+        return self.parent / target
 
     def _check_inherited_backend(self):
         # A backend copied from a join segment is only valid for the same
@@ -923,6 +994,9 @@ class UriPath(Uri, Path):
         # Only converting `key` decides NotImplemented. Catching TypeError
         # around the whole construction turned a bug inside a scheme's
         # __new__/_init into "unsupported operand type(s) for /".
+        if isinstance(key, str):
+            # A decoded path, not URI syntax (see `Uri._join_arg`).
+            return self._joined(type(self)(self, self._join_arg(key), findclass=True))
         converted = Uri.__new__(Uri)
         try:
             converted.__init__(key)
@@ -938,8 +1012,13 @@ class UriPath(Uri, Path):
     def joinpath(self, *args: str | Uri | os.PathLike) -> "UriPath":
         """Combine this path with segments, choosing the result's class from
         its scheme as `/` does: joining an absolute local path gives a
-        `FileUri`, not this class carrying a `file:` URI."""
-        return type(self)(self, *args, findclass=True)
+        `FileUri`, not this class carrying a `file:` URI.
+
+        Each `str` argument is an already-decoded path (see
+        `Uri._join_arg`); pass a `Uri` for a scheme-aware join."""
+        return self._joined(
+            type(self)(self, *(self._join_arg(arg) for arg in args), findclass=True)
+        )
 
     def with_source(self, source: Source):
         cls = type(self)

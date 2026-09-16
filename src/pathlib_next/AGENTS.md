@@ -233,6 +233,12 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   3986 reference resolution and `..` is not resolved during a join. An
   absolute local path becomes `file:`; a relative one joins like a
   `PurePath`.
+  - `/` and `joinpath()` take a `str` as an **already-decoded path**: `?`,
+    `#`, `%` and a leading `C:` are ordinary filename characters
+    (`base / "cache?v=2"` names that file), which is what `iterdir()` builds.
+    A `Uri`/`UriPath` argument keeps URI semantics and is the only form that
+    can cross to another endpoint -- where a credential-bearing backend is
+    dropped. Dot segments are removed from the joined result either way.
   - Properties: `source -> Source`, `path -> str` (percent-decoded),
     `query -> Query` (**percent-encoded as received**, sent unchanged),
     `fragment -> str`, `parts -> (source, path, query, fragment)` (not path
@@ -280,7 +286,14 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     `#`, `%`, `:` are filename characters); a relative `rename()` target is a
     sibling of `self`. A target on another endpoint (or another archive or
     Azure container) raises `NotImplementedError`, so `move()` copies and
-    deletes. `copy()`/`move()` parse a `str` target as a URI.
+    deletes.
+  - `copy()`/`move()` read a `str` destination **by its shape**: with a
+    scheme (`s3://bucket/key`, `data:,abc`) it is a URI, so a cross-scheme
+    copy works; without one it is a decoded path on this endpoint — absolute
+    replaces the path, relative is a sibling, as `rename()` resolves it — and
+    keeps this path's source and backend rather than opening a second
+    connection. A one-letter scheme is a Windows drive, so `C:/Temp/x` is a
+    path.
 - **`Source(scheme, userinfo, host, port)`** (`uri.source`) — `NamedTuple`,
   falsy when all fields are empty. `as_str(sanitize=True)`; `str()`/`repr()`
   redact the password (the fields keep it). `Source.from_str(source,

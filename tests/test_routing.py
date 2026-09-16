@@ -28,13 +28,28 @@ LocalPath = pathlib_next.LocalPath
 
 
 def test_http_session_backend_does_not_follow_join_to_another_host():
+    """A credential-bearing session must never reach another host.
+
+    A `str` join cannot take one there at all: it names a path on THIS host
+    (`Uri._join_arg`), so the session stays and so does the host. Only a
+    `Uri` argument crosses, and then the backend is dropped."""
     requests = pytest.importorskip("requests")
     base = UriPath("http://trusted.invalid/api/").with_session(
         requests.Session(), auth=("svc", "s3cret")
     )
     assert (base / "child").backend is base.backend
-    assert (base / "http://other.invalid/steal").backend is not base.backend
-    assert UriPath(base, "http://other.invalid/steal").backend is not base.backend
+
+    literal = base / "http://other.invalid/steal"
+    assert literal.source.host == "trusted.invalid"
+    assert literal.path == "/api/http://other.invalid/steal"
+    assert literal.backend is base.backend  # still the trusted host
+
+    for crossing in (
+        base / UriPath("http://other.invalid/steal"),
+        UriPath(base, UriPath("http://other.invalid/steal")),
+    ):
+        assert crossing.source.host == "other.invalid"
+        assert crossing.backend is not base.backend
 
 
 def test_with_source_keeps_backend_only_for_the_same_authority():
@@ -53,7 +68,15 @@ def test_github_token_backend_does_not_follow_join_to_another_host():
     from pathlib_next.uri.schemes.github import GitHubPath
 
     root = GitHubPath("github://ghp_SECRET@github.com/acme/widgets")
-    evil = root / "github://evil.invalid/x/y"
+
+    # A str join stays on the original host, so the token goes nowhere new.
+    literal = root / "github://evil.invalid/x/y"
+    assert literal.source.host == "github.com"
+    assert literal.backend is root.backend
+
+    # Crossing hosts needs a Uri argument, and that drops the token.
+    evil = root / GitHubPath("github://evil.invalid/x/y")
+    assert evil.source.host == "evil.invalid"
     assert evil.backend is not root.backend
     assert evil.backend.token != "ghp_SECRET"
     assert (root / "README.md").backend is root.backend
