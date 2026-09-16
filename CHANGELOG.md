@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-09-16
+
 ### Fixed
 - **Archive member names are normalized**, so the same member is reachable
   however the archive was written and whichever format it is. A leading
@@ -1302,7 +1304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/jose-pr/pathlib-next/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/jose-pr/pathlib-next/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...v0.9.2
