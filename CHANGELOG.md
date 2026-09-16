@@ -21,11 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - **A member name that escapes the archive root** (`../x`, `/abs`, `C:x`, a
   `..` with nothing left to consume) has no name inside the archive: it was
-  already never listed, and is now never readable either; writing to one
-  raises `ValueError` instead of creating it. A `..` that stays inside is
-  resolved rather than rejected (`pkg/../ok.txt` reads `ok.txt`), and when
-  two spellings normalize to one name the later member wins, as in
-  `zipfile`/`tarfile`.
+  already never listed, and is now never readable either. Such a member
+  used to be hidden from listings while `read_bytes()` still returned it
+  under its raw name. (Writing to one already failed and created nothing;
+  that is unchanged.) A `..` that stays inside is resolved rather than
+  rejected (`pkg/../ok.txt` reads `ok.txt`), and when two spellings
+  normalize to one name the later member wins, as in `zipfile`/`tarfile`.
 - **`Uri`'s RFC 3986 dot-segment removal is documented** as a divergence
   from `pathlib` (`docs/divergences.md`); the behaviour is unchanged.
 

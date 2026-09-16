@@ -488,16 +488,17 @@ chained (their text can carry credentials).
     and a lookup always agree. The spelling as written still addresses the
     member. A name that would leave the root -- `../x`, `/abs`, `C:x`, or a
     `..` with nothing to spend it on -- has no name inside the archive: it
-    is never listed and never readable, and writing to one raises
-    `ValueError`. When two spellings normalize to one name the later member
-    wins, as in `zipfile`/`tarfile`. Exception types are POSIX on every
+    is never listed, never readable, and cannot be written (the write fails
+    and creates nothing). When two spellings normalize to one name the
+    later member wins, as in `zipfile`/`tarfile`. Exception types are POSIX on every
     platform.
   - Writes: zip only, and only with a local `file:` outer (else
     `NotImplementedError`). `"w"`/`"x"`/`"r+"`, `mkdir()`, `unlink()`,
     `rmdir()`, `rename()` (same archive; replaces like POSIX `rename`);
     parents must exist; `"a"` unsupported. Every mutation replaces the archive
     atomically (temp file + `os.replace`) and keeps other members' metadata,
-    the comment and any prefix bytes. A write uses the normalized name.
+    the comment and any prefix bytes. A write uses the normalized name; a
+    name that escapes the root fails and creates nothing.
     `tar:` (plain, gz, bz2, xz) is read-only.
 
 ## CLI (`uripath`, `pathlib_next.tools.uripath`)
