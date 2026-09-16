@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-09-17
+
 ### Added
 - **`rm(follow_symlinks=, follow_binds=)`**: what a recursive removal does
   with a symlink, and with a binding (a Windows junction, a mount point).
@@ -1448,7 +1450,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/jose-pr/pathlib-next/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/jose-pr/pathlib-next/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/jose-pr/pathlib-next/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/jose-pr/pathlib-next/compare/v0.9.3...v0.9.4
