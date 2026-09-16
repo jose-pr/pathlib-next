@@ -387,3 +387,95 @@ def test_native_is_accepted_by_every_generic_backend(tree, native):
     (mem / "d").mkdir()
     assert {p.name for p in mem.glob("*.py", native=native)} == {"x.py"}
     assert {p.name for p in mem.glob("*", native=native)} == {"x.py", "d"}
+
+
+# --- on_error: an unreadable directory can be seen ------------------------
+
+
+@pytest.fixture
+def unreadable_tree(tmp_path, monkeypatch):
+    """A tree whose `locked/` directory refuses to list, without needing
+    real permissions (which a Windows admin ignores anyway)."""
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "ok" / "a.json").write_text("{}")
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "locked" / "b.json").write_text("{}")
+    real = pathlib_next.LocalPath._scandir
+
+    def refusing(self):
+        if self.name == "locked":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(pathlib_next.LocalPath, "_scandir", refusing)
+    return tmp_path
+
+
+def test_a_failed_listing_is_silent_without_the_hook(unreadable_tree):
+    """pathlib's behaviour, and the default: the layer simply vanishes."""
+    root = pathlib_next.LocalPath(unreadable_tree)
+    assert sorted(p.name for p in root.glob("**/*.json")) == ["a.json"]
+
+
+def test_on_error_reports_the_failed_listing_and_keeps_going(unreadable_tree):
+    root = pathlib_next.LocalPath(unreadable_tree)
+    seen = []
+    found = sorted(p.name for p in root.glob("**/*.json", on_error=seen.append))
+    assert found == ["a.json"]
+    assert seen and all(isinstance(e, PermissionError) for e in seen)
+    # One argument is enough to say where, as with `walk()`/`os.walk`.
+    assert all(pathlib.Path(e.filename).name == "locked" for e in seen)
+
+
+def test_on_error_may_raise_to_make_it_fatal(unreadable_tree):
+    """The point of the hook: a caller who wants the error back gets it."""
+    root = pathlib_next.LocalPath(unreadable_tree)
+
+    def reraise(error):
+        raise error
+
+    with pytest.raises(PermissionError):
+        list(root.glob("**/*.json", on_error=reraise))
+    with pytest.raises(PermissionError):
+        list(root.rglob("*.json", on_error=reraise))
+
+
+# --- bound_loops: a directory is walked once per "**" ---------------------
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_bound_loops_bounds_a_windows_junction_loop(tmp_path):
+    """A junction reports `is_symlink() == False`, so `recurse_symlinks`
+    cannot see it and `**` walks the loop until the recursion limit --
+    pathlib does the same. Identity bounds it."""
+    import _winapi
+
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "x.json").write_text("{}")
+    _winapi.CreateJunction(str(tmp_path / "b"), str(tmp_path / "b" / "self"))
+    base = pathlib_next.LocalPath(tmp_path)
+
+    # Unbounded, the one file is reached again through every extra "self"
+    # (pathlib does the same, and on 3.9 it eventually raises WinError 1921
+    # on the over-long path -- which is why stdlib is not the oracle here).
+    assert len(list(base.glob("b/**/*.json"))) > 1
+    assert len(list(base.glob("b/**/*.json", bound_loops=True))) == 1
+    assert len(list((base / "b").rglob("*.json", bound_loops=True))) == 1
+
+
+def test_bound_loops_keeps_a_plain_tree_intact(tree):
+    """Bounding must not drop ordinary directories: every match the default
+    finds is still found."""
+    root = pathlib_next.LocalPath(tree)
+    plain = sorted(str(p) for p in root.glob("**/*.py"))
+    assert sorted(str(p) for p in root.glob("**/*.py", bound_loops=True)) == plain
+
+
+def test_bound_loops_is_accepted_where_stats_have_no_identity():
+    """A backend whose stat carries no (st_dev, st_ino) cannot be bounded;
+    it must still answer rather than raise."""
+    mem = MemPath("/m")
+    mem.mkdir(parents=True)
+    (mem / "s").mkdir()
+    (mem / "s" / "x.py").write_text("x")
+    assert [str(p) for p in mem.glob("**/*.py", bound_loops=True)] == ["/m/s/x.py"]

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`Path.glob(on_error=)` / `rglob(on_error=)`**: a hook called as
+  `on_error(error)` when a directory cannot be listed, the same contract as
+  `walk()` and `os.walk`. Raising from it makes an unreadable directory
+  fatal; returning treats it as empty. Without the hook the listing is
+  skipped silently, as pathlib does and as before -- which left a caller
+  unable to tell an unreadable layer from an absent one. `error.filename`
+  names the directory even when the backend left it unset.
+- **`Path.glob(bound_loops=)` / `rglob(bound_loops=)`**: with `True`, a
+  directory is descended at most once per `**`, keyed on
+  `(st_dev, st_ino)` and seeded with the starting directory. This bounds a
+  Windows junction loop -- a junction reports `is_symlink() == False`, so
+  `recurse_symlinks=False` cannot see it, and one file in a looping tree
+  matched 64 times (pathlib walks it the same way). Default `False` keeps
+  pathlib's behaviour; a backend whose stat carries no identity is walked
+  unbounded. Both reported by yaconfiglib against 0.9.6.
+
 ### Fixed
 - **`has_glob_pattern()` was True for every Windows extended-length path.**
   The `?` in a `\\?\C:\...` anchor (and the `\\?\UNC\...` form) is a prefix,

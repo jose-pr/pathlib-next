@@ -155,6 +155,8 @@ def glob(
     include_hidden: bool = False,
     case_sensitive: bool | None = None,
     native: bool = True,
+    on_error: "_ty.Callable[[OSError], None] | None" = None,
+    bound_loops: bool = False,
 ) -> _ty.Iterable[_Globable]:
     """Return an iterator which yields the paths matching a pathname pattern.
 
@@ -205,6 +207,8 @@ def glob(
         include_hidden=include_hidden,
         case_sensitive=case_sensitive,
         native=native,
+        on_error=on_error,
+        bound_loops=bound_loops,
     )
 
 
@@ -217,6 +221,8 @@ def select(
     include_hidden: bool = True,
     case_sensitive: bool | None = None,
     native: bool = True,
+    on_error: "_ty.Callable[[OSError], None] | None" = None,
+    bound_loops: bool = False,
 ) -> _ty.Iterator[_Globable]:
     """Yield the paths under `base` matching the pattern components `parts`
     (see `parse_pattern()`); the engine behind `Path.glob()`.
@@ -246,6 +252,8 @@ def select(
         dironly,
         include_hidden,
         _DOUBLESTAR_SELECTS_FILES if native else True,
+        on_error,
+        bound_loops,
     )
     selected = _select(base, steps, 0, opts, None)
     if sum(1 for _, kind in steps if kind is None) < 2:
@@ -263,6 +271,8 @@ class _Options(_ty.NamedTuple):
     dironly: bool
     include_hidden: bool
     doublestar_selects_files: bool = _DOUBLESTAR_SELECTS_FILES
+    on_error: "_ty.Callable[[OSError], None] | None" = None
+    bound_loops: bool = False
 
 
 def _select(
@@ -280,9 +290,17 @@ def _select(
             return
         if last:
             with_files = opts.doublestar_selects_files and not opts.dironly
-            yield from _recurse(path, opts.include_hidden, with_files)
+            yield from _recurse(
+                path,
+                opts.include_hidden,
+                with_files,
+                opts.on_error,
+                opts.bound_loops,
+            )
             return
-        for directory in _recurse(path, opts.include_hidden, False):
+        for directory in _recurse(
+            path, opts.include_hidden, False, opts.on_error, opts.bound_loops
+        ):
             yield from _select(directory, steps, index + 1, opts, True)
         return
 
@@ -296,7 +314,7 @@ def _select(
 
     need_dir = opts.dironly or not last
     skip_hidden = not opts.include_hidden and not part.startswith(".")
-    for child, stat in _scan(path):
+    for child, stat in _scan(path, opts.on_error):
         if skip_hidden and child.is_hidden():
             continue
         if not kind.match(child.name):
@@ -310,34 +328,93 @@ def _select(
 
 
 def _recurse(
-    top: _Globable, include_hidden: bool, with_files: bool
+    top: _Globable,
+    include_hidden: bool,
+    with_files: bool,
+    on_error=None,
+    bound_loops: bool = False,
 ) -> _ty.Iterator[_Globable]:
     """Yield `top` and every directory below it (plus every other entry when
-    `with_files`), never descending through a directory symlink."""
+    `with_files`), never descending through a directory symlink.
+
+    With `bound_loops`, a directory is descended at most once per `**`,
+    keyed on `(st_dev, st_ino)` and seeded with `top`: that bounds a Windows
+    junction loop, which no symlink check can see (a junction reports
+    `is_symlink() == False`). The entry itself is still yielded -- it exists
+    -- only the descent is skipped. A backend whose stat has no identity
+    cannot be bounded this way and is walked as before.
+    """
     yield top
+    visited = set()
+    if bound_loops:
+        key = _identity(top)
+        if key is not None:
+            visited.add(key)
     stack = [top]
     while stack:
         directory = stack.pop()
-        for child, stat in _scan(directory):
+        for child, stat in _scan(directory, on_error):
             if not include_hidden and child.is_hidden():
                 continue
             is_dir = _entry_is_dir(child, stat, follow_symlinks=False)
+            if is_dir and bound_loops:
+                key = _identity(child)
+                if key is not None:
+                    if key in visited:
+                        # Already walked under another name: a junction back
+                        # into the tree, or a second link to one directory.
+                        # Yielding it too would repeat everything under it.
+                        continue
+                    visited.add(key)
             if is_dir or with_files:
                 yield child
             if is_dir:
                 stack.append(child)
 
 
-def _scan(directory: _Globable):
+def _scan(directory: _Globable, on_error=None):
     """(child, non-following stat or None) per entry; nothing if listing
-    fails. Materialized so a lazily-raising listing is still caught here."""
+    fails. Materialized so a lazily-raising listing is still caught here.
+
+    `on_error`, when given, is called as `on_error(error)` with the failure
+    -- the same contract as `Path.walk(on_error=)` and `os.walk`. Raising
+    from it propagates, which is how a caller turns an unreadable directory
+    back into an error; returning treats it as "nothing here", which is what
+    happens with no hook at all. `error.filename` is filled in with the
+    directory when the backend left it empty, so one argument is enough to
+    say where.
+    """
     scandir = getattr(directory, "_scandir", None)
     try:
         if scandir is None:
             return [(child, None) for child in directory.iterdir()]
         return [(_child(directory, name, stat), stat) for name, stat in scandir()]
-    except OSError:
+    except OSError as error:
+        if on_error is not None:
+            if not getattr(error, "filename", None):
+                try:
+                    error.filename = str(directory)
+                except Exception:
+                    pass
+            on_error(error)
         return ()
+
+
+def _identity(path: _Globable) -> "tuple | None":
+    """`(st_dev, st_ino)` of what `path` resolves to, or None when the
+    backend cannot say. Follows links deliberately: a Windows junction
+    reports `is_symlink() == False`, so its own metadata is no help --
+    `stat()` returning the TARGET's identity is what makes a loop visible.
+    """
+    try:
+        st = path.stat()
+    except (OSError, NotImplementedError, ValueError):
+        return None
+    dev = getattr(st, "st_dev", None)
+    ino = getattr(st, "st_ino", None)
+    if dev is None or ino is None or (not dev and not ino):
+        return None
+    return (dev, ino)
 
 
 def _child(directory: _Globable, name: str, stat) -> _Globable:

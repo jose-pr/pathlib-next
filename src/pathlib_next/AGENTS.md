@@ -73,7 +73,8 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     `PathSyncer`; override it when the listing call already returns metadata.
     `None` means "unknown", never "missing".
   - `glob(pattern, *, case_sensitive=None, include_hidden=True,
-    recursive=None, dironly=None, recurse_symlinks=False, native=True)` —
+    recursive=None, dironly=None, recurse_symlinks=False, native=True,
+    on_error=None, bound_loops=False)` —
     pathlib semantics: hidden entries included, `**` never descends into
     directory symlinks (`recurse_symlinks=True` → `NotImplementedError`), a
     trailing `**` selects files too on 3.13+, a missing or non-directory base
@@ -86,6 +87,20 @@ silently absent and `from pathlib_next.uri import UriPath` raises
       (`LocalPath("/etc/*.conf").glob(None)`), splitting at the first
       wildcard — the supported form for a path that is itself a pattern.
       `""` still raises.
+    - **`on_error(error)`** is called when a directory cannot be listed,
+      the same contract as `walk()`/`os.walk`: raising from it propagates,
+      returning treats that directory as empty. Without it the listing is
+      skipped in silence (pathlib's behaviour), so a caller could not tell
+      an unreadable directory from an absent one. `error.filename` names the
+      directory even when the backend left it unset.
+    - **`bound_loops=True`** descends a directory at most once per `**`,
+      keyed on `(st_dev, st_ino)` and seeded with the starting directory. It
+      bounds a Windows junction loop, which `recurse_symlinks=False` cannot
+      (a junction reports `is_symlink() == False`) and which `pathlib`
+      itself walks until the recursion limit. A directory reached a second
+      way is skipped entirely, not just not descended. A backend whose stat
+      carries no identity (`MemPath`, most remote schemes) is walked
+      unbounded, as before.
     - **`native=True`** (default) follows the running interpreter on the two
       rules pathlib changed mid-series: a trailing `/` is ignored before 3.11
       and selects directories only from 3.11; `a**` raises `ValueError`

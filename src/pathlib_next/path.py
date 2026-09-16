@@ -723,6 +723,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         dironly: bool = None,
         recurse_symlinks: bool = False,
         native: bool = True,
+        on_error: "_ty.Callable[[OSError], None]" = None,
+        bound_loops: bool = False,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
@@ -756,6 +758,21 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         everywhere, which is what a cross-backend or cross-version caller
         usually wants.
 
+        `on_error(error)` is called when a directory cannot be listed, the
+        same contract as `walk()` and `os.walk`: raising from it propagates
+        (an unreadable directory becomes an error), returning treats that
+        directory as empty. Without it such a listing is skipped silently --
+        pathlib's behaviour, and the reason a config loader could not tell a
+        missing layer from an unreadable one. `error.filename` names the
+        directory even when the backend left it empty.
+
+        `bound_loops=True` descends a directory at most once per "**",
+        keyed on `(st_dev, st_ino)`: that bounds a Windows junction loop,
+        which no symlink check can see (a junction reports
+        `is_symlink() == False`, so `recurse_symlinks=False` does not help
+        and pathlib itself loops until the recursion limit). A backend whose
+        stat carries no identity is walked unbounded, as before.
+
         A "**" component auto-enables recursion. Pass `recursive=False`
         explicitly to treat "**" as a plain "*" instead.
         Note for remote schemes (http/sftp): a recursive glob walks the
@@ -774,6 +791,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 case_sensitive=case_sensitive,
                 dironly=bool(dironly),
                 native=native,
+                on_error=on_error,
+                bound_loops=bound_loops,
             )
         # Validates eagerly (like pathlib 3.13+); the returned selection is
         # lazy. The pattern is never joined onto self: `self / pattern` let an
@@ -789,6 +808,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             include_hidden=include_hidden,
             case_sensitive=case_sensitive,
             native=native,
+            on_error=on_error,
+            bound_loops=bound_loops,
         )
 
     def rglob(
@@ -801,6 +822,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         dironly: bool = None,
         recurse_symlinks: bool = False,
         native: bool = True,
+        on_error: "_ty.Callable[[OSError], None]" = None,
+        bound_loops: bool = False,
     ):
         """Equivalent to `glob(f"**/{pattern}", recursive=True)`.
 
@@ -816,6 +839,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 dironly=dironly,
                 recurse_symlinks=recurse_symlinks,
                 native=native,
+                on_error=on_error,
+                bound_loops=bound_loops,
             )
         if not (isinstance(pattern, str) and not pattern):
             # Reject an absolute pattern before "**/" hides its anchor;
@@ -829,6 +854,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             dironly=dironly,
             recurse_symlinks=recurse_symlinks,
             native=native,
+            on_error=on_error,
+            bound_loops=bound_loops,
         )
 
     def walk(

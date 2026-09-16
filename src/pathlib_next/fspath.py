@@ -402,6 +402,8 @@ class LocalPath(
         dironly: bool = None,
         recurse_symlinks: bool = False,
         native: bool = True,
+        on_error: "_ty.Callable[[OSError], None]" = None,
+        bound_loops: bool = False,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
@@ -422,6 +424,8 @@ class LocalPath(
                 dironly=dironly,
                 recurse_symlinks=recurse_symlinks,
                 native=native,
+                on_error=on_error,
+                bound_loops=bound_loops,
             )
         pattern = _os.fspath(pattern)
         if pattern:
@@ -445,4 +449,6 @@ class LocalPath(
             dironly=dironly,
             recurse_symlinks=recurse_symlinks,
             native=native,
+            on_error=on_error,
+            bound_loops=bound_loops,
         )
