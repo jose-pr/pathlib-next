@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+- **Named the replacement for `glob("")`**, which 0.9.4 removed for pathlib
+  parity: `pathlib_next.utils.glob.glob(path, recursive=...)` expands a
+  pattern the path itself carries, splitting at the first wildcard. The
+  0.9.4 entry withdrew the capability without naming it, and `Path.glob()`'s
+  docstring documented the `ValueError` but not the alternative. Reported by
+  yaconfiglib, whose `path.glob("", recursive=...)` calls stopped working.
+
 ## [0.9.5] - 2026-09-16
 
 ### Fixed

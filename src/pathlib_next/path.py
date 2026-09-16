@@ -724,6 +724,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         `glob.NonRelativePatternError` (a `NotImplementedError` and a
         `ValueError`). `recurse_symlinks=True` is not supported.
 
+        To expand a pattern a path already CARRIES (`LocalPath("/etc/*.conf")`)
+        rather than one applied to a directory, call the module-level
+        `pathlib_next.utils.glob.glob(path, recursive=...)`: it splits the
+        path at its first wildcard and globs from there. That is the
+        supported spelling for what `glob("")` did before 0.9.4.
+
         A "**" component auto-enables recursion. Pass `recursive=False`
         explicitly to treat "**" as a plain "*" instead.
         Note for remote schemes (http/sftp): a recursive glob walks the

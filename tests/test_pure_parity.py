@@ -662,3 +662,38 @@ def test_generic_match_follows_312_semantics(cls, path, pattern, expected, monke
         path_module, "_sys", types.SimpleNamespace(version_info=(3, 12, 7))
     )
     assert cls(path).match(pattern, case_sensitive=True) is expected
+
+
+# --- the POSIX "//" root is a documented divergence -----------------------
+
+
+def test_double_slash_root_is_not_modelled_by_the_generic_classes():
+    """`pathlib` keeps `//` as a root distinct from `/`; the generic classes
+    do not, each for its own reason, and `docs/divergences.md` says so. This
+    pins what they actually do so the divergence cannot drift silently."""
+    assert str(pathlib.PurePosixPath("//")) == "//"
+    assert pathlib.PurePosixPath("//").root == "//"
+
+    # MemPath collapses it to the single root.
+    assert str(MemPath("//")) == "/"
+    assert tuple(MemPath("//").segments) == ("", "")
+    assert str(MemPath("//a/b")) == "/a/b"
+
+    # A Uri reads "//" as the start of an authority (RFC 3986), so "//a/b"
+    # has host "a" and path "/b" -- it cannot also be a root spelling.
+    assert Uri("//").path == ""
+    assert Uri("//a/b").path == "/b"
+    assert Uri("//a/b").source.host == "a"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="UNC paths are a Windows flavour")
+def test_double_slash_is_a_unc_drive_on_the_windows_flavour():
+    """The local classes inherit pathlib's parsing, so they agree exactly:
+    `//server/share/x` is a UNC drive, not a special root."""
+    from pathlib_next.fspath import WindowsPathname
+
+    for cls in (WindowsPathname, LocalPath):
+        assert str(cls("//server/share/x")) == str(
+            pathlib.PureWindowsPath("//server/share/x")
+        )
+        assert cls("//server/share/x").match("//server/share/*") is True
