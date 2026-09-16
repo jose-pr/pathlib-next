@@ -239,8 +239,13 @@ class ReadPathContract(PurePathContract):
             "empty_dir",
         }
         assert {_rel(root, p) for p in root.glob("sub/*.py")} == {"sub/c.py"}
-        # A trailing separator selects directories only.
-        assert {_rel(root, p) for p in root.glob("*/")} == {"sub", "empty_dir"}
+        # A trailing separator selects directories only -- with `native=False`,
+        # the one rule for every interpreter. The default follows the running
+        # one, and pathlib ignored a trailing separator before 3.11.
+        assert {_rel(root, p) for p in root.glob("*/", native=False)} == {
+            "sub",
+            "empty_dir",
+        }
 
     def test_glob_recursive(self, root):
         self._require("supports_listing")

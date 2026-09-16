@@ -704,13 +704,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
     def glob(
         self,
-        pattern: str | _ty.Self,
+        pattern: str | _ty.Self | None,
         *,
         case_sensitive: bool = None,
         include_hidden: bool = True,
         recursive: bool = None,
         dironly: bool = None,
         recurse_symlinks: bool = False,
+        native: bool = True,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
@@ -724,11 +725,19 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         `glob.NonRelativePatternError` (a `NotImplementedError` and a
         `ValueError`). `recurse_symlinks=True` is not supported.
 
-        To expand a pattern a path already CARRIES (`LocalPath("/etc/*.conf")`)
-        rather than one applied to a directory, call the module-level
-        `pathlib_next.utils.glob.glob(path, recursive=...)`: it splits the
-        path at its first wildcard and globs from there. That is the
-        supported spelling for what `glob("")` did before 0.9.4.
+        `pattern=None` expands the pattern THIS PATH CARRIES
+        (`LocalPath("/etc/*.conf").glob(None)`) instead of applying one to a
+        directory: the path is split at its first wildcard and globbed from
+        there (`utils.glob.glob()`). `""` still raises, as pathlib does.
+
+        `native=True` (the default) follows the running interpreter on the
+        two rules pathlib changed mid-series: a trailing "/" is ignored
+        before 3.11, and a component that merely contains "**" ("a**")
+        raises `ValueError` before 3.13. `native=False` applies one rule on
+        every version -- trailing "/" always selects directories only, "a**"
+        is always a plain wildcard -- so a pattern answers the same
+        everywhere, which is what a cross-backend or cross-version caller
+        usually wants.
 
         A "**" component auto-enables recursion. Pass `recursive=False`
         explicitly to treat "**" as a plain "*" instead.
@@ -737,10 +746,21 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         """
         if recurse_symlinks:
             raise NotImplementedError("glob(recurse_symlinks=True)")
+        if pattern is None:
+            # The pattern is the path itself; `glob()` splits at the first
+            # wildcard, so an absolute one is fine here (unlike a pattern
+            # argument, which must stay relative to self).
+            return _glob.glob(
+                self,
+                recursive=bool(recursive),
+                include_hidden=include_hidden,
+                case_sensitive=case_sensitive,
+                dironly=bool(dironly),
+            )
         # Validates eagerly (like pathlib 3.13+); the returned selection is
         # lazy. The pattern is never joined onto self: `self / pattern` let an
         # absolute pattern escape self and re-parsed "?" as a URI query.
-        parts, trailing_sep = _glob.parse_pattern(pattern)
+        parts, trailing_sep = _glob.parse_pattern(pattern, native=native)
         if recursive is None:
             recursive = _glob.RECURSIVE in parts
         return _glob.select(
@@ -754,19 +774,33 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
     def rglob(
         self,
-        pattern: str,
+        pattern: str | None,
         *,
         case_sensitive: bool = None,
         include_hidden: bool = True,
         recursive: bool = True,
         dironly: bool = None,
         recurse_symlinks: bool = False,
+        native: bool = True,
     ):
-        """Equivalent to `glob(f"**/{pattern}", recursive=True)`."""
+        """Equivalent to `glob(f"**/{pattern}", recursive=True)`.
+
+        `pattern=None` and `native=` mean what they do on `glob()`; with
+        `None` this is `glob(None, recursive=True)`, since a carried pattern
+        brings its own anchor and nothing can be prefixed to it."""
+        if pattern is None:
+            return self.glob(
+                None,
+                case_sensitive=case_sensitive,
+                include_hidden=include_hidden,
+                recursive=recursive,
+                dironly=dironly,
+                recurse_symlinks=recurse_symlinks,
+            )
         if not (isinstance(pattern, str) and not pattern):
             # Reject an absolute pattern before "**/" hides its anchor;
             # glob() validates without listing anything.
-            self.glob(pattern, recursive=False)
+            self.glob(pattern, recursive=False, native=native)
         return self.glob(
             f"**/{pattern}",
             case_sensitive=case_sensitive,
@@ -774,6 +808,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             recursive=recursive,
             dironly=dironly,
             recurse_symlinks=recurse_symlinks,
+            native=native,
         )
 
     def walk(

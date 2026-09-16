@@ -23,6 +23,15 @@ WILCARD_PATTERN = WILDCARD_PATTERN  # back-compat alias for the old typo'd name
 # interpreter so LocalPath keeps matching the pathlib it runs next to.
 _DOUBLESTAR_SELECTS_FILES = _sys.version_info >= (3, 13)
 
+# The two rules the running interpreter changed mid-series, honoured when
+# `native=True` (the default) and smoothed over when it is False:
+#   - a trailing "/" selects directories only from 3.11; before that pathlib
+#     ignores it entirely.
+#   - "**" is only a recursive component when it is the WHOLE component;
+#     "a**" raises before 3.13 and is a plain wildcard from 3.13.
+_TRAILING_SLASH_SELECTS_DIRS = _sys.version_info >= (3, 11)
+_PARTIAL_DOUBLESTAR_ALLOWED = _sys.version_info >= (3, 13)
+
 if _ty.TYPE_CHECKING:
     from ..path import P as _Globable
 else:
@@ -91,7 +100,9 @@ def full_match(segments: _ty.Sequence[str], pattern: str, case_sensitive: bool) 
     return end in states
 
 
-def parse_pattern(pattern: "str | _ty.Any") -> _ty.Tuple[_ty.List[str], bool]:
+def parse_pattern(
+    pattern: "str | _ty.Any", *, native: bool = True
+) -> _ty.Tuple[_ty.List[str], bool]:
     """Split a relative glob `pattern` (a `/`-separated string or a
     `Pathname`) into its components, and report whether it ended with a
     separator (directories only).
@@ -99,6 +110,14 @@ def parse_pattern(pattern: "str | _ty.Any") -> _ty.Tuple[_ty.List[str], bool]:
     Raises `ValueError` for an empty pattern and `NonRelativePatternError`
     for an absolute one, as `pathlib.Path.glob()` does. Empty and "."
     components are dropped.
+
+    `native=True` (the default) follows the running interpreter on the two
+    rules pathlib changed mid-series: a trailing "/" is ignored before 3.11
+    (it selects directories only from 3.11), and a component that merely
+    CONTAINS "**" ("a**") raises `ValueError` before 3.13. `native=False`
+    applies one rule on every version instead -- a trailing "/" always
+    selects directories only, "a**" is always a plain wildcard -- so a
+    pattern gives the same answer on every interpreter and every backend.
     """
     if isinstance(pattern, str):
         rooted = pattern.startswith("/")
@@ -113,7 +132,18 @@ def parse_pattern(pattern: "str | _ty.Any") -> _ty.Tuple[_ty.List[str], bool]:
     parts = [part for part in segments if part not in ("", ".")]
     if not parts:
         raise ValueError(f"Unacceptable pattern: {str(pattern)!r}")
-    return parts, bool(segments) and segments[-1] == ""
+    if native and not _PARTIAL_DOUBLESTAR_ALLOWED:
+        for part in parts:
+            if RECURSIVE in part and part != RECURSIVE:
+                # pathlib's own message, so an `except ValueError` that reads
+                # it sees the same text it does on this interpreter.
+                raise ValueError(
+                    "Invalid pattern: '**' can only be an entire path component"
+                )
+    trailing_sep = bool(segments) and segments[-1] == ""
+    if native and not _TRAILING_SLASH_SELECTS_DIRS:
+        trailing_sep = False
+    return parts, trailing_sep
 
 
 def glob(

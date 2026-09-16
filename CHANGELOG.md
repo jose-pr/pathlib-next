@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`Path.glob(None)` / `rglob(None)`**: expand the pattern the path itself
+  carries (`LocalPath("/etc/*.conf").glob(None)`), splitting at the first
+  wildcard. `glob("")` still raises `ValueError` as pathlib does -- `None`
+  is the spelling that cannot collide with a real pattern -- so this restores
+  what 0.9.4 removed as an explicit, supported form rather than by accident.
+- **`Path.glob(native=)` / `rglob(native=)`**, default `True`: follow the
+  running interpreter on the two rules pathlib changed mid-series. A
+  trailing `/` is ignored before 3.11 and selects directories only from
+  3.11; a component that merely contains `**` (`a**`) raises `ValueError`
+  before 3.13 and is a plain wildcard from 3.13. `native=False` applies one
+  rule on every version instead, which is what a caller comparing results
+  across backends or interpreters wants.
+
+### Changed
+- **`glob()` now matches the running interpreter exactly**, including on
+  Python 3.9-3.12 where it previously applied its own rule for a trailing
+  `/` and for `a**`. Measured with a 46-comparison differential sweep
+  against `pathlib`: 3.14 was already identical, and 3.9 went from 4
+  disagreements to 0. Pass `native=False` for the previous, version-
+  independent behaviour; `pathlib_next.testing`'s contract suite does.
+
 ### Documentation
 - **Named the replacement for `glob("")`**, which 0.9.4 removed for pathlib
   parity: `pathlib_next.utils.glob.glob(path, recursive=...)` expands a

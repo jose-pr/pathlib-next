@@ -73,16 +73,28 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     `PathSyncer`; override it when the listing call already returns metadata.
     `None` means "unknown", never "missing".
   - `glob(pattern, *, case_sensitive=None, include_hidden=True,
-    recursive=None, dironly=None, recurse_symlinks=False)` — pathlib
-    semantics: hidden entries included, a trailing `/` selects directories,
-    `**` never descends into directory symlinks (`recurse_symlinks=True` →
-    `NotImplementedError`), a trailing `**` selects files too on 3.13+, a
-    missing or non-directory base yields nothing, `""` → `ValueError`, an
-    absolute pattern → `glob.NonRelativePatternError`. `recursive=None`
-    enables recursion when a component is `**`; an explicit value wins.
-    Validates eagerly, selects lazily. On a remote scheme a recursive glob
-    lists every directory of the subtree.
+    recursive=None, dironly=None, recurse_symlinks=False, native=True)` —
+    pathlib semantics: hidden entries included, `**` never descends into
+    directory symlinks (`recurse_symlinks=True` → `NotImplementedError`), a
+    trailing `**` selects files too on 3.13+, a missing or non-directory base
+    yields nothing, `""` → `ValueError`, an absolute pattern →
+    `glob.NonRelativePatternError`. `recursive=None` enables recursion when a
+    component is `**`; an explicit value wins. Validates eagerly, selects
+    lazily. On a remote scheme a recursive glob lists every directory of the
+    subtree.
+    - **`pattern=None`** expands the pattern THIS PATH CARRIES
+      (`LocalPath("/etc/*.conf").glob(None)`), splitting at the first
+      wildcard — the supported form for a path that is itself a pattern.
+      `""` still raises.
+    - **`native=True`** (default) follows the running interpreter on the two
+      rules pathlib changed mid-series: a trailing `/` is ignored before 3.11
+      and selects directories only from 3.11; `a**` raises `ValueError`
+      before 3.13 and is a plain wildcard from 3.13. `native=False` applies
+      one rule on every version (trailing `/` → directories only, `a**` → a
+      plain wildcard), so a pattern answers the same on every interpreter and
+      backend; `pathlib_next.testing`'s contract suite uses it.
   - `rglob(pattern, **same_kwargs)` — `glob(f"**/{pattern}", recursive=True)`.
+    `pattern=None` is `glob(None)`.
   - `walk(top_down=True, on_error=None, follow_symlinks=False)` — drives
     `_scandir()`; its stats are trusted only with `follow_symlinks=False`. No
     symlink-cycle protection when following (only `LocalPath` has pathlib's).

@@ -394,21 +394,35 @@ class LocalPath(
 
     def glob(
         self,
-        pattern: str | _proto.FsPathLike,
+        pattern: "str | _proto.FsPathLike | None",
         *,
         case_sensitive: bool = None,
         include_hidden: bool = True,
         recursive: bool = None,
         dironly: bool = None,
         recurse_symlinks: bool = False,
+        native: bool = True,
     ):
         """Iterate over this subtree and yield all existing files (of any
         kind, including directories) matching the given relative pattern.
 
-        Same semantics as Path.glob(); every separator of this flavour
-        splits the pattern, and a pattern with a drive or root raises
-        `glob.NonRelativePatternError` like pathlib.
+        Same semantics as Path.glob(), including `pattern=None` (expand the
+        pattern this path carries) and `native=` (follow the running
+        interpreter, or one rule on every version); every separator of this
+        flavour splits the pattern, and a pattern with a drive or root
+        raises `glob.NonRelativePatternError` like pathlib.
         """
+        if pattern is None:
+            return _proto.Path.glob(
+                self,
+                None,
+                case_sensitive=case_sensitive,
+                include_hidden=include_hidden,
+                recursive=recursive,
+                dironly=dironly,
+                recurse_symlinks=recurse_symlinks,
+                native=native,
+            )
         pattern = _os.fspath(pattern)
         if pattern:
             anchored = self.with_segments(pattern)
@@ -430,4 +444,5 @@ class LocalPath(
             recursive=recursive,
             dironly=dironly,
             recurse_symlinks=recurse_symlinks,
+            native=native,
         )

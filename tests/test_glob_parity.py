@@ -303,3 +303,87 @@ def test_full_match_repeated_doublestar_is_not_exponential():
     assert not _glob.full_match(segments, pattern, True)
     assert _glob.full_match(segments, "/".join(["**", "x"] * 8), True)
     assert time.monotonic() - start < 1
+
+
+# --- glob(None): expand the pattern this path carries ---------------------
+
+
+@pytest.mark.parametrize("cls", ["local", "uri"])
+def test_glob_none_expands_the_pattern_the_path_carries(tree, cls):
+    """`glob("")` raises like pathlib; `glob(None)` is the supported way to
+    expand a path that IS a pattern -- what yaconfiglib's `glob("")` did
+    before 0.9.4."""
+    root = pathlib_next.LocalPath(tree)
+    carrier = root / "*.py" if cls == "local" else UriPath((root / "*.py").as_uri())
+    got = sorted(p.name for p in carrier.glob(None))
+    assert got == sorted(p.name for p in root.glob("*.py"))
+    assert got
+
+
+def test_glob_none_recursive_and_rglob_none(tree):
+    root = pathlib_next.LocalPath(tree)
+    carrier = root / "**" / "*.py"
+    expected = sorted(p.name for p in root.rglob("*.py"))
+    assert sorted(p.name for p in carrier.glob(None, recursive=True)) == expected
+    assert sorted(p.name for p in carrier.rglob(None)) == expected
+
+
+def test_glob_empty_string_still_raises(tree):
+    """The parity fix stands: only `None` opts into the carried-pattern
+    form, so `glob("")` keeps raising exactly what pathlib raises."""
+    root = pathlib_next.LocalPath(tree)
+    with pytest.raises(ValueError):
+        list(root.glob(""))
+    with pytest.raises(ValueError):
+        list(pathlib.Path(tree).glob(""))
+
+
+# --- native=: follow the interpreter, or one rule everywhere --------------
+
+
+def test_native_true_matches_the_running_interpreter_for_a_trailing_slash(tree):
+    """Before 3.11 pathlib ignores a trailing separator; from 3.11 it selects
+    directories only. The default follows whichever is running."""
+    root = pathlib_next.LocalPath(tree)
+    ours = {p.name for p in root.glob("*/")}
+    stdlib = {p.name for p in pathlib.Path(tree).glob("*/")}
+    assert ours == stdlib
+
+
+def test_native_false_selects_directories_on_every_version(tree):
+    root = pathlib_next.LocalPath(tree)
+    got = {p.name for p in root.glob("*/", native=False)}
+    assert got == {p.name for p in root.iterdir() if p.is_dir()}
+
+
+def test_native_true_follows_the_interpreter_for_a_partial_doublestar(tree):
+    """ "a**" is a plain wildcard from 3.13 and a ValueError before it."""
+    root = pathlib_next.LocalPath(tree)
+    if sys.version_info >= (3, 13):
+        assert {p.name for p in root.glob("**.py")} == {
+            p.name for p in pathlib.Path(tree).glob("**.py")
+        }
+    else:
+        with pytest.raises(ValueError, match="entire path component"):
+            list(root.glob("**.py"))
+        with pytest.raises(ValueError, match="entire path component"):
+            list(pathlib.Path(tree).glob("**.py"))
+
+
+def test_native_false_treats_a_partial_doublestar_as_a_wildcard(tree):
+    root = pathlib_next.LocalPath(tree)
+    assert {p.name for p in root.glob("**.py", native=False)} == {
+        p.name for p in root.glob("*.py", native=False)
+    }
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_native_is_accepted_by_every_generic_backend(tree, native):
+    """The knob is on `Path`, so every backend takes it -- a MemPath has no
+    "running interpreter" of its own, and must still answer."""
+    mem = MemPath("/m")
+    mem.mkdir(parents=True)
+    (mem / "x.py").write_text("x")
+    (mem / "d").mkdir()
+    assert {p.name for p in mem.glob("*.py", native=native)} == {"x.py"}
+    assert {p.name for p in mem.glob("*", native=native)} == {"x.py", "d"}
