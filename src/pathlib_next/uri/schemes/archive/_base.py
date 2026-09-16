@@ -17,26 +17,26 @@ from ..file import FileUri
 
 _SEP = "!/"
 _SCHEME_RE = _re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
-_MEMBER_SEP_RE = _re.compile(r"[/\\]")
-_DRIVE_RE = _re.compile(r"^[a-zA-Z]:")
 # Every scheme an `ArchiveUri` class registers (see `archive/__init__.py`).
 _ARCHIVE_SCHEMES = ("zip", "tar", "archive", "archive+zip", "archive+tar")
 
 
 def _is_safe_member_name(name: str) -> bool:
-    """Whether archive member `name` stays inside the archive root once its
-    parts are joined onto a destination (e.g. by a recursive `copy()`).
+    """Whether archive member `name` is a usable relative path inside the
+    archive: every part a real name, none of them escaping the root.
 
-    Both `/` and `\\` count as separators here -- only here: lookups keep
-    the raw member name, since `\\` is a legal filename character on POSIX.
-    Rejects absolute names, empty/`.`/`..` parts and drive-qualified parts
-    (`C:x`, `C:..`); a trailing `/` (a directory marker) is allowed."""
+    Only the rules that hold on every platform are applied here, because an
+    archive has no platform of its own: `\\`, `:` and trailing dots are
+    ordinary filename characters on POSIX, and an archive written there may
+    legitimately contain `C:drive.txt` or `a\\b`. Refusing to *join* such a
+    name onto a destination that reads it differently is the destination's
+    rule, and is applied per target where the joining happens --
+    `Path.copy(recursive=True)`, `PathSyncer` and `utils.unpack_archive()`
+    each check `is_safe_child_name(..., windows=is_windows_flavoured(dest))`.
+    A trailing `/` (a directory marker) is allowed."""
     if name.endswith("/"):
         name = name[:-1]
-    return all(
-        is_safe_child_name(part) and not _DRIVE_RE.match(part)
-        for part in _MEMBER_SEP_RE.split(name)
-    )
+    return all(is_safe_child_name(part) for part in name.split("/"))
 
 
 def _normalize_member_name(name: str) -> "str | None":
@@ -52,10 +52,13 @@ def _normalize_member_name(name: str) -> "str | None":
     the same member in a zip and in a tar.
 
     A name that would leave the root has no normalized form inside the
-    archive and is rejected (None): absolute (`/abs`), drive-qualified
-    (`C:x`), or with more `..` than parts to spend them on. `..` that stays
-    inside is resolved (`pkg/../ok.txt` is `ok.txt`). A trailing `/` (a
-    directory marker) is kept, and the archive root itself normalizes to "".
+    archive and is rejected (None): absolute (`/abs`), or with more `..`
+    than parts to spend them on. `..` that stays inside is resolved
+    (`pkg/../ok.txt` is `ok.txt`). A drive-shaped part (`C:x`) is NOT
+    rejected here: it is a legal POSIX filename, and only a destination
+    that reads names with Windows rules is endangered by it -- see
+    `_is_safe_member_name`. A trailing `/` (a directory marker) is kept, and
+    the archive root itself normalizes to "".
     """
     if name.startswith("/"):
         return None
@@ -73,8 +76,6 @@ def _normalize_member_name(name: str) -> "str | None":
     normalized = "/".join(parts)
     if not normalized:
         return ""  # the archive root ("", ".", "./", "a/..")
-    # Backslash tricks ("..\\..\\x") and drive-qualified parts are caught
-    # here: the loop above only splits on "/".
     if not _is_safe_member_name(normalized):
         return None
     return normalized + "/" if directory else normalized

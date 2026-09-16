@@ -114,6 +114,13 @@ silently absent and `from pathlib_next.uri import UriPath` raises
       the same file (or a case-insensitive alias) → `OSError(EINVAL)`.
     - The source is opened before the target is touched; a failed stream
       removes the partial target.
+    - A recursive copy refuses any child name that would not stay inside
+      `target` — `..`, and `\`/`:`/a trailing dot when the target reads
+      names with Windows rules (`utils.is_windows_flavoured()`). The names
+      come from a listing the destination does not control (an archive, a
+      remote index, an object-store key), and on a Windows target `"C:x"`
+      joins to a drive-relative path outside it. Raised as `ValueError`
+      through `ignore_error`, per child, like any other child failure.
     - `follow_symlinks=False` on a symlink recreates the link
       (`NotImplementedError` if either side cannot).
     - `preserve_metadata=True` copies permission bits only, and only a mode the
@@ -486,10 +493,15 @@ chained (their text can carry credentials).
     `shutil.make_archive`), empty segments (`a//b`) and interior `.`/`..`
     (`a/./b`, `a/b/../c`) resolve, so one member has one name and a listing
     and a lookup always agree. The spelling as written still addresses the
-    member. A name that would leave the root -- `../x`, `/abs`, `C:x`, or a
-    `..` with nothing to spend it on -- has no name inside the archive: it
-    is never listed, never readable, and cannot be written (the write fails
-    and creates nothing). When two spellings normalize to one name the
+    member. A name that would leave the root -- `../x`, `/abs`, or a `..`
+    with nothing to spend it on -- has no name inside the archive: it is
+    never listed, never readable, and cannot be written (the write fails and
+    creates nothing). A name only a *Windows destination* would misread
+    (`C:drive.txt`, `a\b`) IS a member, because it is an ordinary POSIX
+    filename; refusing to join it is the destination's rule, applied by
+    whatever writes there (see `copy()` below, `PathSyncer`,
+    `unpack_archive()`). `zipfile` itself rewrites `\` to `/`, so a
+    backslash name only survives in a tar. When two spellings normalize to one name the
     later member wins, as in `zipfile`/`tarfile`. Exception types are POSIX on every
     platform.
   - Writes: zip only, and only with a local `file:` outer (else

@@ -1180,8 +1180,27 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     raise FileExistsError(target)
             else:
                 target.mkdir()
+            windows_target = _utils.is_windows_flavoured(target)
             for child in children:
                 try:
+                    # The names come from a listing the destination does not
+                    # control (an archive, a remote index, an object-store
+                    # key), so one that is not a single component inside
+                    # `target` must never be joined onto it: on a Windows
+                    # target "C:x" joins to a drive-relative path outside it
+                    # entirely, and so does "a\\b". Reported through
+                    # `ignore_error` like any other per-child failure, not
+                    # silently skipped. `PathSyncer` and
+                    # `utils.unpack_archive()` apply the same rule per
+                    # destination; an archive listing keeps such names,
+                    # because they are ordinary filenames on POSIX.
+                    if not _utils.is_safe_child_name(
+                        child.name, windows=windows_target
+                    ):
+                        raise ValueError(
+                            f"refusing unsafe child name {child.name!r} "
+                            f"under {target}"
+                        )
                     child.copy(
                         target / child.name,
                         overwrite=overwrite,

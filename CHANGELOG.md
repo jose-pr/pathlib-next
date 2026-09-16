@@ -19,7 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   absent from listings.
 
 ### Changed
-- **A member name that escapes the archive root** (`../x`, `/abs`, `C:x`, a
+- **A drive- or backslash-shaped member name is no longer dropped.**
+  `C:drive.txt` and `a\b` are ordinary filenames on POSIX, and an archive
+  written there may contain them; they were silently absent from every
+  listing and unreadable on every platform. The rule they were failing is a
+  *destination* rule, and now lives where the joining happens:
+  `Path.copy(recursive=True)` refuses a child name that would not stay
+  inside its target (`ValueError` through `ignore_error`), which is what
+  `PathSyncer` and `utils.unpack_archive()` already did per destination.
+  Copying such a member onto a Windows path is still refused; copying it to
+  a POSIX path, a `MemPath` or another archive now works.
+- **A member name that escapes the archive root** (`../x`, `/abs`, a
   `..` with nothing left to consume) has no name inside the archive: it was
   already never listed, and is now never readable either. Such a member
   used to be hidden from listings while `read_bytes()` still returned it

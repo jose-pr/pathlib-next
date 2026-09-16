@@ -18,6 +18,8 @@ import zipfile
 import pytest
 
 from pathlib_next import LocalPath
+from pathlib_next import path as path_module
+from pathlib_next.mempath import MemPath
 from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes.archive.zip import _strip_zip64_extra
 from pathlib_next.utils import unpack_archive
@@ -364,26 +366,73 @@ def _crafted(tmp_path, fmt):
 _URI = {"zip": _zip_uri, "tar": _tar_uri}
 
 
+def _crafted_pkg_children(fmt):
+    """The members of `pkg` that survive, sorted. The escaping ones never
+    appear; the drive-shaped ones do. They differ by format only because
+    `zipfile` rewrites `\\` to `/` as it stores a name, which turns the
+    backslash member into `pkg/../../ESCAPED_BACKSLASH.txt` -- an escape,
+    dropped -- while tar keeps it as one ordinary filename."""
+    children = ["C:..", "D:evil.txt", "ok.txt"]
+    if fmt == "tar":
+        children.append("..\\..\\ESCAPED_BACKSLASH.txt")
+    return sorted(children)
+
+
 @pytest.mark.parametrize("fmt", ["zip", "tar"])
-def test_archive_listing_skips_unsafe_member_names(tmp_path, fmt):
+def test_archive_listing_skips_escaping_member_names(tmp_path, fmt):
+    """Only a name with no place inside the archive is skipped. A name that
+    merely a *Windows destination* would misread (`D:evil.txt`, `C:..`,
+    `..\\..\\x`) is an ordinary POSIX filename and stays listed; refusing to
+    join it is the destination's job."""
     archive = _crafted(tmp_path, fmt)
     pkg = UriPath(_URI[fmt](archive, "pkg"))
-    assert [p.name for p in pkg.iterdir()] == ["ok.txt"]
+    assert sorted(p.name for p in pkg.iterdir()) == _crafted_pkg_children(fmt)
+    # "pkg/../../ESCAPED_DOTDOT.txt" and "/abs.txt" have no name in here.
     assert [p.name for p in UriPath(_URI[fmt](archive)).iterdir()] == ["pkg"]
 
 
 @pytest.mark.parametrize("fmt", ["zip", "tar"])
-def test_archive_recursive_copy_stays_inside_destination(tmp_path, fmt):
+def test_archive_recursive_copy_stays_inside_destination(tmp_path, fmt, monkeypatch):
+    """A Windows destination refuses every child name it would read as a
+    drive or a separator, so nothing lands outside it. Checked with the
+    target's flavour forced, since the same archive is safe on POSIX."""
+    monkeypatch.setattr(path_module._utils, "is_windows_flavoured", lambda p: True)
     archive = _crafted(tmp_path / "src", fmt)
     work = tmp_path / "work"
     dest = work / "deep" / "dest"
     dest.parent.mkdir(parents=True)
     pkg = UriPath(_URI[fmt](archive, "pkg"))
-    pkg.copy(LocalPath(dest), recursive=True, overwrite=True)
+    refused = []
+    pkg.copy(
+        LocalPath(dest),
+        recursive=True,
+        overwrite=True,
+        ignore_error=refused.append,
+    )
     assert (dest / "ok.txt").read_bytes() == b"ok"
     assert [p.name for p in dest.iterdir()] == ["ok.txt"]
+    expected = [n for n in _crafted_pkg_children(fmt) if n != "ok.txt"]
+    messages = [str(e) for e in refused]
+    assert len(messages) == len(expected)
+    for name in expected:
+        assert any(repr(name) in message for message in messages), name
     outside = [p for p in work.rglob("*") if p != dest and dest not in p.parents]
     assert outside == [dest.parent]
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+def test_archive_recursive_copy_keeps_posix_names_on_a_posix_destination(tmp_path, fmt):
+    """The mirror image: to a destination that reads names with POSIX rules
+    the very same members are ordinary files and are copied. `MemPath` is
+    that destination on any host -- Windows itself cannot hold these names,
+    so a local directory could not show this on this machine."""
+    archive = _crafted(tmp_path / "src", fmt)
+    dest = MemPath("/dest")
+    dest.mkdir(parents=True)
+    pkg = UriPath(_URI[fmt](archive, "pkg"))
+    pkg.copy(dest, recursive=True, overwrite=True)
+    assert sorted(p.name for p in dest.iterdir()) == _crafted_pkg_children(fmt)
+    assert (dest / "ok.txt").read_bytes() == b"ok"
 
 
 @pytest.mark.parametrize("fmt", ["zip", "tar"])
@@ -466,9 +515,42 @@ _UNSAFE_MEMBER_NAMES = [
     "../escape.txt",
     "pkg/../../escape.txt",
     "/abs.txt",
-    "C:drive.txt",
-    "pkg/..\\..\\back.txt",
 ]
+
+#: Legal POSIX filenames that a Windows *destination* would read as a drive.
+#: They are real members: the rule against joining them onto a destination
+#: belongs to that destination (checked per target in
+#: `Path.copy(recursive=True)`, `PathSyncer` and `unpack_archive()`), not to
+#: the archive, which has no platform of its own.
+_DRIVE_SHAPED_MEMBER_NAMES = ["C:drive.txt", "pkg/D:evil.txt"]
+
+#: The same point for `\`, but tar only: `zipfile` rewrites `\` to `/` when
+#: it stores a name, so `back\slash.txt` comes back as `back/slash.txt` and
+#: never reaches this library as a backslash name at all.
+_BACKSLASH_MEMBER_NAMES = ["back\\slash.txt", "pkg/..\\..\\back.txt"]
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+@pytest.mark.parametrize("name", _DRIVE_SHAPED_MEMBER_NAMES)
+def test_drive_shaped_member_names_are_listed_and_readable(tmp_path, fmt, name):
+    """Dropping these lost real files: an archive written on POSIX may hold
+    `C:drive.txt`, which escapes nothing there."""
+    write = _write_zip if fmt == "zip" else _write_tar
+    archive = write(tmp_path / f"shaped.{fmt}", [(name, b"real"), ("ok.txt", b"ok")])
+    root = UriPath(_URI[fmt](archive))
+    assert name in [p.path for p in root.rglob("*")]
+    # A bare join would re-parse a leading "C:" as a URI scheme (the
+    # documented round trip), so address it as the header prescribes.
+    assert root.with_segments(name).read_bytes() == b"real"
+
+
+@pytest.mark.parametrize("name", _BACKSLASH_MEMBER_NAMES)
+def test_backslash_member_names_are_listed_and_readable_in_a_tar(tmp_path, name):
+    """`\\` is an ordinary filename character on POSIX and tar keeps it."""
+    archive = _write_tar(tmp_path / "shaped.tar", [(name, b"real"), ("ok.txt", b"ok")])
+    root = UriPath(_URI["tar"](archive))
+    assert name in [p.path for p in root.rglob("*")]
+    assert root.with_segments(name).read_bytes() == b"real"
 
 
 @pytest.mark.parametrize("fmt", ["zip", "tar"])

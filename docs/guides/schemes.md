@@ -210,9 +210,12 @@ The `<archive-uri>` is any absolute URI with an explicit scheme, so
   member lists and reads under one name however the archive was written
   (`tar -C dir .` and `shutil.make_archive` prefix every member with `./`).
   The spelling as written still works.
-- Members whose names would escape the archive (`..` past the root, absolute
-  or drive paths) have no name inside it: never listed, never readable.
-  Exception types are the POSIX ones on every platform.
+- Members whose names would escape the archive (`..` past the root, or an
+  absolute path) have no name inside it: never listed, never readable. A
+  name that merely a Windows destination would misread -- `C:drive.txt`, or
+  one containing `\` -- is a normal member, since both are ordinary
+  filenames on POSIX; copying or extracting it onto a Windows path is what
+  refuses it. Exception types are the POSIX ones on every platform.
 
 ## Git hosting
 
