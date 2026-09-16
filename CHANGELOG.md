@@ -8,13 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **`rm(on_links=, on_binds=)`**: what a recursive removal does with a
-  symlink, and with a binding (a Windows junction, a mount point). Each
-  takes `"rm"` (the default -- remove the entry itself, never its contents,
-  as `rm -r` does), `"follow"` (remove what is behind it), `"ignore"`
+- **`rm(follow_symlinks=, follow_binds=)`**: what a recursive removal does
+  with a symlink, and with a binding (a Windows junction, a mount point).
+  Each takes `False` (the default -- remove the entry itself, never its
+  contents, as `rm -r` does), `True` (remove what is behind it), `None`
   (leave it in place, so the enclosing directory is not empty and reports
-  it), or a callable `policy(path) -> str` asked per entry, so one tree can
-  keep one mount and follow another.
+  it), or a callable `policy(path) -> bool | None` asked per entry, so one
+  tree can keep one mount and follow another. Named for the keyword
+  `stat()`, `walk()` and `copy()` already use for the same idea, rather
+  than a second vocabulary.
 - **`Path.is_junction()`, `Path.is_mount()` and `Path.is_dir_binding()`**:
   a directory that is another tree's second NAME -- a Windows junction, or
   a mount point such as a Linux bind mount -- is now a first-class concept

@@ -131,18 +131,20 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   - `_mkdir(mode)` (stub) / `mkdir(mode=0o777, parents=False, exist_ok=False)`.
   - `unlink(missing_ok=False)`, `rmdir()` — stubs.
   - `rm(recursive=False, missing_ok=False, ignore_error=False, *,
-    on_links="rm", on_binds="rm")` — extension.
+    follow_symlinks=False, follow_binds=False)` — extension.
     `ignore_error` is a bool or `callable(error, path) -> bool` (True
     swallows); each error is offered once. Recursive removal is bottom-up and
     never descends through a directory symlink or a binding (a Windows
     junction, a mount point — `is_dir_binding()`): the entry itself is
     removed, never what is behind it, which is what `rm -r` does.
-    `on_links=` (symlinks) and `on_binds=` (bindings) choose per call:
-    `"rm"` (default, remove the entry), `"follow"` (remove the contents
-    behind it too), `"ignore"` (leave it in place — the enclosing directory
-    is then not empty and says so), or a callable `policy(path) -> str`
-    asked per entry, so one tree can keep one mount and follow another.
-    Path components before the final one are followed as usual.
+    `follow_symlinks=` (symlinks) and `follow_binds=` (bindings) choose per
+    call: `False` (default, remove the entry), `True` (remove the contents
+    behind it too), `None` (leave it in place — the enclosing directory is
+    then not empty and says so), or a callable `policy(path) -> bool | None`
+    asked per entry, so one tree can keep one mount and follow another. The
+    name matches `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
+    a second vocabulary for the same idea. Path components before the final
+    one are followed as usual.
   - `rename(target)` — stub. Implementations return the new path.
   - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
     object) / `symlink_to(target, target_is_directory=False, *, force=False)`

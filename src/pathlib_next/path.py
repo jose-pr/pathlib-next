@@ -1019,38 +1019,39 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         missing_ok=False,
         ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
         *,
-        on_links: "str | _ty.Callable[[_ty.Self], str]" = "rm",
-        on_binds: "str | _ty.Callable[[_ty.Self], str]" = "rm",
+        follow_symlinks: "bool | None | _ty.Callable[[_ty.Self], bool | None]" = False,
+        follow_binds: "bool | None | _ty.Callable[[_ty.Self], bool | None]" = False,
     ):
         """Remove this file or directory, optionally recursively and ignoring errors.
 
-        `on_links` applies to a symlink met during a recursive removal,
-        `on_binds` to a binding -- a directory that is another tree's second
-        NAME rather than part of this one (`is_dir_binding()`: a Windows
-        junction, a mount point, a bind mount). Both take:
+        `follow_symlinks` applies to a symlink met during a recursive
+        removal, `follow_binds` to a binding -- a directory that is another
+        tree's second NAME rather than part of this one (`is_dir_binding()`:
+        a Windows junction, a mount point, a bind mount). Both take:
 
-        - `"rm"` (default) -- remove the entry itself, never what is behind
+        - `False` (default) -- remove the entry itself, never what is behind
           it: `unlink()` for a symlink, `rmdir()` for a binding. This is what
           `rm -r` does, and on a live mount the `rmdir()` fails rather than
           emptying someone else's filesystem.
-        - `"follow"` -- remove the contents behind it, then the entry. What a
+        - `True` -- remove the contents behind it, then the entry. What a
           walker that cannot tell the difference does by accident.
-        - `"ignore"` -- leave it in place. The enclosing directory is then
-          not empty, so its own removal reports that.
-        - a callable `policy(path) -> str` -- asked per entry, so one tree
-          can keep one mount and follow another. Returning None means `"rm"`.
+        - `None` -- leave it in place. The enclosing directory is then not
+          empty, so its own removal reports that.
+        - a callable `policy(path) -> bool | None` -- asked per entry with
+          the same three answers, so one tree can keep one mount and follow
+          another.
 
         Path components BEFORE the final one are followed as usual; these
-        policies decide what happens to the entry itself.
+        decide what happens to the entry itself. The name matches
+        `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
+        inventing a second vocabulary for the same idea.
         """
         # Same bool-or-callable normalization as copy()/PathSyncer, via the
         # shared helper. A supplied callable keeps rm()'s own `(error, path)`
         # arity -- arities differ per call site by design, see the helper.
         _onerror = _utils.as_error_handler(ignore_error)
-        if not callable(on_links) and on_links not in _LINK_POLICIES:
-            raise ValueError(f"on_links must be one of {_LINK_POLICIES} or a callable")
-        if not callable(on_binds) and on_binds not in _LINK_POLICIES:
-            raise ValueError(f"on_binds must be one of {_LINK_POLICIES} or a callable")
+        _check_follow("follow_symlinks", follow_symlinks)
+        _check_follow("follow_binds", follow_binds)
 
         # An error the handler declined, on its way out: each enclosing
         # directory's `except` catches it again, and consulting the handler
@@ -1091,7 +1092,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         # A link, whatever it points at. The non-following
                         # stat says "link", so this branch is reached before
                         # the directory one.
-                        policy = _link_policy(on_links, child)
+                        policy = _follow_policy(follow_symlinks, child)
                         if policy == "ignore":
                             continue
                         if policy == "follow" and child.is_dir():
@@ -1102,7 +1103,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         if child._is_junction_link():
                             # A binding: what is inside belongs to the tree
                             # it names, not to this one.
-                            policy = _link_policy(on_binds, child)
+                            policy = _follow_policy(follow_binds, child)
                             if policy == "ignore":
                                 continue
                             if policy == "follow":
@@ -1134,7 +1135,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 _handle(_os_error(FileNotFoundError, _errno.ENOENT, self), self)
         elif stat.is_dir():
             binding = self._is_junction_link()
-            policy = _link_policy(on_binds, self) if binding else "follow"
+            policy = _follow_policy(follow_binds, self) if binding else "follow"
             if policy == "ignore":
                 return
             if recursive and (not binding or policy == "follow"):
@@ -1563,30 +1564,31 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             src.unlink()
 
 
-#: What `rm(recursive=True)` may do with an entry that is not part of the
-#: tree it was asked to remove -- a symlink, or a binding (a Windows
-#: junction, a mount point). `"rm"` removes the entry itself and never its
-#: contents, which is what `rm -r` does; `"follow"` removes what is behind
-#: it; `"ignore"` leaves it alone entirely.
-_LINK_POLICIES = ("rm", "follow", "ignore")
+def _follow_policy(policy, path: "Path") -> str:
+    """Resolve a `follow_symlinks=`/`follow_binds=` value for `path`.
 
+    `False` (the default) means "remove the entry itself, never what is
+    behind it" -- `rm -r` semantics; `True` means "remove what is behind
+    it"; `None` means "leave it alone entirely". A callable is asked per
+    entry (`policy(path)`) and returns one of those three, so one tree can
+    keep one mount and follow another.
 
-def _link_policy(policy, path: "Path") -> str:
-    """Resolve an `on_links=`/`on_binds=` policy for `path`.
-
-    A callable is asked per entry (`policy(path)`) and may return any of the
-    policy names, or None for the default `"rm"` -- so a caller can decide
-    per path (keep this mount, follow that one) instead of per call.
+    Returns the internal name: "rm", "follow" or "ignore".
     """
     if callable(policy):
         policy = policy(path)
-        if policy is None:
-            return "rm"
-    if policy not in _LINK_POLICIES:
-        raise ValueError(
-            f"policy must be one of {_LINK_POLICIES} or a callable, got {policy!r}"
-        )
-    return policy
+    if policy is None:
+        return "ignore"
+    if policy is True:
+        return "follow"
+    if policy is False:
+        return "rm"
+    raise ValueError(f"expected True, False, None or a callable, got {policy!r}")
+
+
+def _check_follow(name: str, policy) -> None:
+    if not (policy is None or callable(policy) or isinstance(policy, bool)):
+        raise ValueError(f"{name} must be True, False, None or a callable")
 
 
 def _contains(src: Path, target: Path) -> bool:

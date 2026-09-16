@@ -408,7 +408,7 @@ def test_recursive_rm_does_not_descend_into_a_mount_point(tmp_path, monkeypatch)
     assert not (tmp_path / "tree" / "own.txt").exists()
 
 
-# --- rm(on_links=, on_binds=) ---------------------------------------------
+# --- rm(follow_symlinks=, follow_binds=) ----------------------------------
 
 
 @pytest.fixture
@@ -458,7 +458,7 @@ def test_rm_follow_removes_what_is_behind_them(tree_with_link_and_binding):
     """Opt in and the contents behind both go too -- what a walker that
     cannot tell a binding from a directory does by accident."""
     root = tree_with_link_and_binding
-    LocalPath(root / "tree").rm(recursive=True, on_links="follow", on_binds="follow")
+    LocalPath(root / "tree").rm(recursive=True, follow_symlinks=True, follow_binds=True)
     assert not (root / "tree").exists()
     assert not (root / "target" / "keep.txt").exists()
 
@@ -471,8 +471,8 @@ def test_rm_ignore_leaves_them_in_place(tree_with_link_and_binding):
     LocalPath(root / "tree").rm(
         recursive=True,
         ignore_error=_tolerate(errors),
-        on_links="ignore",
-        on_binds="ignore",
+        follow_symlinks=None,
+        follow_binds=None,
     )
     left = sorted(p.name for p in (root / "tree").iterdir())
     assert left == ["bind", "link"]
@@ -488,18 +488,18 @@ def test_rm_policy_may_be_decided_per_entry(tree_with_link_and_binding):
     LocalPath(root / "tree").rm(
         recursive=True,
         ignore_error=True,
-        on_links=lambda path: "rm",
-        on_binds=lambda path: "ignore" if path.name == "bind" else "rm",
+        follow_symlinks=lambda path: False,
+        follow_binds=lambda path: None if path.name == "bind" else False,
     )
     assert (root / "tree" / "bind").exists()
     assert not (root / "tree" / "link").exists()
     assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
 
 
-@pytest.mark.parametrize("keyword", ["on_links", "on_binds"])
+@pytest.mark.parametrize("keyword", ["follow_symlinks", "follow_binds"])
 def test_rm_rejects_an_unknown_policy(tmp_path, keyword):
     (tmp_path / "d").mkdir()
-    with pytest.raises(ValueError, match="must be one of"):
+    with pytest.raises(ValueError, match="True, False, None or a callable"):
         LocalPath(tmp_path / "d").rm(recursive=True, **{keyword: "delete-everything"})
 
 
