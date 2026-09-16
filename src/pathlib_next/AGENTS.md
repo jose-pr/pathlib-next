@@ -62,6 +62,16 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     a concrete stdlib path without `LocalPath`). A method defined in the
     subclass itself always wins.
   - `is_hidden()` — name starts with `"."`. `__iter__()` is `iterdir()`.
+  - **A binding is not a symlink.** `is_junction()` (pathlib 3.12 parity:
+    a Windows junction) and `is_mount()` (a mount point, bind mounts
+    included) report a directory that is another tree's second NAME.
+    Neither is a symlink: `is_symlink()` is False, `readlink()` says
+    nothing, and a non-following stat calls it an ordinary directory — which
+    is why a symlink check cannot protect a walk from one. `is_dir_binding()`
+    is the pair, and is what `rm(recursive=True)` consults: it removes the
+    binding itself rather than the contents behind it (`rmdir()` on a live
+    mount fails loudly, which beats emptying the mounted filesystem).
+    Default False everywhere; `LocalPath`/`FileUri` answer for real.
   - `samefile(other_path)` — compares `(st_dev, st_ino)`; `NotImplementedError`
     when `stat()` lacks them (`LocalPath` uses pathlib's).
   - `iterdir() -> Iterator[Self]` — **stub** (`NotImplementedError`); a
@@ -123,8 +133,9 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   - `rm(recursive=False, missing_ok=False, ignore_error=False)` — extension.
     `ignore_error` is a bool or `callable(error, path) -> bool` (True
     swallows); each error is offered once. Recursive removal is bottom-up and
-    never descends through a directory symlink or a Windows junction (the
-    link itself is removed).
+    never descends through a directory symlink, a Windows junction or a
+    mount point (the link or binding itself is removed — see
+    `is_dir_binding()`).
   - `rename(target)` — stub. Implementations return the new path.
   - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
     object) / `symlink_to(target, target_is_directory=False, *, force=False)`

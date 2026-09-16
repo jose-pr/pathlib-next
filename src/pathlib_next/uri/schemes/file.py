@@ -88,8 +88,11 @@ class FileUri(UriPath):
         # per directory, not one per child).
         yield from self.filepath._scandir()
 
-    def _is_junction_link(self) -> bool:
-        return self.filepath._is_junction_link()
+    def is_junction(self) -> bool:
+        return self.filepath.is_junction()
+
+    def is_mount(self) -> bool:
+        return self.filepath.is_mount()
 
     def stat(self, *, follow_symlinks=True):
         # LocalPath.stat() itself shims the 3.10+-only follow_symlinks= kwarg

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`Path.is_junction()`, `Path.is_mount()` and `Path.is_dir_binding()`**:
+  a directory that is another tree's second NAME -- a Windows junction, or
+  a mount point such as a Linux bind mount -- is now a first-class concept
+  rather than a private hook used by one call site. Neither is a symlink
+  (`is_symlink()` is False, a non-following stat reports a plain
+  directory), which is precisely why a symlink check cannot protect a walk
+  from one. `is_junction()` matches pathlib 3.12's; both are False by
+  default and answered for real by `LocalPath`/`FileUri`.
+
 - **`Path.glob(on_error=)` / `rglob(on_error=)`**: a hook called as
   `on_error(error)` when a directory cannot be listed, the same contract as
   `walk()` and `os.walk`. Raising from it makes an unreadable directory
@@ -78,6 +87,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reuses the configured connection instead of opening a second, bare one.
 
 ### Changed
+- **`rm(recursive=True)` no longer descends into a mount point.** It
+  already removed a Windows junction as a binding rather than walking into
+  it; a POSIX bind mount is the same thing and was walked, so deleting a
+  tree containing one deleted the mounted filesystem's contents. It is now
+  `rmdir()`'d like a junction, which fails loudly on a live mount instead.
 - **`UriPath / "name"` and `joinpath()` read a `str` as a decoded path**,
   not as URI syntax. `base / "cache?v=2"` is now the file `cache?v=2`
   instead of `base/cache` with a query; `"note#2.txt"`, `"a%20b.txt"` and

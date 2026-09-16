@@ -326,3 +326,83 @@ def test_is_windows_flavoured_matches_path_semantics(tmp_path):
     assert not is_windows_flavoured(PurePosixPath("/x"))
     assert not is_windows_flavoured(MemPath("/"))
     assert is_windows_flavoured(LocalPath(tmp_path)) == (os.name == "nt")
+
+
+# --- a binding is not a symlink -------------------------------------------
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_a_junction_is_a_binding_not_a_symlink(tmp_path):
+    """A junction is a second NAME for a directory -- the Windows spelling
+    of a bind mount -- so `is_symlink()` is False and a non-following stat
+    calls it an ordinary directory. That is exactly why a symlink check
+    cannot protect a recursive walk from one."""
+    import _winapi
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "keep.txt").write_text("PRECIOUS")
+    _winapi.CreateJunction(str(tmp_path / "real"), str(tmp_path / "bind"))
+    (tmp_path / "plain").mkdir()
+
+    binding = LocalPath(tmp_path / "bind")
+    assert binding.is_symlink() is False
+    assert binding.is_junction() is True
+    assert binding.is_dir_binding() is True
+    # A non-following stat still calls it a directory -- no link in sight.
+    assert binding.is_dir()
+
+    for name in ("real", "plain"):
+        ordinary = LocalPath(tmp_path / name)
+        assert ordinary.is_junction() is False
+        assert ordinary.is_dir_binding() is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_recursive_rm_removes_the_binding_not_the_tree_behind_it(tmp_path):
+    import _winapi
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "keep.txt").write_text("PRECIOUS")
+    (tmp_path / "tree").mkdir()
+    _winapi.CreateJunction(str(tmp_path / "real"), str(tmp_path / "tree" / "bind"))
+    (tmp_path / "tree" / "own.txt").write_text("mine")
+
+    LocalPath(tmp_path / "tree").rm(recursive=True)
+
+    assert not (tmp_path / "tree").exists()
+    # What the junction pointed at is untouched.
+    assert (tmp_path / "real" / "keep.txt").read_text() == "PRECIOUS"
+
+
+def test_recursive_rm_does_not_descend_into_a_mount_point(tmp_path, monkeypatch):
+    """The POSIX half: a bind mount announces itself through `is_mount()`
+    and nothing else -- no link, and a stat that says "directory". Deleting
+    its contents would delete the mounted filesystem's, so `rm` removes the
+    mount point itself, which fails loudly on a live mount instead."""
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "tree" / "mounted").mkdir()
+    (tmp_path / "tree" / "mounted" / "theirs.txt").write_text("NOT MINE")
+    (tmp_path / "tree" / "own.txt").write_text("mine")
+
+    real_is_mount = LocalPath.is_mount
+
+    def fake_is_mount(self):
+        return self.name == "mounted" or real_is_mount(self)
+
+    monkeypatch.setattr(LocalPath, "is_mount", fake_is_mount)
+
+    errors = []
+
+    def tolerate(error, path):
+        errors.append((error, path))
+        return True  # the callable's return value decides; None re-raises
+
+    LocalPath(tmp_path / "tree").rm(recursive=True, ignore_error=tolerate)
+
+    # rmdir() on a non-empty mount point fails, which is the point: the
+    # content behind it is still there, and the failure was reported rather
+    # than the mounted filesystem being emptied.
+    assert (tmp_path / "tree" / "mounted" / "theirs.txt").read_text() == "NOT MINE"
+    assert any(isinstance(error, OSError) for error, _path in errors)
+    # The tree's own file was still removed.
+    assert not (tmp_path / "tree" / "own.txt").exists()

@@ -241,13 +241,23 @@ class LocalPath(
         except Exception:
             return False
 
-    def _is_junction_link(self) -> bool:
-        # lstat() reports a junction (IO_REPARSE_TAG_MOUNT_POINT) as a plain
-        # directory -- CPython only rewrites the mode to S_IFLNK for real
-        # symlinks -- so rm(recursive=True) used to walk into it and delete
-        # the junction target's files. shutil.rmtree guards the same case.
+    def is_junction(self) -> bool:
+        """Whether this is a Windows junction. `os.path.isjunction()` on
+        3.12+, the reparse tag directly before that.
+
+        lstat() reports a junction (IO_REPARSE_TAG_MOUNT_POINT) as a plain
+        directory -- CPython only rewrites the mode to S_IFLNK for real
+        symlinks -- so `rm(recursive=True)` used to walk into one and delete
+        the target's files. `shutil.rmtree` guards the same case.
+        """
         if _os.name != "nt":
             return False
+        isjunction = getattr(_os.path, "isjunction", None)
+        if isjunction is not None:
+            try:
+                return bool(isjunction(self))
+            except (OSError, ValueError):
+                return False
         try:
             st = _os.lstat(self)
         except OSError:
@@ -255,6 +265,14 @@ class LocalPath(
         return getattr(st, "st_reparse_tag", 0) == getattr(
             _stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003
         )
+
+    def is_mount(self) -> bool:
+        """Whether this is a mount point -- a bind mount included, which is
+        how POSIX spells what a junction does on Windows."""
+        try:
+            return bool(_os.path.ismount(self))
+        except (OSError, ValueError):
+            return False
 
     def walk(self, top_down=True, on_error=None, follow_symlinks=False):
         # 3.12+ stdlib `pathlib.Path.walk()` sits ahead of ours in the MRO

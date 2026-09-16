@@ -469,6 +469,12 @@ _OPERATION_NAMES = (
     "read_text",
     "write_text",
     "symlink_to",
+    # Both exist on `pathlib.Path` too, and stdlib's `is_mount()` raises
+    # `NotImplementedError` on Windows before 3.12 while ours answers there
+    # -- `rm(recursive=True)` consults it through `is_dir_binding()`, so a
+    # downstream class inheriting stdlib's would break on the floor.
+    "is_junction",
+    "is_mount",
 )
 
 # What the operations above call on `self` with pathlib_next's signature
@@ -1056,6 +1062,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         child_stat = FileStat.from_path(child, follow_symlink=False)
                     if child_stat is not None and child_stat.is_dir():
                         if child._is_junction_link():
+                            # A junction or a mount point: what is inside
+                            # belongs to the tree it names, not to this one,
+                            # so remove the binding itself. `rmdir()` on a
+                            # live mount fails (EBUSY) -- which is the right
+                            # answer, and far better than deleting the
+                            # mounted filesystem's contents.
                             child.rmdir()
                         else:
                             _remove_tree(child)
@@ -1108,15 +1120,57 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         otherwise take a remote path's `__fspath__()` as a local name."""
         return True
 
-    def _is_junction_link(self) -> bool:
-        """Whether this path is a directory *link* that a non-following stat
-        still reports as a directory (a Windows junction).
+    def is_junction(self) -> bool:
+        """Whether this path is a Windows junction (pathlib 3.12 parity).
 
-        `rm(recursive=True)` removes such an entry with `rmdir()` instead of
-        descending into it: its contents belong to the link's target, outside
-        the tree being removed. Default False; `LocalPath` answers for real.
+        A junction is NOT a symlink: it is a second NAME for a directory,
+        the Windows equivalent of a Linux bind mount. `is_symlink()` is
+        False for one, `readlink()` does not describe it, and a
+        non-following stat reports a plain directory -- which is exactly why
+        a symlink check cannot protect a recursive walk from it.
+
+        Default False; `LocalPath`/`FileUri` answer for real. A remote
+        scheme has no such concept unless it says otherwise.
         """
         return False
+
+    def is_mount(self) -> bool:
+        """Whether this path is a mount point (pathlib parity).
+
+        The POSIX half of the same idea: a bind mount makes one tree visible
+        under a second name, with no link anywhere to say so. Default False;
+        `LocalPath`/`FileUri` answer for real.
+        """
+        return False
+
+    def is_dir_binding(self) -> bool:
+        """Whether this directory is another tree's second NAME rather than
+        part of this one: a Windows junction or a mount point (bind or
+        otherwise).
+
+        The distinction that matters to anything walking a tree. A symlink
+        announces itself -- `is_symlink()` is True and every walker here
+        already declines to follow one. A binding does not: it looks like an
+        ordinary directory, and its contents belong to whoever mounted or
+        junctioned it. `rm(recursive=True)` removes the binding itself
+        rather than the contents behind it.
+
+        An implementation that cannot answer (stdlib's `is_mount()` raises
+        on Windows before 3.12) counts as "not a binding" rather than
+        breaking the operation that asked.
+        """
+        for test in (self.is_junction, self.is_mount):
+            try:
+                if test():
+                    return True
+            except (NotImplementedError, OSError, ValueError):
+                continue
+        return False
+
+    def _is_junction_link(self) -> bool:
+        """Deprecated internal spelling of `is_dir_binding()`, kept because
+        `FileUri` and downstream subclasses may override it."""
+        return self.is_dir_binding()
 
     @_utils.notimplemented
     def rename(self, target: "_ty.Self | str"):
