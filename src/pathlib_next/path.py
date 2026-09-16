@@ -413,8 +413,19 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return "/".join(self.segments)
 
     def has_glob_pattern(self):
-        """Return True if any of the path segments contain glob wildcards."""
-        for segment in self.segments:
+        """Return True if any of the path segments contain glob wildcards.
+
+        The anchor is not one of them: a Windows extended-length path
+        (`\\\\?\\C:\\data`, and the `\\\\?\\UNC\\server\\share` form) carries a
+        literal `?` in its drive, which is a prefix, not a wildcard -- so a
+        caller asking "is this a pattern or a plain path?" got `True` for
+        every such path.
+        """
+        segments = list(self.segments)
+        anchor = getattr(self, "anchor", "")
+        if anchor and segments and segments[0] == anchor:
+            segments = segments[1:]
+        for segment in segments:
             if _glob.WILDCARD_PATTERN.search(segment) is not None:
                 return True
         return False

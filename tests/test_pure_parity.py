@@ -697,3 +697,34 @@ def test_double_slash_is_a_unc_drive_on_the_windows_flavour():
             pathlib.PureWindowsPath("//server/share/x")
         )
         assert cls("//server/share/x").match("//server/share/*") is True
+
+
+# --- has_glob_pattern(): the anchor is not a pattern ----------------------
+
+#: A Windows extended-length path carries a literal "?" in its anchor. A
+#: caller asking "pattern or plain path?" got True for every one of them.
+_EXTENDED = r"\\?\C:\data\conf"
+_EXTENDED_UNC = r"\\?\UNC\server\share\x"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="extended-length paths are Windows")
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        (_EXTENDED, False),
+        (_EXTENDED_UNC, False),
+        (r"C:\data\conf", False),
+        (r"C:\data\*.json", True),
+        (r"C:\data\a?.json", True),
+    ],
+)
+def test_has_glob_pattern_ignores_the_anchor(path, expected):
+    assert LocalPath(path).has_glob_pattern() is expected
+
+
+@pytest.mark.parametrize(
+    "cls,path,expected",
+    [(MemPath, "/a/b", False), (MemPath, "/a/*.py", True), (Uri, "http://h/a", False)],
+)
+def test_has_glob_pattern_on_generic_paths(cls, path, expected):
+    assert cls(path).has_glob_pattern() is expected
