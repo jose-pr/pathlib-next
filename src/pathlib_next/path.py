@@ -364,38 +364,34 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         pattern_names = [s for s in path_pattern.split("/") if s and s != "."]
         if not pattern_names and not pattern_anchored:
             raise ValueError("empty pattern")
+        if _sys.version_info[:2] == (3, 12):
+            # 3.12 matches the whole path at once, as a string with its
+            # separators swapped for newlines, rather than part by part --
+            # different enough at the edges (see `_match_lines_312`) that it
+            # gets its own pass.
+            return _match_lines_312(
+                anchored, names, pattern_anchored, pattern_names, case_sensitive
+            )
+        flags = 0 if case_sensitive else _re.IGNORECASE
         if pattern_anchored and not (anchored and len(names) == len(pattern_names)):
             return False
-        flags = 0 if case_sensitive else _re.IGNORECASE
         # The root counts as one more part a relative pattern can reach.
         path_parts = len(names) + anchored
         if len(pattern_names) > path_parts:
-            # 3.12 spells an empty path "." and matches it as a single empty
-            # line, so a one-part pattern that can match "" matches it.
-            if (
-                _sys.version_info[:2] == (3, 12)
-                and not path_parts
-                and len(pattern_names) == 1
-            ):
-                return _matches_empty_line_312(pattern_names[0], flags)
             return False
         for index, pattern in enumerate(reversed(pattern_names)):
             if index == len(names):
                 # A relative pattern as long as the path reaches its root.
                 # 3.13+ compiles the root part "/" like any other part with
                 # glob.translate: "*" and "?" never match the separator, but
-                # a bracket expression such as "[!a]" does. 3.12 matches no
-                # wildcard there; 3.9-3.11 fnmatch the root string, so "*"
-                # and "?" match it too.
+                # a bracket expression such as "[!a]" does. 3.9-3.11 fnmatch
+                # the root string, so "*" and "?" match it too. (3.12 never
+                # reaches here -- `_match_lines_312` answered above.)
                 if _sys.version_info >= (3, 13):
                     from .fspath import _translate_segment
 
                     regex = f"(?s:{_translate_segment(pattern, '[^/]')})\\Z"
                     return _re.match(regex, "/", flags) is not None
-                if _sys.version_info >= (3, 12):
-                    # 3.12 swaps separators for newlines, so the root is an
-                    # empty line: only a part that can match "" reaches it.
-                    return _matches_empty_line_312(pattern, flags)
                 return _re.match(_fnmatch.translate(pattern), "/", flags) is not None
             name = names[len(names) - 1 - index]
             if _re.match(_fnmatch.translate(pattern), name, flags) is None:
@@ -474,20 +470,55 @@ _OPERATION_NAMES = (
 _LOCAL_COMPANION_NAMES = ("stat", "chmod", "glob", "walk", "_scandir")
 
 
-def _matches_empty_line_312(pattern: str, flags: int) -> bool:
-    """Whether `pattern` matches an empty line under 3.12's `match()`.
+#: `fnmatch.translate()` wraps its output in "(?s:...)\\Z"; 3.12 strips that
+#: to splice parts together, which is what drops the DOTALL flag and lets a
+#: bracket expression -- but not "." -- match the newline separator.
+_FNMATCH_SLICE = slice(len("(?s:"), -len(")\\Z"))
 
-    3.12 compiles the pattern with separators swapped for newlines, so a
-    path's root -- and an empty path -- is an empty line. A lone "*" is
-    compiled as ".+" there (it must consume something) while every other
-    part goes through `fnmatch.translate`, so "**" matches an empty line and
-    "*", "?" and "[ab]" do not. Only reachable on 3.12.
+
+def _match_lines_312(
+    anchored: bool,
+    names: "_ty.Sequence[str]",
+    pattern_anchored: bool,
+    pattern_names: "_ty.Sequence[str]",
+    case_sensitive: bool,
+) -> bool:
+    """`match()` as Python 3.12 implements it, for 3.12 only.
+
+    3.12 swaps separators for newlines and matches the resulting strings
+    with one regex (`_compile_pattern_lines` in its `pathlib`), instead of
+    comparing parts pairwise the way every other version does. The
+    difference shows at the edges: the root is "\n", a single line that a
+    part matching the empty string ("**", but not "*", which 3.12 compiles
+    as ".+") reaches from either side, and a bracket expression such as
+    "[!a]" can consume the newline itself. Porting the algorithm keeps those
+    edges right without enumerating them.
     """
     import fnmatch as _fnmatch
 
-    if pattern == "*":
-        return False
-    return _re.match(_fnmatch.translate(pattern), "", flags) is not None
+    # pathlib spells an empty path "." and gives it no lines at all.
+    path_lines = (("/" if anchored else "") + "/".join(names)).replace("/", "\n")
+    pattern_lines = (
+        ("/" if pattern_anchored else "") + "/".join(pattern_names)
+    ).replace("/", "\n")
+    parts = ["^"]
+    for part in pattern_lines.splitlines(keepends=True):
+        if part == "*\n":
+            part = r".+\n"
+        elif part == "*":
+            part = r".+"
+        else:
+            part = _fnmatch.translate(part)[_FNMATCH_SLICE]
+        parts.append(part)
+    parts.append(r"\Z")
+    flags = _re.MULTILINE
+    if not case_sensitive:
+        flags |= _re.IGNORECASE
+    regex = _re.compile("".join(parts), flags=flags)
+    # An anchored pattern must match the whole path, a relative one its tail.
+    if pattern_anchored:
+        return regex.match(path_lines) is not None
+    return regex.search(path_lines) is not None
 
 
 def _stdlib_stat(self, *, follow_symlinks=True):

@@ -53,6 +53,13 @@ MATCH_PATTERNS = [
     "./c",
     "?",
     "[ab]/*",
+    # Patterns that can match an empty line, which is how 3.12 spells the
+    # root -- see test_generic_match_doublestar_at_the_root_*.
+    "/**",
+    "**/**",
+    "*/**",
+    "/**/**",
+    "**/*",
 ]
 
 
@@ -527,36 +534,131 @@ def test_file_uri_parent_of_top_level_windows_folder_is_the_drive_root():
 # --- 3.12 matches a root or empty path as an empty line -------------------
 
 
+@pytest.mark.parametrize("cls", GENERIC)
+@pytest.mark.parametrize("path", ["/", ""])
 @pytest.mark.parametrize(
-    "pattern,expected",
-    [
-        ("**", True),
-        ("*", False),
-        ("?", False),
-        ("[ab]", False),
-        ("a", False),
-        ("a*", False),
-        ("*a", False),
-        ("**a", False),
-    ],
+    "pattern", ["**", "/**", "**/**", "*/**", "/**/**", "**/*", "*", "/*", "?"]
 )
-def test_matches_empty_line_312_table(pattern, expected):
-    """3.12 alone compiles a pattern with separators swapped for newlines,
-    so the root -- and an empty path -- is an empty line, and only a part
-    that can match "" reaches it. A lone "*" is compiled as ".+" there, so
-    it does not, while "**" does. The helper is pure, so its table is
-    checked on every version even though `match()` only calls it on 3.12.
+def test_generic_match_doublestar_at_the_root_follows_the_interpreter(
+    cls, path, pattern
+):
+    """`PurePosixPath("/").match("**")` is True on 3.12 and False on every
+        other version, because 3.12 matches "/" as the one-line string "
+    " and
+        "**" matches an empty line. The generic classes must say the same as the
+        running interpreter -- two CI rounds on 3.12 caught first the relative
+        and then the anchored and two-part spellings.
     """
-    from pathlib_next.path import _matches_empty_line_312
+    assert _our_match(cls(path), pattern) == _oracle_match(path, pattern)
 
-    assert _matches_empty_line_312(pattern, 0) is expected
+
+# --- the 3.12 pass, checked on every interpreter --------------------------
+
+#: `(path, pattern, expected)` under Python 3.12's `PurePosixPath.match`,
+#: produced by running its algorithm (`_compile_pattern_lines` plus
+#: `match`/`search`) over these inputs. 3.12 matches the whole path as one
+#: string with separators swapped for newlines, so the root "/" is the
+#: single line holding just that newline: "**" matches it from either side,
+#: "*" (compiled as ".+") never does, and "[!a]" consumes the newline itself.
+MATCH_312 = [
+    ("/", "**", True),
+    ("/", "/**", True),
+    ("/", "**/**", True),
+    ("/", "*/**", False),
+    ("/", "/**/**", False),
+    ("/", "**/*", False),
+    ("/", "*", False),
+    ("/", "/*", False),
+    ("/", "?", False),
+    ("/", "[!a]", True),
+    ("/", "[ab]", False),
+    ("/", "a", False),
+    ("/", "**/c.py", False),
+    ("/", "/a/b", False),
+    ("", "**", True),
+    ("", "/**", False),
+    ("", "**/**", False),
+    ("", "*/**", False),
+    ("", "/**/**", False),
+    ("", "**/*", False),
+    ("", "*", False),
+    ("", "/*", False),
+    ("", "?", False),
+    ("", "[!a]", False),
+    ("", "[ab]", False),
+    ("", "a", False),
+    ("", "**/c.py", False),
+    ("", "/a/b", False),
+    ("a", "**", True),
+    ("a", "/**", False),
+    ("a", "**/**", False),
+    ("a", "*/**", False),
+    ("a", "/**/**", False),
+    ("a", "**/*", False),
+    ("a", "*", True),
+    ("a", "/*", False),
+    ("a", "?", True),
+    ("a", "[!a]", False),
+    ("a", "[ab]", True),
+    ("a", "a", True),
+    ("a", "**/c.py", False),
+    ("a", "/a/b", False),
+    ("/a", "**", True),
+    ("/a", "/**", True),
+    ("/a", "**/**", True),
+    ("/a", "*/**", False),
+    ("/a", "/**/**", False),
+    ("/a", "**/*", True),
+    ("/a", "*", True),
+    ("/a", "/*", True),
+    ("/a", "?", True),
+    ("/a", "[!a]", False),
+    ("/a", "[ab]", True),
+    ("/a", "a", True),
+    ("/a", "**/c.py", False),
+    ("/a", "/a/b", False),
+    ("/a/b", "**", True),
+    ("/a/b", "/**", False),
+    ("/a/b", "**/**", True),
+    ("/a/b", "*/**", True),
+    ("/a/b", "/**/**", True),
+    ("/a/b", "**/*", True),
+    ("/a/b", "*", True),
+    ("/a/b", "/*", False),
+    ("/a/b", "?", True),
+    ("/a/b", "[!a]", True),
+    ("/a/b", "[ab]", True),
+    ("/a/b", "a", False),
+    ("/a/b", "**/c.py", False),
+    ("/a/b", "/a/b", True),
+    ("a/b/c.py", "**", True),
+    ("a/b/c.py", "/**", False),
+    ("a/b/c.py", "**/**", True),
+    ("a/b/c.py", "*/**", True),
+    ("a/b/c.py", "/**/**", False),
+    ("a/b/c.py", "**/*", True),
+    ("a/b/c.py", "*", True),
+    ("a/b/c.py", "/*", False),
+    ("a/b/c.py", "?", False),
+    ("a/b/c.py", "[!a]", False),
+    ("a/b/c.py", "[ab]", False),
+    ("a/b/c.py", "a", False),
+    ("a/b/c.py", "**/c.py", True),
+    ("a/b/c.py", "/a/b", False),
+]
 
 
 @pytest.mark.parametrize("cls", GENERIC)
-@pytest.mark.parametrize("path", ["/", ""])
-def test_generic_match_doublestar_at_the_root_follows_the_interpreter(cls, path):
-    """`PurePosixPath("/").match("**")` is True on 3.12 and False on every
-    other version; the generic classes must say the same as the running
-    interpreter, which is what the 3.12 CI job caught.
-    """
-    assert _our_match(cls(path), "**") == _oracle_match(path, "**")
+@pytest.mark.parametrize("path,pattern,expected", MATCH_312)
+def test_generic_match_follows_312_semantics(cls, path, pattern, expected, monkeypatch):
+    """`match()` has a separate pass for 3.12 (`_match_lines_312`); run it
+    on any interpreter by faking the version, so a refactor cannot silently
+    change what only the 3.12 CI job would catch."""
+    import types
+
+    from pathlib_next import path as path_module
+
+    monkeypatch.setattr(
+        path_module, "_sys", types.SimpleNamespace(version_info=(3, 12, 7))
+    )
+    assert cls(path).match(pattern, case_sensitive=True) is expected

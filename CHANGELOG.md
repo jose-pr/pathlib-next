@@ -295,10 +295,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`uripath read notes:draft` asked for `pathlib-next[uri]` instead of
   reading the file); the schemes this package registers are now read from
   its entry points, so a colon name behaves the same in either install.
-- **`match()` disagreed with pathlib on Python 3.12** for a pattern reaching
-  the root: `PurePosixPath("/").match("**")` is `True` there (3.12 matches a
-  path with its separators swapped for newlines, so the root is an empty
-  line) and the generic classes returned `False`.
+- **`match()` disagreed with pathlib on Python 3.12** at the root. 3.12
+  matches the whole path as one string with its separators swapped for
+  newlines, so `"/"` is a single newline that `"**"` matches from either
+  side (`"/".match("**")`, `match("/**")` and `match("**/**")` are all
+  `True` there) while `"*"` never does, and a bracket expression such as
+  `"[!a]"` consumes the separator itself. `MemPath`/`Uri` answered `False`
+  throughout; 3.12 now runs a port of that algorithm instead of the
+  part-by-part comparison every other version uses.
 - **`import pathlib_next` imported `netimps`** (a host-name query at import,
   slow on Windows), and the first `file:`/`data:` path imported `requests`
   and `botocore`; both now load on first use. `GsPath`/`AzPath` are exported
