@@ -1149,7 +1149,13 @@ class UriPath(Uri, Path):
     def _make_child_relpath(
         self, name: str, stat_hint: "FileStat" = None, **kwargs
     ) -> _ty.Self:
-        inst = super()._make_child_relpath(name, backend=self.backend, **kwargs)
+        # The backend ALREADY BUILT, never `self.backend` -- that property
+        # creates one, and naming a child is a pure-path operation: since
+        # `/` walks segments through here, reading the property made
+        # `UriPath("sftp://h/x") / "y"` import paramiko (and `http:` import
+        # requests) just to spell a path. A listing has one by the time it
+        # gets here, so its children still share the instance.
+        inst = super()._make_child_relpath(name, backend=self._backend, **kwargs)
         inst._stat_hint = stat_hint
         return inst
 

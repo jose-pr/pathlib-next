@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Joining a URI path no longer builds a backend.** 0.9.7 routed `/` and
+  `joinpath()` through the child builder a listing uses, which reads the
+  `backend` property -- and that property CREATES one, so spelling
+  `UriPath("sftp://h/x") / "y"` imported paramiko and raised `ImportError`
+  without the extra (`http:` wanted `requests`, `s3:` `botocore`). A join
+  is a pure-path operation and is lazy again; a child still shares its
+  parent's connection when one already exists, which is all the sharing was
+  ever for.
+
 ## [0.9.7] - 2026-09-17
 
 ### Added

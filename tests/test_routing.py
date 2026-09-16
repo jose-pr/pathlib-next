@@ -74,7 +74,13 @@ def test_github_token_backend_does_not_follow_join_to_another_host():
     # A str join stays on the original host, so the token goes nowhere new.
     literal = root / "github://evil.invalid/x/y"
     assert literal.source.host == "github.com"
-    assert literal.backend is root.backend
+    assert literal.backend.token == "ghp_SECRET"
+    # Identity is only promised when the parent already HAS a backend: a
+    # join must not build one (it is a pure-path operation), so a child of a
+    # connectionless parent makes its own on first use.
+    assert root._backend is None
+    root.backend  # now it exists, and the next child shares it
+    assert (root / "docs").backend is root.backend
 
     # Crossing hosts needs a Uri argument, and that drops the token.
     evil = root / GitHubPath("github://evil.invalid/x/y")

@@ -357,3 +357,29 @@ def test_a_same_endpoint_uri_destination_keeps_the_configured_backend():
         base._coerce_target("http://trusted.invalid/api/b.txt").backend is base.backend
     )
     assert base._coerce_target("http://other.invalid/b.txt").backend is not base.backend
+
+
+def test_joining_a_path_never_builds_a_backend():
+    """A join is a PURE-PATH operation. 0.9.7 routed `/` through
+    `_make_child_relpath()`, which read the `backend` property -- and that
+    property builds one, so spelling `UriPath("sftp://h/x") / "y"` imported
+    paramiko and raised ImportError without the extra. Every scheme, not
+    just the ones whose client happens to be installed."""
+    for uri in ("sftp://h/mnt", "http://h/a", "s3://b/k", "file:///tmp/x"):
+        base = UriPath(uri)
+        child = base / "child"
+        assert child.path.endswith("/child")
+        assert child._backend is None, uri
+        assert base._backend is None, uri
+        assert base.joinpath("a", "b")._backend is None, uri
+
+
+def test_joining_shares_a_backend_that_already_exists():
+    """What the property read was there for: children of a listing share the
+    parent's live connection. That still holds -- by then it exists."""
+    base = UriPath("http://h/a")
+    sentinel = object()
+    base._backend = sentinel
+    assert (base / "c")._backend is sentinel
+    assert base.joinpath("c", "d")._backend is sentinel
+    assert base._make_child_relpath("c")._backend is sentinel
