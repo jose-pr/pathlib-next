@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-09-16
+
 ### Fixed
 - **`Path.copy()` destroyed or created the target when the source could not
   be read.** It unlinked an existing target (with `overwrite=True`) and
@@ -463,7 +465,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Nothing raised. When something already occupied the truncated name the call
   instead failed with a bare `OSError: Failure`, so the symptom was either
   silent misplacement or an unexplained error depending on what happened to
-  be there. Downstream, `pytruenas`'s documented
+  be there. Downstream, a consumer's documented
   `client.path(x).symlink_to(y)` route created a wrong link, and
   `PathSyncer`'s `symlink_mode="preserve"` (which hands `symlink_to()` the
   raw target string `readlink()` returned) mirrored such a link to the wrong
@@ -1256,7 +1258,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/jose-pr/pathlib-next/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/jose-pr/pathlib-next/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/jose-pr/pathlib-next/compare/v0.9.0...v0.9.1
