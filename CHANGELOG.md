@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **`has_glob_pattern()` was True for every Windows extended-length path.**
+  The `?` in a `\\?\C:\...` anchor (and the `\\?\UNC\...` form) is a prefix,
+  not a wildcard, so a caller using it to tell a pattern from a plain path
+  got the wrong answer for all of them. The anchor is no longer scanned.
+  Reported by yaconfiglib against 0.9.6.
 - **Writing over an archive member spelled `./f.txt` appended a second
   entry instead of rewriting it**, and `unlink()` then deleted that second
   entry and reported success while the original content came back. 0.9.5
