@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-09-16
+
 ### Added
 - **`Path.glob(None)` / `rglob(None)`**: expand the pattern the path itself
   carries (`LocalPath("/etc/*.conf").glob(None)`), splitting at the first
@@ -1334,7 +1336,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/jose-pr/pathlib-next/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/jose-pr/pathlib-next/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/jose-pr/pathlib-next/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/jose-pr/pathlib-next/compare/v0.9.2...v0.9.3
