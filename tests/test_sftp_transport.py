@@ -584,24 +584,47 @@ def test_asyncssh_reconnects_after_the_sftp_channel_closes(server, backends):
 
 @needs_paramiko
 def test_paramiko_evicted_connections_are_closed(server, backends, monkeypatch):
+    """One cache slot, five distinct keys: each new client evicts the
+    previous one, whose connection must be closed rather than orphaned.
+
+    The keys come from five backends, not five threads: `threading` reuses
+    a finished thread's `get_ident()` value on POSIX, so sequential threads
+    share one cache key there and only one connection is ever opened.
+    """
     from pathlib_next.uri.schemes.sftp._paramiko import _CACHED_CLIENTS
 
     monkeypatch.setattr(_CACHED_CLIENTS, "maxsize", 1)
-    backend = _paramiko_backend(
-        backends, None, paramiko.AutoAddPolicy(), known_hosts=None
-    )
-    path = SftpPath(server.url("hello.txt"), backend=backend)
-
     for _ in range(5):
-        worker = threading.Thread(target=path.read_text)
-        worker.start()
-        worker.join(30)
+        backend = _paramiko_backend(
+            backends, None, paramiko.AutoAddPolicy(), known_hosts=None
+        )
+        assert SftpPath(server.url("hello.txt"), backend=backend).read_text() == "hello"
 
     assert server.accepted == 5
     # One cache slot: every evicted client's connection was closed.
     assert _wait_until(lambda: len(server.live) <= 1)
-    backend.close()
+    for backend in list(backends):
+        backend.close()
     assert _wait_until(lambda: not server.live)
+
+
+@needs_paramiko
+def test_paramiko_client_is_reused_by_a_later_thread(server, backends):
+    """A cached client outlives the thread that opened it: paramiko's
+    transport runs on its own thread, so a later thread reusing the entry
+    (the same `get_ident()` value, which POSIX recycles) must get a working
+    client, not a dead one -- one connection, both reads served."""
+    backend = _paramiko_backend(
+        backends, None, paramiko.AutoAddPolicy(), known_hosts=None
+    )
+    path = SftpPath(server.url("hello.txt"), backend=backend)
+    read = []
+    for _ in range(2):
+        worker = threading.Thread(target=lambda: read.append(path.read_text()))
+        worker.start()
+        worker.join(30)
+
+    assert read == ["hello", "hello"]
 
 
 @needs_paramiko

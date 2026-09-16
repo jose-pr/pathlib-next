@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from pathlib_next import LocalPath
 from pathlib_next.tools import uripath
 
 
@@ -352,3 +353,41 @@ def test_real_pipe_closed_by_reader_exits_quietly(tmp_path):
     assert proc.wait(timeout=60) == 141
     assert b"Traceback" not in err
     assert b"BrokenPipeError" not in err
+
+
+# --- without the `uri` extra, only shipped schemes are URIs ---------------
+
+
+@pytest.fixture
+def without_uri_extra(monkeypatch):
+    """The CLI as installed without the `uri` extra: no scheme class can be
+    imported, so `_looks_like_uri()` falls back to the distribution's own
+    entry points."""
+    monkeypatch.setattr(uripath, "UriPath", None)
+    monkeypatch.setattr(uripath, "_SHIPPED_SCHEMES", None)
+
+
+@pytest.mark.parametrize("value", ["12:30.txt", "notes:draft", "2024-01-01T10:00.log"])
+def test_colon_names_stay_local_without_the_uri_extra(value, without_uri_extra):
+    """Regression: the no-extras CI job reported `notes:draft` as a URI
+    needing an extra, because no scheme class could be loaded to say
+    otherwise. Entry points answer that without importing anything."""
+    assert not uripath._looks_like_uri(value)
+    assert isinstance(uripath._path(value), LocalPath)
+
+
+@pytest.mark.parametrize("value", ["s3:bucket/key", "data:,abc", "zip:x.zip!/a"])
+def test_shipped_schemes_are_uris_without_the_uri_extra(value, without_uri_extra):
+    assert uripath._looks_like_uri(value)
+    with pytest.raises(ImportError, match="uri"):
+        uripath._path(value)
+
+
+def test_shipped_schemes_reads_this_distribution(without_uri_extra):
+    schemes = uripath._shipped_schemes()
+    assert {"file", "data", "zip", "s3", "sftp"} <= schemes
+    assert "notes" not in schemes
+
+
+def test_unknown_scheme_with_an_authority_is_still_a_uri(without_uri_extra):
+    assert uripath._looks_like_uri("notascheme://host/x")

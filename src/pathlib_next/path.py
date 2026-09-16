@@ -366,11 +366,19 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
             raise ValueError("empty pattern")
         if pattern_anchored and not (anchored and len(names) == len(pattern_names)):
             return False
+        flags = 0 if case_sensitive else _re.IGNORECASE
         # The root counts as one more part a relative pattern can reach.
         path_parts = len(names) + anchored
         if len(pattern_names) > path_parts:
+            # 3.12 spells an empty path "." and matches it as a single empty
+            # line, so a one-part pattern that can match "" matches it.
+            if (
+                _sys.version_info[:2] == (3, 12)
+                and not path_parts
+                and len(pattern_names) == 1
+            ):
+                return _matches_empty_line_312(pattern_names[0], flags)
             return False
-        flags = 0 if case_sensitive else _re.IGNORECASE
         for index, pattern in enumerate(reversed(pattern_names)):
             if index == len(names):
                 # A relative pattern as long as the path reaches its root.
@@ -385,7 +393,9 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
                     regex = f"(?s:{_translate_segment(pattern, '[^/]')})\\Z"
                     return _re.match(regex, "/", flags) is not None
                 if _sys.version_info >= (3, 12):
-                    return False
+                    # 3.12 swaps separators for newlines, so the root is an
+                    # empty line: only a part that can match "" reaches it.
+                    return _matches_empty_line_312(pattern, flags)
                 return _re.match(_fnmatch.translate(pattern), "/", flags) is not None
             name = names[len(names) - 1 - index]
             if _re.match(_fnmatch.translate(pattern), name, flags) is None:
@@ -462,6 +472,22 @@ _OPERATION_NAMES = (
 # without these made them raise TypeError on a downstream concrete-local
 # class. Replaced only where stdlib `pathlib` would supply them.
 _LOCAL_COMPANION_NAMES = ("stat", "chmod", "glob", "walk", "_scandir")
+
+
+def _matches_empty_line_312(pattern: str, flags: int) -> bool:
+    """Whether `pattern` matches an empty line under 3.12's `match()`.
+
+    3.12 compiles the pattern with separators swapped for newlines, so a
+    path's root -- and an empty path -- is an empty line. A lone "*" is
+    compiled as ".+" there (it must consume something) while every other
+    part goes through `fnmatch.translate`, so "**" matches an empty line and
+    "*", "?" and "[ab]" do not. Only reachable on 3.12.
+    """
+    import fnmatch as _fnmatch
+
+    if pattern == "*":
+        return False
+    return _re.match(_fnmatch.translate(pattern), "", flags) is not None
 
 
 def _stdlib_stat(self, *, follow_symlinks=True):

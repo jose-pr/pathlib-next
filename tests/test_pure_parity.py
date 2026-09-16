@@ -522,3 +522,41 @@ def test_file_uri_parent_of_top_level_windows_folder_is_the_drive_root():
     assert parent.path == "C:/"
     assert str(parent.filepath) == "C:\\"
     assert parent.parent == parent
+
+
+# --- 3.12 matches a root or empty path as an empty line -------------------
+
+
+@pytest.mark.parametrize(
+    "pattern,expected",
+    [
+        ("**", True),
+        ("*", False),
+        ("?", False),
+        ("[ab]", False),
+        ("a", False),
+        ("a*", False),
+        ("*a", False),
+        ("**a", False),
+    ],
+)
+def test_matches_empty_line_312_table(pattern, expected):
+    """3.12 alone compiles a pattern with separators swapped for newlines,
+    so the root -- and an empty path -- is an empty line, and only a part
+    that can match "" reaches it. A lone "*" is compiled as ".+" there, so
+    it does not, while "**" does. The helper is pure, so its table is
+    checked on every version even though `match()` only calls it on 3.12.
+    """
+    from pathlib_next.path import _matches_empty_line_312
+
+    assert _matches_empty_line_312(pattern, 0) is expected
+
+
+@pytest.mark.parametrize("cls", GENERIC)
+@pytest.mark.parametrize("path", ["/", ""])
+def test_generic_match_doublestar_at_the_root_follows_the_interpreter(cls, path):
+    """`PurePosixPath("/").match("**")` is True on 3.12 and False on every
+    other version; the generic classes must say the same as the running
+    interpreter, which is what the 3.12 CI job caught.
+    """
+    assert _our_match(cls(path), "**") == _oracle_match(path, "**")

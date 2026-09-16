@@ -22,6 +22,10 @@ else:
 
 _CHUNK_SIZE = 1024 * 1024
 
+#: Lazily read scheme names from this distribution's entry points; see
+#: `_shipped_schemes()`.
+_SHIPPED_SCHEMES = None
+
 
 # RFC 3986 scheme, then the colon.
 _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -30,6 +34,30 @@ _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 #: POSIX tool killed by SIGPIPE reports it; and after Ctrl-C (128 + SIGINT).
 _EXIT_BROKEN_PIPE = 141
 _EXIT_INTERRUPTED = 130
+
+
+def _shipped_schemes() -> "frozenset[str]":
+    """The scheme names this package registers, read from its entry points.
+
+    Available even without the `uri` extra (it is this distribution's own
+    metadata), so a colon name such as `notes:draft` stays a local path in
+    either install, instead of being reported as a URI needing an extra.
+    """
+    global _SHIPPED_SCHEMES
+    if _SHIPPED_SCHEMES is None:
+        import importlib.metadata as _md
+
+        try:
+            try:
+                eps = _md.entry_points(group="pathlib_next.schemes")
+            except TypeError:  # Python 3.9 has no group= keyword
+                eps = _md.entry_points().get("pathlib_next.schemes", ())
+            _SHIPPED_SCHEMES = frozenset(ep.name.lower() for ep in eps)
+        except Exception:
+            # No metadata (a zipapp, a vendored copy): fall back to treating
+            # any scheme-shaped argument as a URI, as before.
+            _SHIPPED_SCHEMES = frozenset()
+    return _SHIPPED_SCHEMES
 
 
 def _looks_like_uri(value: str) -> bool:
@@ -45,10 +73,12 @@ def _looks_like_uri(value: str) -> bool:
         return False
     if "://" in value:
         return True
-    if UriPath is None:
-        # Cannot tell which schemes exist; `_path()` names the extra.
-        return True
     scheme = value[: match.end() - 1].lower()
+    if UriPath is None:
+        # No scheme class can be loaded; the package's own entry points still
+        # say which schemes it ships, and `_path()` names the extra for them.
+        shipped = _shipped_schemes()
+        return not shipped or scheme in shipped
     try:
         return Source(scheme, None, None, None).get_scheme_cls() is not UriPath
     except Exception:
