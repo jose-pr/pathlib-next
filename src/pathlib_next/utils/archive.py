@@ -34,9 +34,15 @@ def _safe_member_parts(name: str, *, windows: bool) -> "list[str] | None":
     """Split archive member `name` into the parts to join onto the
     extraction directory, or return None when the member must be skipped
     because a part would leave it (`..`, and with `windows=True` a drive
-    such as `D:x` or the drive-relative `C:..`). Both separators split;
-    empty and `.` parts are dropped, so `/abs` and `./x` stay inside."""
-    parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".")]
+    such as `D:x` or the drive-relative `C:..`). `/` always splits; a
+    backslash splits only for a Windows destination, the only place it means
+    "separator" -- on POSIX it is an ordinary filename character, and
+    splitting it unconditionally turned one legitimate member into a
+    directory plus a file on every platform. Empty and `.` parts are
+    dropped, so `/abs` and `./x` stay inside."""
+    if windows:
+        name = name.replace("\\", "/")
+    parts = [p for p in name.split("/") if p not in ("", ".")]
     if not parts or not all(is_safe_child_name(p, windows=windows) for p in parts):
         return None
     return parts

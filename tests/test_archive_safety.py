@@ -22,6 +22,7 @@ from pathlib_next import path as path_module
 from pathlib_next.mempath import MemPath
 from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes.archive.zip import _strip_zip64_extra
+from pathlib_next.utils import archive as archive_module
 from pathlib_next.utils import unpack_archive
 
 
@@ -851,3 +852,45 @@ def test_member_index_cache_sees_a_write_through_another_path_object(tmp_path):
     assert sorted(p.name for p in reader.iterdir()) == ["a.txt", "b.txt"]
     (UriPath(_zip_uri(archive)) / "a.txt").unlink()
     assert sorted(p.name for p in reader.iterdir()) == ["b.txt"]
+
+
+# --- unpack_archive(): a backslash is a separator only for Windows --------
+
+
+def test_unpack_keeps_a_backslash_name_whole_on_a_posix_destination(
+    tmp_path, monkeypatch
+):
+    r"""`a\b` is ONE legal filename on POSIX. Splitting it unconditionally
+    restructured the extracted tree on every platform, and dropped
+    `..\esc` -- also one legal name -- without a word."""
+    monkeypatch.setattr(archive_module, "is_windows_flavoured", lambda p: False)
+    archive = _write_tar(
+        tmp_path / "bs.tar",
+        [(r"a\b", b"one"), (r"..\esc", b"two"), ("ok.txt", b"ok")],
+    )
+    dest = MemPath("/dest")
+    dest.mkdir(parents=True)
+    unpack_archive(LocalPath(archive), dest)
+    assert sorted(p.name for p in dest.iterdir()) == sorted(
+        [r"a\b", r"..\esc", "ok.txt"]
+    )
+    assert (dest / r"a\b").read_bytes() == b"one"
+
+
+def test_unpack_splits_a_backslash_name_for_a_windows_destination(
+    tmp_path, monkeypatch
+):
+    """On a Windows destination the same name IS a separator, and an
+    escaping one is refused rather than written."""
+    monkeypatch.setattr(archive_module, "is_windows_flavoured", lambda p: True)
+    archive = _write_tar(
+        tmp_path / "bs2.tar",
+        [(r"a\b", b"one"), (r"..\esc", b"two"), ("ok.txt", b"ok")],
+    )
+    dest = MemPath("/dest2")
+    dest.mkdir(parents=True)
+    unpack_archive(LocalPath(archive), dest)
+    assert sorted(p.name for p in dest.iterdir()) == ["a", "ok.txt"]
+    assert (dest / "a" / "b").read_bytes() == b"one"
+    # The escaping one would leave the destination: skipped, nothing written.
+    assert not [p for p in dest.iterdir() if p.name.startswith("..")]

@@ -16,6 +16,7 @@ import asyncssh as _asyncssh
 import netimps as _netimps
 
 from ... import Source
+from .... import utils as _utils
 from ....utils.stat import FileStat
 from . import BaseSftpBackend
 from ._sshconfig import _DEFAULT_SSH_CONFIG
@@ -824,16 +825,19 @@ async def _concurrent_copy(
 
     async def read_dir(current):
         names = await sftp_call(lambda: aclient.readdir(current.path), current.path)
-        return [
-            current
-            / (
-                name.filename.decode()
-                if isinstance(name.filename, bytes)
-                else name.filename
-            )
-            for name in names
-            if name.filename not in (".", "..", b".", b"..")
-        ]
+        children = []
+        for entry in names:
+            name = entry.filename
+            if isinstance(name, bytes):
+                name = name.decode(errors="surrogateescape")
+            # The server chooses these names: one that is not a single
+            # component inside `current` must never become a child path
+            # (see `SftpPath._scandir`). This walker bypasses `_scandir`,
+            # so it filters for itself.
+            if not _utils.is_safe_child_name(name):
+                continue
+            children.append(current / name)
+        return children
 
     async def mkdir(current):
         await sftp_call(
@@ -994,16 +998,19 @@ async def _concurrent_rm(
 
     async def read_dir(current):
         names = await sftp_call(lambda: aclient.readdir(current.path), current.path)
-        return [
-            current
-            / (
-                name.filename.decode()
-                if isinstance(name.filename, bytes)
-                else name.filename
-            )
-            for name in names
-            if name.filename not in (".", "..", b".", b"..")
-        ]
+        children = []
+        for entry in names:
+            name = entry.filename
+            if isinstance(name, bytes):
+                name = name.decode(errors="surrogateescape")
+            # The server chooses these names: one that is not a single
+            # component inside `current` must never become a child path
+            # (see `SftpPath._scandir`). This walker bypasses `_scandir`,
+            # so it filters for itself.
+            if not _utils.is_safe_child_name(name):
+                continue
+            children.append(current / name)
+        return children
 
     async def remove_file(current):
         await sftp_call(lambda: aclient.remove(current.path), current.path)

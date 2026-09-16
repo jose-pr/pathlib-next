@@ -1496,3 +1496,52 @@ def test_readlink_absolute_target_keeps_the_host():
 
     assert target.path == "/releases/42"
     assert target.source == link.source
+
+
+# --- a listing is untrusted input -----------------------------------------
+
+
+#: What a malicious or buggy server can put in a directory listing. Each
+#: would escape the directory being walked if it became a child path.
+_HOSTILE_LISTING_NAMES = ["..", ".", "../victim.txt", "sub/../../victim.txt", ""]
+
+
+def _client_listing(names):
+    class _HostileClient(_FakeSftpClient):
+        def listdir(self, path):
+            return list(names)
+
+        def listdir_attr(self, path):
+            return [_FakeAttr(name) for name in names]
+
+    class _HostileBackend(_FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self._client = _HostileClient()
+
+    return _HostileBackend()
+
+
+def test_a_hostile_listing_name_never_becomes_a_child():
+    """`rm(recursive=True)` and a recursive copy walk what the LISTING says
+    is there. A server-chosen `../victim.txt` used to become a real path
+    outside the tree -- `dav:`/`http:` already filtered, `sftp:` did not.
+    The destination-side guard cannot catch it: by then the name has
+    collapsed to a harmless-looking `victim.txt`."""
+    backend = _client_listing(_HOSTILE_LISTING_NAMES + ["ok.txt"])
+    directory = SftpPath("sftp://host/src", backend=backend)
+
+    assert [p.name for p in directory.iterdir()] == ["ok.txt"]
+    assert [name for name, _stat in directory._scandir()] == ["ok.txt"]
+    # Nothing yielded can leave the directory it was listed from.
+    for child in directory.iterdir():
+        assert child.path.startswith("/src/")
+        assert ".." not in child.path.split("/")
+
+
+def test_a_listing_name_with_a_separator_is_dropped():
+    """A name carrying "/" is two components, not one: joining it would
+    reach a path the listing does not describe."""
+    backend = _client_listing(["a/b", "ok.txt"])
+    directory = SftpPath("sftp://host/src", backend=backend)
+    assert [p.name for p in directory.iterdir()] == ["ok.txt"]

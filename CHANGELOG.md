@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unbounded. Both reported by yaconfiglib against 0.9.6.
 
 ### Fixed
+- **An SFTP listing is untrusted input.** The server chooses the names, and
+  they were turned into child paths unchecked, so a crafted `../victim.txt`
+  made `rm(recursive=True)` delete outside the tree it was given and a
+  recursive copy read from outside it (measured on both backends). Names
+  that are not a single component inside the directory are now skipped, as
+  `dav:` and `http:` already did. The asyncssh fan-out walkers, which bypass
+  `_scandir()`, filter for themselves.
+- **`unpack_archive()` split a backslash on every platform**, so a POSIX
+  member whose name contains one was extracted as two path components and
+  one carrying `..` was silently dropped -- both legal single filenames
+  there. A backslash now separates only for a Windows destination, which is
+  the rule the function already documented.
 - **`has_glob_pattern()` was True for every Windows extended-length path.**
   The `?` in a `\\?\C:\...` anchor (and the `\\?\UNC\...` form) is a prefix,
   not a wildcard, so a caller using it to tell a pattern from a plain path

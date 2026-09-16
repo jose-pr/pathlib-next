@@ -307,7 +307,20 @@ class SftpPath(UriPath):
                 raise
             raise translated from error
         for attr in attrs:
-            yield attr.filename, FileStat.from_stat(attr)
+            name = attr.filename
+            if isinstance(name, bytes):
+                name = name.decode(errors="surrogateescape")
+            if not _utils.is_safe_child_name(name):
+                # A listing is untrusted input: the server chooses these
+                # names. One that is not a single component inside this
+                # directory -- "..", or anything with a "/" -- must never
+                # become a child path, or `rm(recursive=True)` deletes
+                # outside the tree it was given and a recursive copy reads
+                # from outside it. `dav:`/`http:` filter their listings the
+                # same way; this covers both SFTP backends, since each
+                # client's `listdir_attr()` arrives here.
+                continue
+            yield name, FileStat.from_stat(attr)
 
     def _entry_stat(self):
         """This entry's stat, or None if even that fails."""
