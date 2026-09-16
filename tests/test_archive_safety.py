@@ -346,10 +346,14 @@ def test_zip_rewrite_collapses_existing_duplicates_to_the_live_entry(tmp_path):
 
 # --- ftparchive-archive-member-path-traversal ---
 
+#: No backslash member here: `zipfile` rewrites `os.sep` to `/` as it stores
+#: a name, and only when `os.sep != "/"`, so the same fixture holds
+#: `pkg/..\..\x` on POSIX and `pkg/../../x` (an escape) on Windows. Backslash
+#: names are covered by the tar-only tests below, where every platform keeps
+#: them verbatim.
 _CRAFTED_MEMBERS = [
     ("pkg/ok.txt", b"ok"),
     ("pkg/../../ESCAPED_DOTDOT.txt", b"evil"),
-    ("pkg/..\\..\\ESCAPED_BACKSLASH.txt", b"evil"),
     ("pkg/C:../C:../ESCAPED_DRIVE_RELATIVE.txt", b"evil"),
     ("pkg/D:evil.txt", b"evil"),
     ("/abs.txt", b"evil"),
@@ -366,27 +370,22 @@ def _crafted(tmp_path, fmt):
 _URI = {"zip": _zip_uri, "tar": _tar_uri}
 
 
-def _crafted_pkg_children(fmt):
-    """The members of `pkg` that survive, sorted. The escaping ones never
-    appear; the drive-shaped ones do. They differ by format only because
-    `zipfile` rewrites `\\` to `/` as it stores a name, which turns the
-    backslash member into `pkg/../../ESCAPED_BACKSLASH.txt` -- an escape,
-    dropped -- while tar keeps it as one ordinary filename."""
-    children = ["C:..", "D:evil.txt", "ok.txt"]
-    if fmt == "tar":
-        children.append("..\\..\\ESCAPED_BACKSLASH.txt")
-    return sorted(children)
+#: The members of `pkg` that survive, sorted: the escaping ones never
+#: appear, the drive-shaped ones do (they are ordinary POSIX filenames, and
+#: only a Windows destination refuses to receive them).
+_CRAFTED_PKG_CHILDREN = ["C:..", "D:evil.txt", "ok.txt"]
 
 
 @pytest.mark.parametrize("fmt", ["zip", "tar"])
 def test_archive_listing_skips_escaping_member_names(tmp_path, fmt):
     """Only a name with no place inside the archive is skipped. A name that
-    merely a *Windows destination* would misread (`D:evil.txt`, `C:..`,
-    `..\\..\\x`) is an ordinary POSIX filename and stays listed; refusing to
-    join it is the destination's job."""
+    merely a *Windows destination* would misread (`D:evil.txt`, `C:..`) is
+    an ordinary POSIX filename and stays listed; refusing to join it is the
+    destination's job (see the copy tests). Backslash names are the same
+    case but live in the tar-only tests, since `zipfile` rewrites them."""
     archive = _crafted(tmp_path, fmt)
     pkg = UriPath(_URI[fmt](archive, "pkg"))
-    assert sorted(p.name for p in pkg.iterdir()) == _crafted_pkg_children(fmt)
+    assert sorted(p.name for p in pkg.iterdir()) == _CRAFTED_PKG_CHILDREN
     # "pkg/../../ESCAPED_DOTDOT.txt" and "/abs.txt" have no name in here.
     assert [p.name for p in UriPath(_URI[fmt](archive)).iterdir()] == ["pkg"]
 
@@ -411,7 +410,7 @@ def test_archive_recursive_copy_stays_inside_destination(tmp_path, fmt, monkeypa
     )
     assert (dest / "ok.txt").read_bytes() == b"ok"
     assert [p.name for p in dest.iterdir()] == ["ok.txt"]
-    expected = [n for n in _crafted_pkg_children(fmt) if n != "ok.txt"]
+    expected = [n for n in _CRAFTED_PKG_CHILDREN if n != "ok.txt"]
     messages = [str(e) for e in refused]
     assert len(messages) == len(expected)
     for name in expected:
@@ -431,7 +430,7 @@ def test_archive_recursive_copy_keeps_posix_names_on_a_posix_destination(tmp_pat
     dest.mkdir(parents=True)
     pkg = UriPath(_URI[fmt](archive, "pkg"))
     pkg.copy(dest, recursive=True, overwrite=True)
-    assert sorted(p.name for p in dest.iterdir()) == _crafted_pkg_children(fmt)
+    assert sorted(p.name for p in dest.iterdir()) == _CRAFTED_PKG_CHILDREN
     assert (dest / "ok.txt").read_bytes() == b"ok"
 
 
@@ -551,6 +550,25 @@ def test_backslash_member_names_are_listed_and_readable_in_a_tar(tmp_path, name)
     root = UriPath(_URI["tar"](archive))
     assert name in [p.path for p in root.rglob("*")]
     assert root.with_segments(name).read_bytes() == b"real"
+
+
+def test_recursive_copy_refuses_a_backslash_child_on_a_windows_target(
+    tmp_path, monkeypatch
+):
+    """The destination rule for `\\`, in the one format that can carry such
+    a member on every platform: a Windows target would read it as a
+    separator, so the copy refuses it and copies the rest."""
+    monkeypatch.setattr(path_module._utils, "is_windows_flavoured", lambda p: True)
+    archive = _write_tar(
+        tmp_path / "bs.tar", [("dir/back\\slash.txt", b"evil"), ("dir/ok.txt", b"ok")]
+    )
+    dest = tmp_path / "dest"
+    refused = []
+    UriPath(_URI["tar"](archive, "dir")).copy(
+        LocalPath(dest), recursive=True, overwrite=True, ignore_error=refused.append
+    )
+    assert [p.name for p in dest.iterdir()] == ["ok.txt"]
+    assert [repr("back\\slash.txt") in str(e) for e in refused] == [True]
 
 
 @pytest.mark.parametrize("fmt", ["zip", "tar"])
