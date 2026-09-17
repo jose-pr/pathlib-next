@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+- **Corrected the 0.9.8 entry's provenance.** It says 0.9.7 introduced the
+  join-builds-a-backend defect; it did not. Measured against the published
+  wheels in a venv with only the `uri` extra: `UriPath("sftp://h/mnt") / "c"`
+  raises `ImportError` on **0.9.3 and 0.9.6** as well, so the defect predates
+  the 0.9.7 join rewrite, which preserved it rather than causing it. 0.9.8
+  fixes it for the first time. (A related and DELIBERATE behaviour, unchanged
+  throughout: constructing an `http:`/`s3:` path at all requires that
+  scheme's extra, because the scheme module imports its client -- see the
+  extras table in the shipped header.)
+
 ## [0.9.8] - 2026-09-17
 
 ### Fixed
