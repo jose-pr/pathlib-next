@@ -337,39 +337,49 @@ def _recurse(
     """Yield `top` and every directory below it (plus every other entry when
     `with_files`), never descending through a directory symlink.
 
-    With `bound_loops`, a directory is descended at most once per `**`,
-    keyed on `(st_dev, st_ino)` and seeded with `top`: that bounds a Windows
+    With `bound_loops`, a directory whose identity (`st_dev`, `st_ino`) is
+    already on the CURRENT DESCENT PATH is skipped: that is what a loop is
+    -- a directory reachable below itself -- and it bounds a Windows
     junction loop, which no symlink check can see (a junction reports
-    `is_symlink() == False`). The entry itself is still yielded -- it exists
-    -- only the descent is skipped. A backend whose stat has no identity
-    cannot be bounded this way and is walked as before.
+    `is_symlink() == False`).
+
+    The ancestor chain is the whole rule, not a set of everything seen. One
+    directory deliberately reachable under two SIBLING names (a shared
+    config layer junctioned in as `site-a` and `site-b`) is not a loop: the
+    walk terminates, and both names must expand. A `visited` set spanning
+    the traversal dropped the second one silently. `find -L` draws the line
+    in the same place.
+
+    A backend whose stat has no identity cannot be bounded this way and is
+    walked as before.
     """
     yield top
-    visited = set()
-    if bound_loops:
-        key = _identity(top)
-        if key is not None:
-            visited.add(key)
-    stack = [top]
+    top_key = _identity(top) if bound_loops else None
+    # Each stack entry carries the identities of the directories the walk is
+    # currently inside -- pushed on descent, dropped with the branch.
+    stack = [(top, (top_key,) if top_key is not None else ())]
     while stack:
-        directory = stack.pop()
+        directory, ancestors = stack.pop()
         for child, stat in _scan(directory, on_error):
             if not include_hidden and child.is_hidden():
                 continue
             is_dir = _entry_is_dir(child, stat, follow_symlinks=False)
+            child_ancestors = ancestors
             if is_dir and bound_loops:
                 key = _identity(child)
                 if key is not None:
-                    if key in visited:
-                        # Already walked under another name: a junction back
-                        # into the tree, or a second link to one directory.
-                        # Yielding it too would repeat everything under it.
+                    if key in ancestors:
+                        # The child IS one of its own ancestors: descending
+                        # would walk the same tree again, without end.
+                        # Skipped entirely -- yielding it would let the next
+                        # pattern component match everything under it a
+                        # second time, through the loop.
                         continue
-                    visited.add(key)
+                    child_ancestors = ancestors + (key,)
             if is_dir or with_files:
                 yield child
             if is_dir:
-                stack.append(child)
+                stack.append((child, child_ancestors))
 
 
 def _scan(directory: _Globable, on_error=None):

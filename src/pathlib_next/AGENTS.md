@@ -103,14 +103,16 @@ silently absent and `from pathlib_next.uri import UriPath` raises
       skipped in silence (pathlib's behaviour), so a caller could not tell
       an unreadable directory from an absent one. `error.filename` names the
       directory even when the backend left it unset.
-    - **`bound_loops=True`** descends a directory at most once per `**`,
-      keyed on `(st_dev, st_ino)` and seeded with the starting directory. It
-      bounds a Windows junction loop, which `recurse_symlinks=False` cannot
-      (a junction reports `is_symlink() == False`) and which `pathlib`
-      itself walks until the recursion limit. A directory reached a second
-      way is skipped entirely, not just not descended. A backend whose stat
-      carries no identity (`MemPath`, most remote schemes) is walked
-      unbounded, as before.
+    - **`bound_loops=True`** skips a directory whose `(st_dev, st_ino)` is
+      already on the CURRENT DESCENT PATH — a directory reachable below
+      itself, which is what a loop is. It bounds a Windows junction loop,
+      which `recurse_symlinks=False` cannot (a junction reports
+      `is_symlink() == False`) and which `pathlib` itself walks until the
+      recursion limit. One directory deliberately reachable under two
+      SIBLING names (a shared layer junctioned in twice) is not a loop and
+      both names expand — the rule is the ancestor chain, not everything
+      seen, the same line `find -L` draws. A backend whose stat carries no
+      identity (`MemPath`, most remote schemes) is walked unbounded.
     - **`native=True`** (default) follows the running interpreter on the two
       rules pathlib changed mid-series: a trailing `/` is ignored before 3.11
       and selects directories only from 3.11; `a**` raises `ValueError`

@@ -479,3 +479,62 @@ def test_bound_loops_is_accepted_where_stats_have_no_identity():
     (mem / "s").mkdir()
     (mem / "s" / "x.py").write_text("x")
     assert [str(p) for p in mem.glob("**/*.py", bound_loops=True)] == ["/m/s/x.py"]
+
+
+def _junction(link, target):
+    """`mklink /J` returns 0 without elevation, unlike `os.symlink`."""
+    import subprocess
+
+    subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_bound_loops_keeps_a_directory_shared_under_two_names(tmp_path):
+    """A loop is a directory reachable BELOW ITSELF -- not one reachable
+    twice. Two sibling junctions onto one shared directory (a common config
+    layer linked in as `site-a` and `site-b`) is a deliberate layout that
+    terminates on its own, and both names must expand. Keying the bound on
+    everything seen dropped the second one silently."""
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "own.yaml").write_text("own")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "common.yaml").write_text("common")
+    _junction(conf / "site-a", shared)
+    _junction(conf / "site-b", shared)
+
+    base = pathlib_next.LocalPath(tmp_path)
+    expected = sorted(
+        str(q.relative_to(tmp_path)).replace("\\", "/")
+        for q in base.glob("conf/**/*.yaml")
+    )
+    bounded = sorted(
+        str(q.relative_to(tmp_path)).replace("\\", "/")
+        for q in base.glob("conf/**/*.yaml", bound_loops=True)
+    )
+    assert "conf/site-b/common.yaml" in expected  # the default finds both
+    assert bounded == expected  # and so does the bounded walk
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_bound_loops_still_bounds_a_loop_back_to_an_ancestor(tmp_path):
+    """The case the flag exists for: unbounded, the two real files are
+    matched 128 times (and a deeper walk fails outright on the path
+    length)."""
+    conf = tmp_path / "conf"
+    (conf / "deep").mkdir(parents=True)
+    (conf / "10-base.yaml").write_text("a")
+    (conf / "deep" / "20-extra.yaml").write_text("b")
+    _junction(conf / "deep" / "loop", conf)
+
+    base = pathlib_next.LocalPath(tmp_path)
+    assert len(list(base.glob("conf/**/*.yaml"))) > 2
+    assert sorted(q.name for q in base.glob("conf/**/*.yaml", bound_loops=True)) == [
+        "10-base.yaml",
+        "20-extra.yaml",
+    ]

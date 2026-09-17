@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`glob(bound_loops=True)` no longer drops a directory shared under two
+  names.** It bounded on every identity seen during the walk, so one
+  directory junctioned in as both `site-a` and `site-b` -- a deliberate
+  layout, and not a loop -- expanded under the first name only, silently. A
+  loop is a directory reachable BELOW ITSELF, so the bound is now the
+  current descent path rather than everything seen, which is the line
+  `find -L` draws. The loop case is unchanged: 128 matches become 2.
+  Reported by yaconfiglib against 0.9.7.
+
 ### Documentation
 - **Corrected the 0.9.8 entry's provenance.** It says 0.9.7 introduced the
   join-builds-a-backend defect; it did not. Measured against the published
