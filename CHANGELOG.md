@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-09-17
+
 ### Fixed
 - **Joining a URI path no longer builds a backend.** 0.9.7 routed `/` and
   `joinpath()` through the child builder a listing uses, which reads the
@@ -1460,7 +1462,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.8...HEAD
+[0.9.8]: https://github.com/jose-pr/pathlib-next/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/jose-pr/pathlib-next/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/jose-pr/pathlib-next/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/jose-pr/pathlib-next/compare/v0.9.4...v0.9.5
