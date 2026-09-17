@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-09-17
+
 ### Changed
 - **CI gains a URI-only job** (`test.yml`): the package installed with just
   the `uri` extra and no scheme client at all, running the modules that must
@@ -1491,7 +1493,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.8...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.9...HEAD
+[0.9.9]: https://github.com/jose-pr/pathlib-next/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/jose-pr/pathlib-next/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/jose-pr/pathlib-next/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/jose-pr/pathlib-next/compare/v0.9.5...v0.9.6
