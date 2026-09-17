@@ -132,6 +132,58 @@ jobs:
           printf 'no extras\n' > local.txt
           test "$(uripath read local.txt)" = "no extras"
 
+  uri-only:
+    name: Test URI-only (py${{ matrix.python-version }}, ubuntu)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package with only the uri extra
+        # Exactly `pip install pathlib-next[uri]` plus the test runner: the
+        # URI layer, but NO scheme client (no requests, paramiko, boto3...).
+        # Every other job installs all extras, so a defect that only appears
+        # without a client library is invisible to them -- one lived from
+        # 0.9.3 to 0.9.8 behind a green matrix, because `UriPath("sftp://h/x")
+        # / "y"` built a backend and a pure-path join therefore needed
+        # paramiko installed.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[uri]" pytest hypothesis
+      - name: Run the client-independent modules
+        # Not the whole suite: most scheme tests need their client (moto,
+        # wsgidav, paramiko) and are written to have it -- including
+        # test_uri_path.py, which builds http:/s3: paths freely. These are
+        # the modules that must pass with no client at all.
+        run: |
+          python -m pytest -q -rs \
+            tests/test_pure_parity.py \
+            tests/test_pathname.py \
+            tests/test_glob.py \
+            tests/test_glob_parity.py \
+            tests/test_utils.py \
+            tests/test_mempath.py
+      - name: A pure-path join needs no scheme client
+        # The specific shape the suite cannot assert from an all-extras
+        # environment: spelling a path must not import anything.
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib_next.uri import UriPath
+          joined = UriPath("sftp://host/mnt") / "child" / "a?b.txt"
+          assert joined.path == "/mnt/child/a?b.txt", joined.path
+          assert joined._backend is None
+          assert "paramiko" not in sys.modules and "asyncssh" not in sys.modules
+          print("pure-path join ok without a scheme client")
+          PY
+
   benchmark:
     name: Benchmarks (py3.14, ${{ matrix.os }})
     # Opt-in: benchmarks are noisy and slow, so they never run on ci-* tags

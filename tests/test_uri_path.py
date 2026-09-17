@@ -365,7 +365,13 @@ def test_joining_a_path_never_builds_a_backend():
     property builds one, so spelling `UriPath("sftp://h/x") / "y"` imported
     paramiko and raised ImportError without the extra. Every scheme, not
     just the ones whose client happens to be installed."""
-    for uri in ("sftp://h/mnt", "http://h/a", "s3://b/k", "file:///tmp/x"):
+    # Schemes whose class module does not import a client at import time.
+    # (`http:`/`s3:` cannot even be CONSTRUCTED without their extra -- that
+    # is deliberate and documented, and a separate matter from joining.)
+    # (`zip:`/`tar:` are left out on purpose: their "backend" is the shared
+    # archive handle from the registry, stdlib-only and opened lazily, so it
+    # is attached at construction and a join inherits it.)
+    for uri in ("sftp://h/mnt", "file:///tmp/x", "data:,abc"):
         base = UriPath(uri)
         child = base / "child"
         assert child.path.endswith("/child")
@@ -377,7 +383,7 @@ def test_joining_a_path_never_builds_a_backend():
 def test_joining_shares_a_backend_that_already_exists():
     """What the property read was there for: children of a listing share the
     parent's live connection. That still holds -- by then it exists."""
-    base = UriPath("http://h/a")
+    base = UriPath("sftp://h/mnt")
     sentinel = object()
     base._backend = sentinel
     assert (base / "c")._backend is sentinel

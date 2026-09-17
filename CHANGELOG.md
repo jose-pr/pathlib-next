@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **CI gains a URI-only job** (`test.yml`): the package installed with just
+  the `uri` extra and no scheme client at all, running the modules that must
+  work without one plus an explicit check that a pure-path join imports
+  nothing. Every other job installs all extras, which is why a join that
+  built a backend -- and so needed paramiko to spell an `sftp:` path --
+  survived from 0.9.3 to 0.9.8 behind a green matrix.
+
 ### Fixed
 - **`glob(bound_loops=True)` no longer drops a directory shared under two
   names.** It bounded on every identity seen during the walk, so one
