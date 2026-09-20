@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-09-20
+
 ### Added
 - **`Path._same_filesystem(other)`, an override hook** answering whether two
   paths of one type resolve their segments in the same place. Path equality
@@ -1530,7 +1532,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.9...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.10...HEAD
+[0.9.10]: https://github.com/jose-pr/pathlib-next/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/jose-pr/pathlib-next/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/jose-pr/pathlib-next/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/jose-pr/pathlib-next/compare/v0.9.6...v0.9.7
