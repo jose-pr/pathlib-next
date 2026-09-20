@@ -1168,6 +1168,21 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         otherwise take a remote path's `__fspath__()` as a local name."""
         return True
 
+    def _same_filesystem(self, other: "Path") -> bool:
+        """Whether `other`'s segments are resolved in the same namespace as
+        this path's: the same host, store or tree. Only when they are do
+        `==` and `is_relative_to()` between the two say anything about files,
+        so `copy()`, `move()` and `PathSyncer` ask this before refusing a
+        transfer as "the same file" or "overlapping".
+
+        Called only with `type(other) is type(self)`. Must be symmetric and
+        must not do I/O. Default: both share one `_backend` object (or neither
+        has one), which makes equal paths of a type that says nothing the
+        same file. A type whose instances can front different hosts or stores
+        MUST override this, or a transfer between two of them that are spelled
+        alike is refused."""
+        return getattr(self, "_backend", None) is getattr(other, "_backend", None)
+
     def is_junction(self) -> bool:
         """Whether this path is a Windows junction (pathlib 3.12 parity).
 
@@ -1594,15 +1609,11 @@ def _check_follow(name: str, policy) -> None:
 def _contains(src: Path, target: Path) -> bool:
     """Whether `target` is `src` or lies inside it, on the same backend
     (pathlib 3.14's copy() refuses both). Conservative like `_same_file`:
-    paths of different types, or with different per-instance backends, are
-    never reported as nested."""
+    paths of different types, or that `_same_filesystem()` reports as living
+    in different namespaces, are never reported as nested."""
     if type(src) is not type(target):
         return False
-    if not hasattr(src, "source") and getattr(src, "_backend", None) is not getattr(
-        target, "_backend", None
-    ):
-        # A URI's equality already includes its authority; any other
-        # backend (a MemPath tree) must be the same instance.
+    if not src._same_filesystem(target):
         return False
     try:
         return bool(target.is_relative_to(src))
@@ -1616,8 +1627,8 @@ def _same_file(src: Path, target: Path) -> bool:
     `samefile()` is trusted only between paths of the same concrete type:
     `LocalPath.samefile()` accepts any os.PathLike, so a remote target whose
     `__fspath__()` happens to spell a local path would otherwise "match".
-    Where `samefile()` is unavailable (no st_dev/st_ino), equal paths on the
-    same backend are the same file.
+    Where `samefile()` is unavailable (no st_dev/st_ino), equal paths that
+    `_same_filesystem()` places in one namespace are the same file.
     """
     if type(src) is not type(target):
         return False
@@ -1625,7 +1636,7 @@ def _same_file(src: Path, target: Path) -> bool:
         return bool(src.samefile(target))
     except (NotImplementedError, OSError, TypeError, ValueError):
         pass
-    if getattr(src, "_backend", None) is not getattr(target, "_backend", None):
+    if not src._same_filesystem(target):
         return False
     try:
         return src == target

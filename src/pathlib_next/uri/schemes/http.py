@@ -15,7 +15,7 @@ import urllib3.exceptions as _urllib3_exc
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
-from .. import UriPath
+from .. import UriPath, _DerivedBackend
 
 DEFAULT_TIMEOUT = (10, 60)
 """`(connect, read)` timeout, in seconds, `HttpBackend` sends with every
@@ -721,6 +721,14 @@ class HttpBackend(_ty.NamedTuple):
         return self.session.request(method=method, url=url, **args)
 
 
+class _DerivedHttpBackend(HttpBackend, _DerivedBackend):
+    """What `HttpPath._initbackend()` returns. A tuple cannot be weakly
+    referenced, so the class itself says the path derived this backend for
+    itself (see `UriPath._supplied_backend()`)."""
+
+    __slots__ = ()
+
+
 class HttpPath(UriPath):
     """`http`/`https` scheme: read/write access over HTTP (`PUT`/`DELETE`
     for writes/deletes, configurable via `with_session()`), listing
@@ -735,7 +743,7 @@ class HttpPath(UriPath):
         backend: HttpBackend
 
     def _initbackend(self):
-        return HttpBackend(_req.Session(), {})
+        return _DerivedHttpBackend(_req.Session(), {})
 
     def _listdir(self) -> list[_FileEntry]:
         # requests follows GET redirects by default, so a redirecting

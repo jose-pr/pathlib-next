@@ -10,7 +10,6 @@ import typing as _ty
 import uuid as _uuid
 
 from .. import utils as _utils
-from ..mempath import MemPath as _MemPath
 from ..path import Path
 from ..utils.stat import FileStat
 from . import checksum as _checksum
@@ -268,23 +267,14 @@ def _paths_overlap(source: Path, target: Path) -> bool:
     """Whether `source` and `target` are the same tree or one contains the
     other. Only decided for two paths of the same implementation: different
     implementations (e.g. `LocalPath` vs `FileUri`) are never reported.
-    `MemPath` equality ignores the backend, so two trees on different
-    `MemPathBackend`s are not overlapping even with equal segments.
-    `LocalPath` is resolved first so a symlink cannot hide the overlap."""
+    Path equality ignores where the segments are resolved, so the paths'
+    own `_same_filesystem()` is asked first: two `MemPath` trees on separate
+    backends, or two hosts behind one path type, do not overlap even with
+    equal segments. `LocalPath` is resolved first so a symlink cannot hide
+    the overlap."""
     if type(source) is not type(target):
         return False
-    if isinstance(source, _MemPath) and source.backend is not target.backend:
-        return False
-    # Equal URIs reached through two distinct explicit backends (separate
-    # connections, or fakes standing in for two hosts) are not provably the
-    # same tree; only refuse what is.
-    source_backend = getattr(source, "_backend", None)
-    target_backend = getattr(target, "_backend", None)
-    if (
-        source_backend is not None
-        and target_backend is not None
-        and source_backend is not target_backend
-    ):
+    if not source._same_filesystem(target):
         return False
     if isinstance(source, _pathlib.Path):
         resolved = []

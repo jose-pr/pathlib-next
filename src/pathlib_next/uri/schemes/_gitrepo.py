@@ -81,7 +81,9 @@ class BaseRepoBackend(object):
     GitHub/GitLab REST API. Subclass this to plug in custom auth/session
     handling; `RepoBackend` is the real `requests`-based implementation."""
 
-    __slots__ = ()
+    # Weakly referenceable so `UriPath` can record which backends a path
+    # derived for itself (see `UriPath._supplied_backend()`).
+    __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
     def request(self, method, url, **kwargs): ...

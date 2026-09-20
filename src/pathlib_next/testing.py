@@ -470,6 +470,24 @@ class PathContract(ReadPathContract):
             (root / "nonexistent.txt").copy(dst)
         assert not dst.exists()
 
+    def test_copy_onto_itself_raises_and_keeps_content(self, root):
+        # A second spelling of the same file, built separately: truncating
+        # the "target" before reading the source would destroy the only copy.
+        src = root / "a.txt"
+        with pytest.raises(OSError):
+            src.copy(root / "a.txt", overwrite=True)
+        assert src.read_text() == "a"
+
+    def test_same_filesystem_holds_within_one_root(self, root):
+        # `copy()`, `move()` and `PathSyncer` only compare two paths that
+        # `_same_filesystem()` places together; paths derived from one root
+        # always are. A type fronting several hosts or stores overrides it.
+        child = root / "a.txt"
+        if type(child) is type(root):
+            assert root._same_filesystem(child)
+            assert child._same_filesystem(root)
+        assert child._same_filesystem(root / "sub" / "c.py")
+
     def test_copy_recursive(self, root):
         dst = root / "sub_copy"
         (root / "sub").copy(dst, recursive=True)

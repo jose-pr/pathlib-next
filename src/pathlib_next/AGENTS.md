@@ -74,6 +74,17 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     Default False everywhere; `LocalPath`/`FileUri` answer for real.
   - `samefile(other_path)` — compares `(st_dev, st_ino)`; `NotImplementedError`
     when `stat()` lacks them (`LocalPath` uses pathlib's).
+  - `_same_filesystem(other) -> bool` — override hook: whether `other`'s
+    segments are resolved in the same namespace (host, store, tree) as this
+    path's. `==` ignores that, so `copy()`, `move()` and `PathSyncer` ask it
+    before treating two paths as the same file, nested, or overlapping.
+    Called only with `type(other) is type(self)`; must be symmetric and do no
+    I/O. Default: both paths share one `_backend` object, or neither has
+    one, so equal paths of a type that says nothing ARE the same file. **A
+    type whose instances can front different hosts or stores must override
+    it**, or a transfer between two of them spelled alike is refused
+    (`OSError(EINVAL)` "same file" / `ValueError` "overlap"). `MemPath`:
+    same `MemPathBackend` instance; `UriPath`: see `backend` below.
   - `iterdir() -> Iterator[Self]` — **stub** (`NotImplementedError`); a
     listable `Path` must implement it (or, on `UriPath`, `_listdir()`/
     `_scandir()`).
@@ -160,7 +171,9 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     - Existing target: `FileExistsError` unless `overwrite=True`; a directory
       target of a file copy → `IsADirectoryError`; a directory source needs
       `recursive=True`; copying into its own subtree → `OSError(EINVAL)`; onto
-      the same file (or a case-insensitive alias) → `OSError(EINVAL)`.
+      the same file (or a case-insensitive alias) → `OSError(EINVAL)`. "Same"
+      is `samefile()` where `stat()` carries `st_dev`/`st_ino`; otherwise
+      equal paths of one type that `_same_filesystem()` places together.
     - The source is opened before the target is touched; a failed stream
       removes the partial target.
     - A recursive copy refuses any child name that would not stay inside
@@ -314,6 +327,14 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     shared within one endpoint (scheme, userinfo, host, port): a join,
     `with_source()` or `UriPath(base, url)` onto another endpoint builds a
     fresh one, so credentials and sessions never follow.
+    `_same_filesystem()`: two URIs are on different filesystems only when
+    BOTH carry a backend the caller supplied (`backend=`, `with_backend()`,
+    or inherited from such a path) and those are different objects -- two
+    connections, or fakes standing in for two hosts. A backend a path
+    derived for itself counts as none, so two separately built paths to one
+    URL are the same file. A derived backend is recognised by being weakly
+    referenceable (every built-in `Base*Backend` is; give a slotted custom
+    one `"__weakref__"`); one that is not reads as supplied.
   - Listing: implement `_listdir() -> Iterator[str]` or override
     `_scandir()`; `iterdir()` wraps each name with the entry's stat as a
     single-use hint (the child's first `stat()` returns it, later calls
@@ -613,7 +634,9 @@ stdout returns 141, Ctrl-C 130.
   `supports_empty_directories`, `distinguishes_file_types`.
 - **`PathContract(ReadPathContract)`** — `mkdir()`, writes and write/append/
   exclusive modes, `unlink()`, `rmdir()`, `rm()`, `copy()` (recursive),
-  `move()`, `rename()`, `touch()`. Capability attributes: `supports_rename`,
+  `move()`, `rename()`, `touch()`, copying a file onto a separately built
+  spelling of itself (`OSError`, content kept) and `_same_filesystem()`
+  within one root. Capability attributes: `supports_rename`,
   `supports_append`, `supports_exclusive_create`,
   `enforces_directory_hierarchy`.
 - Both I/O contracts need `root` to be a **fresh, function-scoped** directory
@@ -666,8 +689,8 @@ class TestMyPath(PathContract):
     `pathlib_next.sync` and reported to `hook` as `SyncEvent.Error`.
     `.log(msg, *args)` (INFO on the same logger) is overridable.
   - Safety, all through `ignore_error`: a missing root `source` →
-    `FileNotFoundError`; overlapping `source`/`target` (same implementation
-    and backend) → `ValueError`; a child name that would leave `target`
+    `FileNotFoundError`; overlapping `source`/`target` (same implementation,
+    and `_same_filesystem()` places them together) → `ValueError`; a child name that would leave `target`
     (`..`, or `\`/`:` on a Windows target) → `ValueError`; a symlink inside
     `target` is replaced, never followed. Listing entries with unknown stats
     are re-stat'd.

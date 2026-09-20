@@ -40,7 +40,9 @@ class BaseSftpBackend(object):
     already-cached-or-freshly-opened, ready-to-use client; `SftpPath`
     itself does no per-backend branching anywhere."""
 
-    __slots__ = ()
+    # Weakly referenceable so `UriPath` can record which backends a path
+    # derived for itself (see `UriPath._supplied_backend()`).
+    __slots__ = ("__weakref__",)
 
     #: Whether `chmod(follow_symlinks=False)` is supported. paramiko has no
     #: lchmod equivalent to call; asyncssh's `chmod()` takes

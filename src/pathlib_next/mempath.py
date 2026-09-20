@@ -174,6 +174,11 @@ class MemPath(Path):
     def backend(self):
         return self._backend
 
+    def _same_filesystem(self, other: "MemPath") -> bool:
+        # Equality ignores the backend; two trees are one filesystem only
+        # when they share the `MemPathBackend` instance.
+        return self._backend is other._backend
+
     @property
     def normalized(self):
         if self._normalized is None:

@@ -24,7 +24,9 @@ class BaseFtpBackend(object):
     handling (e.g. tests mock it directly, no real server);
     `FtpBackend` is the real implementation."""
 
-    __slots__ = ()
+    # Weakly referenceable so `UriPath` can record which backends a path
+    # derived for itself (see `UriPath._supplied_backend()`).
+    __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
     def client(self, source: Source, tls: bool) -> "_ftplib.FTP": ...

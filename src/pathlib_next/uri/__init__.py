@@ -5,6 +5,7 @@ import pathlib as _pathlib
 import re as _re
 import posixpath as _posix
 import typing as _ty
+import weakref as _weakref
 
 import uritools
 
@@ -50,6 +51,22 @@ def _same_authority(a: Source, b: Source) -> bool:
     port), treating `""` and `None` alike. The test for whether a backend,
     connection or rename may cross from one path to another."""
     return _authority_key(a) == _authority_key(b)
+
+
+#: Backends a path built for itself through `_initbackend()`, keyed by `id()`
+#: (a backend may be unhashable or compare by value; the `is` test on lookup
+#: makes a reused id harmless). Everything else was supplied by the caller.
+_DERIVED_BACKENDS: "_weakref.WeakValueDictionary[int, object]" = (
+    _weakref.WeakValueDictionary()
+)
+
+
+class _DerivedBackend:
+    """Marks a backend class whose instances only ever come from
+    `_initbackend()`, for a backend that cannot be weakly referenced and so
+    cannot be recorded in `_DERIVED_BACKENDS` (a tuple, say)."""
+
+    __slots__ = ()
 
 
 _U = _ty.TypeVar("_U", bound="Uri")
@@ -1020,8 +1037,37 @@ class UriPath(Uri, Path):
         """The connection or session state backend instance."""
         self._check_inherited_backend()
         if self._backend is None:
-            self._backend = self._initbackend()
+            backend = self._backend = self._initbackend()
+            if backend is not None:
+                try:
+                    _DERIVED_BACKENDS[id(backend)] = backend
+                except TypeError:
+                    # Not weak-referenceable: it reads as a supplied backend
+                    # unless its class is a `_DerivedBackend`.
+                    pass
         return self._backend
+
+    def _supplied_backend(self):
+        """The backend the caller gave this path (`backend=`,
+        `with_backend()`, or inherited from a path that had one), or None
+        when it has none yet or derived its own. Never builds one."""
+        backend = self._backend
+        if (
+            backend is None
+            or isinstance(backend, _DerivedBackend)
+            or _DERIVED_BACKENDS.get(id(backend)) is backend
+        ):
+            return None
+        return backend
+
+    def _same_filesystem(self, other: "UriPath") -> bool:
+        # A URI's equality already includes its authority, and a backend a
+        # path derived for itself says nothing more than the URI does: two
+        # paths built separately for one URL are the same file. Only two
+        # distinct SUPPLIED backends (separate connections, or fakes standing
+        # in for two hosts) are not provably the same tree.
+        mine, theirs = self._supplied_backend(), other._supplied_backend()
+        return mine is None or theirs is None or mine is theirs
 
     def _coerce_target(self, target: str) -> "UriPath":
         """A `str` destination for `copy()`/`move()`, read by its shape.

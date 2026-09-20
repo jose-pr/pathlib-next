@@ -17,7 +17,9 @@ class BaseAzBackend(object):
     can override to point at a fake server); `AzBackend` is the real
     implementation."""
 
-    __slots__ = ()
+    # Weakly referenceable so `UriPath` can record which backends a path
+    # derived for itself (see `UriPath._supplied_backend()`).
+    __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
     def client(self): ...
