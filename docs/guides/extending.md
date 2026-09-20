@@ -60,6 +60,38 @@ per-instance state (for `MemPath`, the whole in-memory tree). `copy()` and
 `move()` convert a `str` destination through `_coerce_target()`, which does
 exactly that by default.
 
+### One class, several hosts or stores
+
+Path equality compares the type and the segments, nothing else: `/app.conf` on
+one host equals `/app.conf` on another. `copy()`, `move()` and `PathSyncer`
+refuse to write a file onto itself or a tree into itself, so before comparing
+two paths of the same type they ask `_same_filesystem(other)`: are these
+segments resolved in the same place?
+
+| Method | Notes |
+| --- | --- |
+| `_same_filesystem(other) -> bool` | `other` is always the same type as `self`. Must be symmetric and do no I/O. |
+
+The default answers yes unless the two paths hold different `_backend`
+objects, so a type that says nothing keeps its guard against copying a file
+onto itself. If instances of your class can point at different hosts, stores
+or trees, override it -- otherwise a transfer between two of them that happen
+to be spelled alike fails with `OSError: [Errno 22] Source and target are the
+same file`, or `ValueError: ... source and target overlap` from `PathSyncer`:
+
+```python
+def _same_filesystem(self, other):
+    return self._connection is other._connection
+```
+
+`samefile()` is consulted first wherever `stat()` reports `st_dev` and
+`st_ino`. `MemPath` compares its `MemPathBackend` by identity. A `UriPath`
+needs nothing: two URIs are told apart only when both were given a backend
+(`backend=`, `with_backend()`) and those differ; a backend the path built for
+itself through `_initbackend()` adds nothing to what the URI already says. If
+your backend class uses `__slots__`, include `"__weakref__"` so such a
+backend can be recognised.
+
 `MemPath` implements this surface over nested dicts (`MemPathBackend`: a
 `dict` value is a directory, a `bytearray` a file); see
 [Memory Path API](../api/mempath.md).

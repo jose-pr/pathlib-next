@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`Path._same_filesystem(other)`, an override hook** answering whether two
+  paths of one type resolve their segments in the same place. Path equality
+  ignores that, and `copy()`, `move()` and `PathSyncer` now ask it before
+  calling two paths the same file, nested, or overlapping. A path type whose
+  instances can front different hosts or stores should override it; the
+  default keeps the previous behaviour. `pathlib_next.testing.PathContract`
+  gains two tests: a file copied onto a separately built spelling of itself
+  is refused with its content intact, and paths under one root share a
+  filesystem.
+
+### Changed
+- The built-in `Base*Backend` classes (`s3`, `gs`, `az`, `ftp`, `sftp`,
+  `github`/`gitlab`) are weakly referenceable, which is how a `UriPath`
+  tells a backend it derived for itself from one it was given. A custom
+  backend class using `__slots__` without `"__weakref__"` still works; it is
+  simply always read as supplied.
+
+### Fixed
+- **A path type that fronts several hosts can transfer between them again.**
+  Since 0.9.4, `copy()`/`move()` raised `OSError(EINVAL)` "Source and target
+  are the same file" and `PathSyncer` raised "source and target overlap" for
+  `/app.conf` on one host onto `/app.conf` on another, whenever the type kept
+  its connection under any attribute other than the private `_backend` the
+  guards looked for. Such a type now overrides `_same_filesystem()`.
+- **Two separately built URIs to the same URL are recognised as the same
+  file.** Each derived its own backend on first use, which the guards read as
+  two hosts: `UriPath(url).copy(UriPath(url), overwrite=True)` was not
+  refused on any scheme without `st_dev`/`st_ino` (S3 and WebDAV among
+  them), and neither was a sync of a URL onto itself. Only two backends the
+  caller supplied now tell equal URIs apart. One consequence: a path given a
+  backend and a bare path to the same URL are now the same file for
+  `copy()`/`move()`, as they already were for `PathSyncer`.
+- `copy(recursive=True)`'s "into itself" check now honours two supplied
+  backends, like the other two guards; it refused a copy between two hosts
+  whose URIs nested.
+
 ## [0.9.9] - 2026-09-17
 
 ### Changed
