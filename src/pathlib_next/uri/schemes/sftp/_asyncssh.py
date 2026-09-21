@@ -13,12 +13,13 @@ import threading as _thread
 import typing as _ty
 
 import asyncssh as _asyncssh
+import asyncssh.packet as _packet
 import netimps as _netimps
 
 from ... import Source
 from .... import utils as _utils
 from ....utils.stat import FileStat
-from . import BaseSftpBackend
+from . import _checkfile
 from ._sshconfig import _DEFAULT_SSH_CONFIG
 
 # --- shared background event loop -------------------------------------
@@ -404,6 +405,37 @@ async def _aopen(aclient: "_asyncssh.SFTPClient", path: str, mode: str):
     return await aclient.open(path, mode, encoding=None)
 
 
+#: `check-file-handle` as asyncssh keys an extended request.
+_CHECK_FILE_REQUEST = _checkfile.EXTENSION.encode("ascii")
+
+
+async def _acheck_file(
+    aclient: "_asyncssh.SFTPClient", handle: bytes, algorithm: str
+) -> bytes:
+    # asyncssh has no public API for an arbitrary extended request: this is
+    # the `_make_request()` primitive its own statvfs@openssh.com and
+    # limits@openssh.com requests use. It rejects any reply type the
+    # handler's `_return_types` table does not name for the request as
+    # SFTPBadMessage, so the extension is added to that table -- on this
+    # connection's handler only: the class-level table is shared with
+    # asyncssh's SFTP server.
+    handler = aclient._handler
+    if _CHECK_FILE_REQUEST not in handler._return_types:
+        handler._return_types = {
+            **handler._return_types,
+            _CHECK_FILE_REQUEST: _asyncssh.FXP_EXTENDED_REPLY,
+        }
+    packet = await handler._make_request(
+        _CHECK_FILE_REQUEST,
+        _packet.String(handle),
+        _packet.String(algorithm),  # hash-algorithm-list: just the one wanted
+        _packet.UInt64(_checkfile.START_OFFSET),
+        _packet.UInt64(_checkfile.LENGTH),
+        _packet.UInt32(_checkfile.BLOCK_SIZE),
+    )
+    return packet.get_remaining_payload()
+
+
 class _SyncSftpClient:
     """Sync wrapper around an asyncssh `SFTPClient`, exposing the same
     method names paramiko's `SFTPClient` uses (`stat`/`lstat`/
@@ -412,9 +444,13 @@ class _SyncSftpClient:
     `self._sftpclient.X()`
     directly with no per-backend branching, so matching that shape here is
     what makes everything above "just add one more mirrored method" rather
-    than new plumbing in `SftpPath` itself."""
+    than new plumbing in `SftpPath` itself.
 
-    __slots__ = ("_aclient", "_timeout")
+    Weakly referenceable: per-connection records (a refused
+    `check-file-handle`, a missing `posix-rename@openssh.com`) are keyed on
+    this object, and without `__weakref__` they are silently never kept."""
+
+    __slots__ = ("_aclient", "_timeout", "__weakref__")
 
     def __init__(
         self,
@@ -529,6 +565,13 @@ class _SyncSftpClient:
         # OSError subclass; SftpPath.hardlink_to() is responsible for the
         # NotImplementedError fallback policy, not this wrapper.
         self._run(self._aclient.link(source, dest))
+
+    @_reraise_sftp_errors
+    def check_file(self, file: "_SyncSftpFile", algorithm: str) -> bytes:
+        """The `check-file-handle` reply payload for `file`, an unbuffered
+        handle from `open()`. The server hashes the whole file before it
+        answers, so the duration grows with the data: no wall-clock bound."""
+        return _run(_acheck_file(self._aclient, file._afile.handle, algorithm), None)
 
 
 # --- connection cache --------------------------------------------------
@@ -686,7 +729,7 @@ async def _aconnect(
     return _ConnectionEntry(conn, _SyncSftpClient(aclient, timeout))
 
 
-class AsyncsshSftpBackend(BaseSftpBackend):
+class AsyncsshSftpBackend(_checkfile.CheckFileSftpBackend):
     """`sftp:` backend using `asyncssh` instead of paramiko. Selected
     automatically when `asyncssh` is importable (see backend selection in
     `sftp/__init__.py`), or explicitly via `backend=AsyncsshSftpBackend()`
@@ -707,9 +750,10 @@ class AsyncsshSftpBackend(BaseSftpBackend):
 
     `timeout` (default `_DEFAULT_TIMEOUT`, 60 s) bounds a single request --
     connect, stat, open, mkdir, rename, ... -- and a timed-out request is
-    cancelled and raises `TimeoutError`. Recursive `copy()`/`rm()` and
+    cancelled and raises `TimeoutError`. Recursive `copy()`/`rm()`,
     streaming file reads/writes (`read_bytes()`, `write_bytes()`, chunked
-    copies) have no wall-clock bound; asyncssh's own `connect_timeout`,
+    copies) and a native `checksum()` (the server hashes the whole file)
+    have no wall-clock bound; asyncssh's own `connect_timeout`,
     `login_timeout` and `keepalive_interval` connect options detect a dead
     peer there. `timeout=None` disables the per-request bound too."""
 
@@ -773,6 +817,14 @@ class AsyncsshSftpBackend(BaseSftpBackend):
     def close(self) -> None:
         """Close every cached connection this backend opened."""
         _CACHE.close_backend(self)
+
+    def _check_file_request(
+        self, client: _SyncSftpClient, file: "_SyncSftpFile", algorithm: str
+    ) -> bytes:
+        # SSH_FX_OP_UNSUPPORTED arrives as NotImplementedError and an
+        # unexpected reply type as an OSError without an errno (both via
+        # `_translate`): `_checkfile.refused()` reads either as a refusal.
+        return client.check_file(file, algorithm)
 
     @classmethod
     def default(cls, ssh_config=_DEFAULT_SSH_CONFIG) -> "AsyncsshSftpBackend":

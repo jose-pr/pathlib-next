@@ -62,14 +62,13 @@ class BaseSftpBackend(object):
         """Advisory set of algorithm names `checksum()` can currently
         produce against `path`'s server connection (see
         `protocols.checksum.NativeChecksum.supported_checksums`). Empty
-        here (the default): no client-library support for any
-        native-hashing extension at all -- true for `AsyncsshSftpBackend`,
-        which inherits this. `SftpBackend` (paramiko) overrides this with a
-        per-connection probe against `path` (paramiko's version negotiation
-        reads and discards the server's extension list -- see
-        `_paramiko.py::SftpBackend.supported_checksums`). Takes a `path`
-        argument (unlike a bare capability flag) because the only reliable
-        way to know is to actually try the extension against a real file.
+        here (the default): no native-hashing support at all. Both real
+        backends override this with a per-connection probe against `path`
+        (neither library exposes the server's extension list -- see
+        `_checkfile.py::CheckFileSftpBackend.supported_checksums`). Takes a
+        `path` argument (unlike a bare capability flag) because the only
+        reliable way to know is to actually try the extension against a
+        real file.
         """
         return frozenset()
 
@@ -91,11 +90,9 @@ class BaseSftpBackend(object):
         no such capability at all, and MUST also raise it -- not return a
         value -- when the server doesn't advertise `algorithm` specifically
         (see `protocols/checksum.py::NativeChecksum.checksum` for why this
-        is a hard contract, not a style choice). Only `SftpBackend`
-        (paramiko) implements this today; `AsyncsshSftpBackend` has no
-        equivalent client-library support to build it on (see
-        `_asyncssh.py`), so it inherits this default and always falls back
-        to streaming.
+        is a hard contract, not a style choice). Both real backends
+        implement it through `_checkfile.py::CheckFileSftpBackend`, each
+        supplying only the extended request itself.
         """
         ...
 
@@ -227,10 +224,10 @@ class SftpPath(UriPath):
     "backend selection" above. Requires the `sftp` extra (paramiko) or
     `sftp-async` extra (asyncssh). Also implements
     `protocols.checksum.NativeChecksum` (`checksum()`, delegating to
-    `self.backend.checksum()`) -- native on the paramiko backend via the
-    filexfer draft's `check-file-handle` extension where the server
-    implements it (OpenSSH does not), `NotImplementedError` (falls back to
-    streaming) on asyncssh or a server without that extension."""
+    `self.backend.checksum()`) -- native on both backends via the filexfer
+    draft's `check-file-handle` extension where the server implements it
+    (OpenSSH does not), `NotImplementedError` (falls back to streaming) on a
+    server without that extension."""
 
     __SCHEMES = ("sftp",)
     __slots__ = ("_ssh_config",)
@@ -444,20 +441,19 @@ class SftpPath(UriPath):
 
     def supported_checksums(self) -> "_ty.FrozenSet[str]":
         """`protocols.checksum.NativeChecksum` implementation: delegates to
-        `self.backend.supported_checksums(self)`. Empty on the asyncssh
-        backend (no client-library support); a real per-connection probe
-        on the paramiko backend (see
-        `_paramiko.py::SftpBackend.supported_checksums`), so this can be
-        empty even on the paramiko backend if the connected server doesn't
-        actually implement `check-file-handle` (OpenSSH never does).
+        `self.backend.supported_checksums(self)` -- a real per-connection
+        probe on both backends (see
+        `_checkfile.py::CheckFileSftpBackend.supported_checksums`), so this
+        is empty when the connected server doesn't implement
+        `check-file-handle` (OpenSSH never does).
         """
         return self.backend.supported_checksums(self)
 
     def checksum(self, algorithm: str = "md5") -> str:
         """`protocols.checksum.NativeChecksum` implementation: delegates to
         `self.backend.checksum()` (the `check-file-handle` SFTP extension
-        on the paramiko backend; unimplemented on asyncssh
-        -- see `BaseSftpBackend.checksum`). Any failure that isn't already
+        on both backends -- see `BaseSftpBackend.checksum`). Any failure
+        that isn't already
         `NotImplementedError` (a server that doesn't advertise the
         extension, an unsupported algorithm, a transport-level error) is
         also translated to `NotImplementedError`: this method's whole

@@ -517,25 +517,23 @@ def test_sftppath_recursive_rm_uses_scandir_metadata_bottom_up():
 
 
 def test_sftppath_checksum_raises_notimplemented_when_backend_lacks_support():
-    # Covers both the "no client-library support at all" case (this is
-    # exactly what AsyncsshSftpBackend looks like: no checksum() override)
-    # and, transitively, PathSyncer's fallback-to-streaming trigger
-    # (utils.checksum.native() catches exactly this).
+    # Covers the "no native hashing at all" case (a custom backend with no
+    # checksum() override) and, transitively, PathSyncer's
+    # fallback-to-streaming trigger (utils.checksum.native() catches
+    # exactly this).
     p = _sftp("sftp://host/a.txt")
     with pytest.raises(NotImplementedError):
         p.checksum()
 
 
-def test_sftppath_checksum_raises_notimplemented_for_asyncssh_shaped_backend():
-    # AsyncsshSftpBackend genuinely has no checksum() override (see
-    # sftp/__init__.py's BaseSftpBackend.checksum docstring) -- a bare
-    # BaseSftpBackend subclass with only `client()` implemented models that
-    # shape without requiring the asyncssh extra to be installed.
-    class _AsyncsshShapedBackend(BaseSftpBackend):
+def test_sftppath_checksum_raises_notimplemented_for_minimal_custom_backend():
+    # A bare BaseSftpBackend subclass with only `client()` implemented --
+    # the smallest custom backend -- inherits the notimplemented default.
+    class _MinimalBackend(BaseSftpBackend):
         def client(self, source):
             return _FakeSftpClient()
 
-    p = _sftp("sftp://host/a.txt", backend=_AsyncsshShapedBackend())
+    p = _sftp("sftp://host/a.txt", backend=_MinimalBackend())
     with pytest.raises(NotImplementedError):
         p.checksum()
 
@@ -618,8 +616,7 @@ def test_sftppath_checksum_preserves_explicit_notimplementederror():
 
 def test_sftppath_supported_checksums_empty_when_backend_lacks_support():
     # _FakeBackend (module-level fixture): no checksum()/supported_checksums()
-    # override -- inherits BaseSftpBackend's empty-frozenset default. Models
-    # AsyncsshSftpBackend's real shape (no client-library support at all).
+    # override -- inherits BaseSftpBackend's empty-frozenset default.
     p = _sftp("sftp://host/a.txt")
     assert p.supported_checksums() == frozenset()
 
@@ -630,14 +627,52 @@ def test_sftppath_supported_checksums_reflects_backend_advertisement():
     assert p.supported_checksums() == frozenset({"md5"})
 
 
+# --- native checksum: the shared check-file-handle reply parser ------------
+
+
+def _string(value):
+    import struct
+
+    value = value.encode() if isinstance(value, str) else value
+    return struct.pack(">I", len(value)) + value
+
+
+def test_check_file_reply_parser_accepts_both_draft_shapes():
+    from pathlib_next.uri.schemes.sftp import _checkfile
+
+    digest = bytes.fromhex("deadbeef" * 4)
+    bare = _string("md5") + digest
+    prefixed = _string("check-file") + _string("md5") + digest
+
+    assert _checkfile.parse_reply(bare, "md5") == "deadbeef" * 4
+    assert _checkfile.parse_reply(prefixed, "md5") == "deadbeef" * 4
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",  # no algorithm name at all
+        b"\x00\x00\x00\x09md5",  # name longer than the packet
+        _string("sha256") + bytes(32),  # not the algorithm requested
+        _string("md5") + bytes(4),  # truncated digest
+        _string("md5") + _string(bytes(16)),  # length-prefixed digest
+    ],
+)
+def test_check_file_reply_parser_rejects_malformed_replies(payload):
+    from pathlib_next.uri.schemes.sftp import _checkfile
+
+    with pytest.raises(NotImplementedError):
+        _checkfile.parse_reply(payload, "md5")
+
+
 # --- native checksum: paramiko SftpBackend wire-level implementation ------
-# SftpBackend.checksum() speaks the filexfer draft's check-file-handle
-# extension directly via paramiko's low-level _request()/CMD_EXTENDED --
-# these tests fake that primitive to prove the request is built correctly
-# (handle, algorithm, int64 offset/length, block-size) and the reply is
-# parsed/validated correctly. Neither OpenSSH nor the asyncssh test server
-# (tests/conftest.py::sftp_server) implements the extension, so a
-# real-server round trip only ever exercises the fallback branch.
+# SftpBackend speaks the filexfer draft's check-file-handle extension
+# directly via paramiko's low-level _request()/CMD_EXTENDED -- these tests
+# fake that primitive to prove the request is built correctly (handle,
+# algorithm, int64 offset/length, block-size) and the reply is
+# parsed/validated correctly. The real round trip, on both backends, is in
+# tests/test_sync_sftp_parity.py (which adds the extension to the loopback
+# server; OpenSSH has none).
 
 _MD5_DEADBEEF = bytes.fromhex("deadbeef" * 4)
 
@@ -810,7 +845,7 @@ def test_paramiko_checksum_rejects_non_extended_reply(monkeypatch):
 def test_paramiko_supported_checksums_reflects_working_server(monkeypatch):
     import paramiko.sftp as paramiko_sftp
 
-    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp import _checkfile
     from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
 
     class _FakeHandleFile:
@@ -831,16 +866,16 @@ def test_paramiko_supported_checksums_reflects_working_server(monkeypatch):
     monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: fake_client)
     # Fresh probe cache -- avoid cross-test pollution from other tests that
     # exercise the same real SftpBackend.checksum()/supported_checksums().
-    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+    monkeypatch.setattr(_checkfile, "_SUPPORT_CACHE", {})
 
     p = _sftp("sftp://host/a.txt", backend=backend)
     supported = backend.supported_checksums(p)
 
-    assert supported == frozenset(paramiko_module._CHECK_FILE_ALGORITHMS)
+    assert supported == frozenset(_checkfile.ALGORITHMS)
 
 
 def test_paramiko_supported_checksums_empty_when_server_lacks_extension(monkeypatch):
-    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp import _checkfile
     from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
 
     class _FakeHandleFile:
@@ -860,7 +895,7 @@ def test_paramiko_supported_checksums_empty_when_server_lacks_extension(monkeypa
     monkeypatch.setattr(
         _RealSftpBackend, "client", lambda self, source: _FakeParamikoClient()
     )
-    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+    monkeypatch.setattr(_checkfile, "_SUPPORT_CACHE", {})
 
     p = _sftp("sftp://host/a.txt", backend=backend)
     assert backend.supported_checksums(p) == frozenset()
@@ -869,7 +904,7 @@ def test_paramiko_supported_checksums_empty_when_server_lacks_extension(monkeypa
 def test_paramiko_supported_checksums_caches_per_connection(monkeypatch):
     import paramiko.sftp as paramiko_sftp
 
-    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp import _checkfile
     from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
 
     class _FakeHandleFile:
@@ -892,7 +927,7 @@ def test_paramiko_supported_checksums_caches_per_connection(monkeypatch):
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     fake_client = _FakeParamikoClient()
     monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: fake_client)
-    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+    monkeypatch.setattr(_checkfile, "_SUPPORT_CACHE", {})
 
     p = _sftp("sftp://host/a.txt", backend=backend)
     backend.supported_checksums(p)
@@ -929,12 +964,12 @@ class _CountingParamikoClient:
 
 
 def _paramiko_backend_with(monkeypatch, client):
-    from pathlib_next.uri.schemes.sftp import _paramiko as paramiko_module
+    from pathlib_next.uri.schemes.sftp import _checkfile
     from pathlib_next.uri.schemes.sftp._paramiko import SftpBackend as _RealSftpBackend
 
     backend = _RealSftpBackend.__new__(_RealSftpBackend)
     monkeypatch.setattr(_RealSftpBackend, "client", lambda self, source: client)
-    monkeypatch.setattr(paramiko_module, "_CHECKSUM_SUPPORT_CACHE", {})
+    monkeypatch.setattr(_checkfile, "_SUPPORT_CACHE", {})
     return backend
 
 

@@ -472,7 +472,8 @@ chained (their text can carry credentials).
     host keys against `known_hosts`/ssh_config; opt-out
     `connect_opts={"known_hosts": None}`. `timeout` bounds single requests
     (a timed-out request is cancelled and raises `TimeoutError`); recursive
-    `copy()`/`rm()` and streamed reads/writes are unbounded (use asyncssh's
+    `copy()`/`rm()`, streamed reads/writes and a native `checksum()` are
+    unbounded (use asyncssh's
     `connect_timeout`/`keepalive_interval`). One connection per (backend,
     source), served by one shared background event loop thread; not
     fork-safe (rebuilt after `fork()`). A sync `Path` call made on that loop
@@ -491,9 +492,9 @@ chained (their text can carry credentials).
     ids only.
     `rename()` replaces an existing target via `posix-rename@openssh.com`
     where supported, else `FileExistsError`. `checksum()`/
-    `supported_checksums()` (`NativeChecksum`): paramiko probes the
-    `check-file-handle` extension (OpenSSH lacks it); asyncssh never has it;
-    every failure is `NotImplementedError`. `__fspath__()`/`host_fspath()`
+    `supported_checksums()` (`NativeChecksum`): both backends send the
+    `check-file-handle` extension (OpenSSH lacks it); a refusal is remembered
+    per connection; every failure is `NotImplementedError`. `__fspath__()`/`host_fspath()`
     return `.path`.
 - **`S3Path`** (`s3://bucket/key`; `s3` extra; `schemes.s3`) — `bucket`,
   `key` (one trailing `/` dropped: `s3://b/dir/` is `dir`).

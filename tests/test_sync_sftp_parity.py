@@ -6,12 +6,14 @@ complete, dry runs and remove_missing events on an SFTP tree, and the SFTP
 medium findings (rename over an existing file, unlink of a dangling link,
 readlink, asyncssh file-object contract, asyncssh recursive copy
 guards and `ignore_error` bools, exit with a file left open, and the
-paramiko check-file probe). Every test asserts what the server's filesystem
-(`fixture_tree`, the server root) holds afterwards, or what was sent.
+check-file-handle round trip on both backends). Every test asserts what the
+server's filesystem (`fixture_tree`, the server root) holds afterwards, or
+what was sent.
 """
 
 import errno
 import hashlib
+import inspect
 import io
 import os
 import subprocess
@@ -435,39 +437,140 @@ def test_asyncssh_copy_of_a_directory_link_without_following_copies_the_link(
     assert os.path.samefile(os.readlink(local / "copied"), local / "src")
 
 
-# --- paramiko check-file probe -----------------------------------------------
+# --- check-file-handle round trip ----------------------------------------------
 
 
-def test_paramiko_checksum_refusal_costs_one_request_per_connection(
-    sftp_server, fixture_tree, monkeypatch
-):
+class _CheckFileServer:
+    """What the loopback server's `check-file-handle` handler received:
+    `(algorithm-list, start-offset, length, block-size)` per request. With
+    `refuse` set it answers SSH_FX_OP_UNSUPPORTED, as OpenSSH does."""
+
+    def __init__(self):
+        self.requests = []
+        self.refuse = False
+
+
+@pytest.fixture
+def check_file_server(monkeypatch):
+    """Adds `check-file-handle` to the loopback server for one test,
+    answering with the draft's `"check-file"`-prefixed reply."""
+    import asyncssh
+    import asyncssh.sftp as asftp
+    from asyncssh.packet import String
+
+    server = _CheckFileServer()
+
+    class _Reply:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def encode(self, version):
+            return self.payload
+
+    async def process_check_file(handler, packet):
+        handle = packet.get_string()
+        algorithms = packet.get_string().decode()
+        start = packet.get_uint64()
+        length = packet.get_uint64()
+        block_size = packet.get_uint32()
+        packet.check_end()
+        server.requests.append((algorithms, start, length, block_size))
+        if server.refuse:
+            raise asyncssh.SFTPOpUnsupported("check-file-handle not supported")
+        file_obj = handler._file_handles[handle]
+        algorithm = algorithms.split(",")[0]
+        digest = hashlib.new(algorithm)
+        offset = 0
+        while True:
+            chunk = handler._server.read(file_obj, offset, 64 * 1024)
+            if inspect.isawaitable(chunk):
+                chunk = await chunk
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+        return _Reply(String("check-file") + String(algorithm) + digest.digest())
+
+    monkeypatch.setitem(
+        asftp.SFTPServerHandler._packet_handlers,
+        b"check-file-handle",
+        process_check_file,
+    )
+    # On the server class only, never the shared base table: the client must
+    # accept an EXTENDED_REPLY to this request on its own.
+    monkeypatch.setattr(
+        asftp.SFTPServerHandler,
+        "_return_types",
+        {
+            **asftp.SFTPServerHandler._return_types,
+            b"check-file-handle": asftp.FXP_EXTENDED_REPLY,
+        },
+    )
+    return server
+
+
+@pytest.mark.parametrize("algorithm", ["md5", "sha256"])
+def test_checksum_is_the_server_side_digest(remote, check_file_server, algorithm):
+    import asyncssh.sftp as asftp
+
+    from pathlib_next.uri.schemes.sftp import _checkfile
+
+    root, local = remote
+    payload = os.urandom(200 * 1024)
+    (local / "blob.bin").write_bytes(payload)
+
+    digest = (root / "blob.bin").checksum(algorithm)
+
+    assert digest == hashlib.new(algorithm, payload).hexdigest()
+    # What the server received: the one algorithm, the whole file, one hash.
+    assert check_file_server.requests == [(algorithm, 0, 0, 0)]
+    assert (root / "blob.bin").supported_checksums() == frozenset(_checkfile.ALGORITHMS)
+    # The asyncssh client registers the reply type on its own connection.
+    assert b"check-file-handle" not in asftp.SFTPClientHandler._return_types
+
+
+def test_checksum_refusal_costs_one_request_per_connection(remote, check_file_server):
     # sftp-check-file-openssh-extension-does-not-exist: a server without the
-    # extension (this one, like OpenSSH) is asked once, not once per file.
-    if paramiko is None:
-        pytest.skip("paramiko not installed")
-    backend = _make_backend("paramiko")
-    root = SftpPath(sftp_server, backend=backend)
-    try:
-        requests = []
-        real_request = paramiko.SFTPClient._request
+    # extension (like OpenSSH) is asked once, not once per file.
+    root, local = remote
+    check_file_server.refuse = True
+    (local / "x.txt").write_text("x")
+    (local / "y.txt").write_text("y")
 
-        def counting_request(self, t, *args):
-            if t == paramiko.sftp.CMD_EXTENDED:
-                requests.append(args[0])
-            return real_request(self, t, *args)
+    for name in ("a.txt", "x.txt", "y.txt"):
+        with pytest.raises(NotImplementedError):
+            (root / name).checksum()
+    assert (root / "a.txt").supported_checksums() == frozenset()
 
-        monkeypatch.setattr(paramiko.SFTPClient, "_request", counting_request)
-        (fixture_tree / "x.txt").write_text("x")
-        (fixture_tree / "y.txt").write_text("y")
+    assert len(check_file_server.requests) == 1
 
-        for name in ("a.txt", "x.txt", "y.txt"):
-            with pytest.raises(NotImplementedError):
-                (root / name).checksum()
-        assert (root / "a.txt").supported_checksums() == frozenset()
 
-        assert requests == ["check-file-handle"]
-    finally:
-        _close(backend, root)
+def test_checksum_against_a_server_without_the_extension(remote):
+    # The unmodified loopback server does not know the request at all.
+    root, _local = remote
+
+    with pytest.raises(NotImplementedError):
+        (root / "a.txt").checksum()
+    assert (root / "a.txt").supported_checksums() == frozenset()
+
+
+def test_sync_between_remote_trees_compares_native_digests(remote, check_file_server):
+    root, local = remote
+    (local / "s").mkdir()
+    (local / "d").mkdir()
+    (local / "s" / "same.txt").write_text("unchanged")
+    (local / "d" / "same.txt").write_text("unchanged")
+    (local / "s" / "cfg.json").write_text('{"v": 2}')
+    (local / "d" / "cfg.json").write_text('{"v": 1}')
+    # Different mtimes: the size+mtime quick check settles neither file.
+    for name in ("same.txt", "cfg.json"):
+        os.utime(local / "d" / name, (1, 1))
+
+    PathSyncer().sync(root / "s", root / "d")
+
+    assert (local / "d" / "cfg.json").read_text() == '{"v": 2}'
+    assert os.stat(local / "d" / "same.txt").st_mtime == 1  # left alone
+    assert check_file_server.requests
 
 
 def test_sync_sftp_to_sftp_without_native_checksum_still_detects_changes(remote):
