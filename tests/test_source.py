@@ -85,14 +85,10 @@ def test_is_local_own_hostname():
     # Exercises the real hostname->address resolution path end to end
     # (netimps.resolve()'s default backend chain), not just IP literals.
     # Skip if this environment's own hostname doesn't resolve at all --
-    # e.g. macOS CI runners return an mDNS-only "*.local" name that
-    # dnspython (tried first in netimps.resolve()'s default chain) gets a
-    # clean NXDOMAIN for from real DNS, and resolve()'s own contract is to
-    # stop at that definitive empty answer rather than fall through to a
-    # backend that might resolve it via mDNS/NSS. That's an environment/
-    # resolver-chain question, not something this test is meant to
-    # validate -- see the netimps finding filed for the chain-ordering
-    # question itself.
+    # e.g. an mDNS-only "*.local" name on a macOS CI runner. Since netimps
+    # 0.3.0 an empty dnspython answer no longer ends resolve()'s chain, so
+    # the OS resolver is asked too, but whether it answers is still an
+    # environment question, not something this test is meant to validate.
     import socket
 
     import netimps
