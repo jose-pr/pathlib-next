@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Native checksums on the asyncssh SFTP backend.** `SftpPath.checksum()`
+  and `supported_checksums()` now send the `check-file-handle` extension on
+  `AsyncsshSftpBackend` (the backend chosen when asyncssh is installed), as
+  they already did on the paramiko backend. Against a server that implements
+  it (ProFTPD's mod_sftp, for example), `PathSyncer` compares server-side
+  digests instead of reading both files. OpenSSH does not implement it: the
+  refusal costs one request per connection, and files are compared by
+  streaming as before. A native `checksum()` is not bounded by the backend's
+  `timeout`, because the server hashes the whole file before it answers.
+
+### Changed
+- The `uri` extra now requires `netimps>=0.3.1` (was `>=0.2.0`). An
+  environment that pins an older netimps must raise that pin.
+
 ## [0.9.10] - 2026-09-20
 
 ### Added

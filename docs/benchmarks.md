@@ -228,8 +228,9 @@ runner has the fastest `stat()`).
   unchanged file that still needs comparing). The project's SFTP test server
   (asyncssh's `SFTPServer`) has no checksum extension, so a live run against
   it only exercises the streaming fallback; genuine native-path timing needs
-  a server that implements the extension. The wire-level fake tests in
-  `tests/test_sftp.py` (`test_paramiko_checksum_*`) are the correctness proof.
+  a server that implements the extension. The round-trip tests in
+  `tests/test_sync_sftp_parity.py`, which add the extension to that server
+  for both backends, are the correctness proof.
 - **`PathSyncer(quick_check=True)` (0.9.0).** Also structural. For an
   unchanged non-local file with matching `st_size`/`st_mtime`, the pre-check
   skips the checksum step (native or streaming) entirely: **zero content
