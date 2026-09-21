@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-09-21
+
 ### Added
 - **Native checksums on the asyncssh SFTP backend.** `SftpPath.checksum()`
   and `supported_checksums()` now send the `check-file-handle` extension on
@@ -1547,7 +1549,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.10...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.11...HEAD
+[0.9.11]: https://github.com/jose-pr/pathlib-next/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/jose-pr/pathlib-next/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/jose-pr/pathlib-next/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/jose-pr/pathlib-next/compare/v0.9.7...v0.9.8
