@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   environment that pins one of them below its floor must raise the pin; one
   that needs a new major version must wait for a release that admits it.
 
+### Fixed
+- **A `..` or `.` name in a remote listing no longer escapes the tree.** The
+  `s3:`, `gs:`, `az:`, `github:` and `gitlab:` listings and the default
+  `UriPath` listing yielded a name such as `..`, `.`, `a/b` or an empty one as
+  a child (`http:`, `dav:` and `sftp:` already skipped them), and the `ftp:`
+  listing yielded one holding NUL. Joined onto the directory, `..` named its
+  parent, so `walk()` left the directory it was given and never ended,
+  `rm(recursive=True)` deleted the parent tree, and
+  `PathSyncer(remove_missing=True)` removed the parent or copied a sibling
+  tree into the destination. All of those listings now skip such a name, and
+  `walk()`, `rm(recursive=True)` and `PathSyncer` also refuse one that a custom
+  scheme's `_scandir()` yields, before building any child from it: `walk()`
+  leaves it out of `dirnames`/`filenames` and, when `on_error` is given, calls
+  it with a `ValueError`; `rm(recursive=True)` offers a `ValueError` to
+  `ignore_error(error, directory)` once per entry and removes nothing for it;
+  `PathSyncer` raises `ValueError` through `ignore_error` for the source's and
+  the target's names alike. A custom `_scandir()` should skip such names
+  itself (`utils.is_safe_child_name()` decides). An object key with a `.` or
+  `..` segment is no longer listed.
+
 ## [0.9.11] - 2026-09-21
 
 ### Added

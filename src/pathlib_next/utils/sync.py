@@ -13,6 +13,7 @@ from .. import utils as _utils
 from ..path import Path
 from ..utils.stat import FileStat
 from . import checksum as _checksum
+from . import glob as _glob
 
 _logger = _logging.getLogger("pathlib_next.sync")
 
@@ -607,35 +608,43 @@ class PathSyncer(object):
                 return True
             raise
 
-    def _children(self, entry: PathAndStat) -> "list[PathAndStat]":
-        children: "list[PathAndStat]" = []
+    def _children(
+        self, entry: PathAndStat, windows: bool = False
+    ) -> "list[tuple[str, PathAndStat]]":
+        """`(listed name, child)` for each entry of the directory `entry`.
+        The child is built from the name as listed; one that is not a safe
+        child name for a destination read with `windows` rules gets no
+        stat, and the caller refuses it."""
+        children: "list[tuple[str, PathAndStat]]" = []
         for scan_entry in entry.path._scandir():
-            if isinstance(scan_entry, tuple) and len(scan_entry) == 2:
-                name, stat = scan_entry
-                child = entry.path / name
+            pair = isinstance(scan_entry, tuple) and len(scan_entry) == 2
+            name = scan_entry[0] if pair else scan_entry.name
+            child = _glob._child(entry.path, name)
+            if not _utils.is_safe_child_name(name, windows=windows):
+                children.append((name, PathAndStat.from_stat(child, None)))
+            elif pair:
                 if self.follow_symlinks:
                     children.append(
-                        PathAndStat(child, follow_symlink=self.follow_symlinks)
+                        (name, PathAndStat(child, follow_symlink=self.follow_symlinks))
                     )
                 else:
                     # `None` means "stat unknown" (GitLab blobs, FTP's NLST
                     # fallback), not "missing": ask the path itself before
                     # remove_missing can treat the entry as gone.
+                    stat = scan_entry[1]
                     if stat is None:
                         stat = FileStat.from_path(
                             child, follow_symlink=self.follow_symlinks
                         )
-                    children.append(PathAndStat.from_stat(child, stat))
-                continue
-
-            child = entry.path / scan_entry.name
-            try:
-                stat = FileStat.from_stat(
-                    scan_entry.stat(follow_symlinks=self.follow_symlinks)
-                )
-            except FileNotFoundError:
-                stat = None
-            children.append(PathAndStat.from_stat(child, stat))
+                    children.append((name, PathAndStat.from_stat(child, stat)))
+            else:
+                try:
+                    stat = FileStat.from_stat(
+                        scan_entry.stat(follow_symlinks=self.follow_symlinks)
+                    )
+                except FileNotFoundError:
+                    stat = None
+                children.append((name, PathAndStat.from_stat(child, stat)))
         return children
 
     def sync(
@@ -666,8 +675,9 @@ class PathSyncer(object):
         tolerated error ends the call without changes. Child names that
         would not stay a single component inside `target` (`..`, a
         separator or drive on a Windows target) raise `ValueError` the
-        same way, and symlinks found inside `target` are replaced, never
-        written, listed or deleted through.
+        same way, decided on the name as the source or the target listed it,
+        and symlinks found inside `target` are replaced, never written,
+        listed or deleted through.
         """
         _ignore_error = (
             self.ignore_error
@@ -948,29 +958,29 @@ class PathSyncer(object):
             def get_source_children():
                 nonlocal source_children
                 if source_children is None:
-                    source_children = self._children(source)
+                    source_children = self._children(source, windows_target)
                 return source_children
 
             if self.remove_missing and not target_absent:
 
                 def checkchildren():
-                    source_names = {child.path.name for child in get_source_children()}
-                    for child in self._children(target):
+                    source_names = {name for name, _ in get_source_children()}
+                    for name, child in self._children(target, windows_target):
 
                         def checkchild():
                             if unsafe_name(
-                                _child_name(child.path),
+                                name,
                                 source,
                                 child,
                                 SyncEvent.RemovedMissing,
                             ):
                                 return
-                            if child.path.name not in source_names:
+                            if name not in source_names:
                                 # The event describes the entry removed, not
                                 # the directory being checked.
                                 self.hook(
                                     PathAndStat.from_stat(
-                                        source.path / _child_name(child.path), None
+                                        _glob._child(source.path, name), None
                                     ),
                                     child,
                                     SyncEvent.RemovedMissing,
@@ -1000,8 +1010,7 @@ class PathSyncer(object):
                 )
 
             def sync_children():
-                for child in get_source_children():
-                    name = _child_name(child.path)
+                for name, child in get_source_children():
                     if unsafe_name(name, child, target, SyncEvent.SyncChild):
                         continue
                     self.hook(
@@ -1015,9 +1024,11 @@ class PathSyncer(object):
                         lambda child=child, name=name: self._sync(
                             child,
                             (
-                                PathAndStat.from_stat(target.path / name, None)
+                                PathAndStat.from_stat(
+                                    _glob._child(target.path, name), None
+                                )
                                 if target_absent
-                                else target.path / name
+                                else _glob._child(target.path, name)
                             ),
                             dry_run,
                             _ignore_error,

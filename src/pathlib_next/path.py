@@ -867,7 +867,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
     def walk(
         self,
         top_down=True,
-        on_error: _ty.Callable[[OSError], None] = None,
+        on_error: _ty.Callable[[OSError | ValueError], None] = None,
         follow_symlinks=False,
     ):
         """Walk the directory tree from this directory, similar to os.walk().
@@ -880,6 +880,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         (matching `walk()`'s own default and the lstat-like semantics of
         those listing calls); an explicit `follow_symlinks=True` always
         re-`stat()`s each entry so a symlink is still resolved.
+
+        A listed name that is not one path component (`""`, `.`, `..`, or one
+        containing `/` or NUL; see `utils.is_safe_child_name()`) is left out
+        of `dirnames` and `filenames`. `on_error`, when given, is called with
+        a `ValueError` for it, `error.filename` naming the directory.
         """
         paths: "list[_ty.Self|tuple[_ty.Self, list[str], list[str]]]" = [self]
 
@@ -905,10 +910,20 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             dirnames: "list[str]" = []
             filenames: "list[str]" = []
             for name, stat in entries:
+                if not _utils.is_safe_child_name(name):
+                    # A listing is untrusted input: "..", "a/b" or "" would
+                    # build a child outside `path` and send the walk there.
+                    if on_error is not None:
+                        error = ValueError(
+                            f"refusing unsafe child name {name!r} under {path}"
+                        )
+                        error.filename = str(path)
+                        on_error(error)
+                    continue
                 try:
                     if stat is None or follow_symlinks:
                         stat = FileStat.from_path(
-                            path / name, follow_symlink=follow_symlinks
+                            _glob._child(path, name), follow_symlink=follow_symlinks
                         )
                     is_dir = stat.is_dir() if stat is not None else False
                 except OSError:
@@ -925,7 +940,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             else:
                 paths.append((path, dirnames, filenames))
 
-            paths += [path / d for d in reversed(dirnames)]
+            paths += [_glob._child(path, d) for d in reversed(dirnames)]
 
     def touch(self, mode=None, exist_ok=True):
         """
@@ -1045,6 +1060,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         decide what happens to the entry itself. The name matches
         `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
         inventing a second vocabulary for the same idea.
+
+        A listed name that is not one path component (`""`, `.`, `..`, or one
+        containing `/` or NUL; see `utils.is_safe_child_name()`) is never
+        joined onto the directory: it raises `ValueError`, offered to
+        `ignore_error` as `(error, directory)` once per entry, and nothing is
+        removed for it.
         """
         # Same bool-or-callable normalization as copy()/PathSyncer, via the
         # shared helper. A supplied callable keeps rm()'s own `(error, path)`
@@ -1083,9 +1104,17 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 _handle(error, path)
                 return
 
+            windows = _utils.is_windows_flavoured(path)
             for name, child_stat in entries:
-                child = path / name
+                child = None
                 try:
+                    # The name decides what is removed, so it is checked
+                    # before any child is built from it.
+                    if not _utils.is_safe_child_name(name, windows=windows):
+                        raise ValueError(
+                            f"refusing unsafe child name {name!r} under {path}"
+                        )
+                    child = _glob._child(path, name)
                     if child_stat is None:
                         child_stat = FileStat.from_path(child, follow_symlink=False)
                     if child_stat is not None and child_stat.is_symlink():
@@ -1118,7 +1147,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     else:
                         child.unlink()
                 except Exception as error:
-                    _handle(error, child)
+                    _handle(error, path if child is None else child)
 
             try:
                 path.rmdir()

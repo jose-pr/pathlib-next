@@ -139,6 +139,9 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   - `walk(top_down=True, on_error=None, follow_symlinks=False)` — drives
     `_scandir()`; its stats are trusted only with `follow_symlinks=False`. No
     symlink-cycle protection when following (only `LocalPath` has pathlib's).
+    A listed name that is not one path component (`utils.is_safe_child_name()`)
+    is left out of `dirnames`/`filenames`; `on_error`, when given, is called
+    with a `ValueError` for it (`error.filename` is the directory).
   - `touch(mode=None, exist_ok=True)` — `FileExistsError` when `exist_ok=False`
     and the path exists; never truncates; creates with `open("x")` (falls
     back to `"w"` when `x` is unsupported); `chmod(mode)` only when `mode` is
@@ -160,7 +163,10 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     asked per entry, so one tree can keep one mount and follow another. The
     name matches `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
     a second vocabulary for the same idea. Path components before the final
-    one are followed as usual.
+    one are followed as usual. A listed name that is not one path component
+    (`utils.is_safe_child_name()`) is never joined onto the directory: it
+    raises `ValueError`, offered to `ignore_error` as `(error, directory)`
+    once per entry, and nothing is removed for it.
   - `rename(target)` — stub. Implementations return the new path.
   - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
     object) / `symlink_to(target, target_is_directory=False, *, force=False)`
@@ -696,7 +702,8 @@ class TestMyPath(PathContract):
   - Safety, all through `ignore_error`: a missing root `source` →
     `FileNotFoundError`; overlapping `source`/`target` (same implementation,
     and `_same_filesystem()` places them together) → `ValueError`; a child name that would leave `target`
-    (`..`, or `\`/`:` on a Windows target) → `ValueError`; a symlink inside
+    (`..`, or `\`/`:` on a Windows target) → `ValueError`, decided on the name
+    as listed, in the source's listing and the target's alike; a symlink inside
     `target` is replaced, never followed. Listing entries with unknown stats
     are re-stat'd.
   - `remove_missing=True` deletes target entries absent from the source. With
