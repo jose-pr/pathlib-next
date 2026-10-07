@@ -1180,8 +1180,14 @@ class UriPath(Uri, Path):
         round-trip savings over the old `iterdir()`). Schemes whose listing
         call already returns metadata should override this directly instead
         (see docs/guides/extending.md) -- HttpPath/DavPath/SftpPath/FtpPath/
-        S3Path all do."""
+        S3Path all do. A name that is not one path component
+        (`utils.is_safe_child_name()`) is skipped, and an override must skip
+        it too."""
         for name in self._listdir():
+            # A listing is untrusted input: a name that is not one component
+            # ("..", "a/b", "") must never become a child path.
+            if not _utils.is_safe_child_name(name):
+                continue
             child = self._make_child_relpath(name)
             try:
                 # Non-following, like Path._scandir(): rm(recursive=True) and

@@ -4,6 +4,7 @@ import errno as _errno
 import itertools as _itertools
 import urllib.parse as _urlparse
 
+from ... import utils as _utils
 from ...utils.stat import FileStat
 from ._gitrepo import (
     RepoBackend,
@@ -198,6 +199,9 @@ class GitLabPath(_RepoApiPath):
                     )
             return
         for entry in _itertools.chain((first,), entries):
+            # The API's names are not trusted to be one path component.
+            if not _utils.is_safe_child_name(entry["name"]):
+                continue
             is_dir = entry["type"] == "tree"
             yield entry["name"], (FileStat(is_dir=True) if is_dir else None)
 

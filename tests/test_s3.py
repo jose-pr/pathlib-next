@@ -452,3 +452,126 @@ def test_open_rb_is_read_only_and_rplus_writes_land(moto_s3):
     with p.open("r+b") as f:
         f.write(b"N")
     assert p.read_bytes() == b"N"
+
+
+# --- a listed name is one component inside the directory that listed it ------
+
+
+class _PageClient:
+    """A client whose one listing page says exactly what the test hands it."""
+
+    def __init__(self, contents=(), prefixes=()):
+        self._page = {
+            "Contents": [{"Key": key} for key in contents],
+            "CommonPrefixes": [{"Prefix": prefix} for prefix in prefixes],
+        }
+
+    def get_paginator(self, name):
+        client = self
+
+        class _Pages:
+            def paginate(self, **kwargs):
+                yield client._page
+
+        return _Pages()
+
+
+class _PageBackend(BaseS3Backend):
+    def __init__(self, client):
+        self._client = client
+
+    def client(self):
+        return self._client
+
+
+def test_listing_skips_names_that_are_not_one_component():
+    client = _PageClient(
+        contents=["dir/ok.txt", "dir/..", "dir/.", "dir/a/b", "dir/", "dir/x\0y"],
+        prefixes=["dir/sub/", "dir/../", "dir/./", "dir/p/q/", "dir//"],
+    )
+    listing = dict(_s3("s3://bucket/dir", _PageBackend(client))._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]
+    assert listing["sub"].is_dir()
+
+
+def test_directory_holding_only_unsafe_names_is_still_a_directory():
+    client = _PageClient(contents=["dir/.."])
+    assert list(_s3("s3://bucket/dir", _PageBackend(client))._scandir()) == []
+
+
+def test_moto_listing_hides_dot_segment_keys(moto_s3):
+    for key in ("u/alice/ok.txt", "u/alice/../x.txt", "u/alice/./y", "u/alice/sub/z"):
+        moto_s3.put_object(Bucket="bkt", Key=key, Body=b"x")
+    alice = S3Path("s3://bkt/u/alice")
+    assert sorted(name for name, _ in alice._scandir()) == ["ok.txt", "sub"]
+    assert sorted(child.name for child in alice.iterdir()) == ["ok.txt", "sub"]
+
+
+_DOT_KEYS = (
+    "top.txt",
+    "u/alice/ok.txt",
+    "u/alice/../x.txt",
+    "u/alice/./y.txt",
+    "u/alice/sub/z.txt",
+    "u/bob/private.txt",
+    "u/carol/data.bin",
+)
+
+
+def test_walk_of_a_prefix_with_dot_segment_keys_stays_inside_it(moto_s3):
+    import itertools
+
+    for key in _DOT_KEYS:
+        moto_s3.put_object(Bucket="bkt", Key=key, Body=b"x")
+    walked = itertools.islice(S3Path("s3://bkt/u/alice").walk(), 20)
+    assert [(str(path), dirs, files) for path, dirs, files in walked] == [
+        ("s3://bkt/u/alice", ["sub"], ["ok.txt"]),
+        ("s3://bkt/u/alice/sub", [], ["z.txt"]),
+    ]
+
+
+def test_sync_remove_missing_leaves_the_neighbours_of_a_dot_segment_key(moto_s3):
+    from pathlib_next.mempath import MemPath
+    from pathlib_next.utils.sync import PathSyncer, SyncEvent
+
+    for key in _DOT_KEYS:
+        moto_s3.put_object(Bucket="bkt", Key=key, Body=b"x")
+    source = MemPath("/src")
+    source.mkdir()
+    (source / "ok.txt").write_text("x")
+    removed = []
+    syncer = PathSyncer(
+        remove_missing=True,
+        quick_check=False,
+        hook=lambda src, tgt, event, dry: (
+            removed.append(str(tgt.path)) if event is SyncEvent.RemovedMissing else None
+        ),
+    )
+    syncer.sync(source, S3Path("s3://bkt/u/alice"))
+    assert removed == ["s3://bkt/u/alice/sub"]
+    outside = [key for key in _moto_keys(moto_s3) if not key.startswith("u/alice/")]
+    assert outside == ["top.txt", "u/bob/private.txt", "u/carol/data.bin"]
+
+
+def test_sync_from_a_prefix_with_dot_segment_keys_copies_only_its_own_tree(moto_s3):
+    from pathlib_next.mempath import MemPath
+    from pathlib_next.utils.sync import PathSyncer, SyncEvent
+
+    for key in _DOT_KEYS:
+        moto_s3.put_object(Bucket="bkt", Key=key, Body=b"x")
+    target = MemPath("/mirror")
+    target.mkdir()
+    copied = []
+
+    class _Runaway(BaseException):
+        pass
+
+    def hook(src, tgt, event, dry):
+        if event is SyncEvent.Copy:
+            copied.append(str(src.path))
+            if len(copied) > 20:
+                raise _Runaway
+
+    PathSyncer(hook=hook).sync(S3Path("s3://bkt/u/alice"), target)
+    assert sorted(copied) == ["s3://bkt/u/alice/ok.txt", "s3://bkt/u/alice/sub/z.txt"]
+    assert sorted(p.name for p in target.iterdir()) == ["ok.txt", "sub"]

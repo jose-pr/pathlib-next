@@ -444,3 +444,33 @@ def test_directory_holding_one_same_named_file_still_lists():
     assert [p.path for p in _ftp("ftp://host/d/x", backend=backend).iterdir()] == [
         "/d/x/x"
     ]
+
+
+# --- a listed name is one component inside the directory that listed it ------
+
+
+def test_mlsd_listing_skips_names_that_are_not_one_component():
+    backend = _FakeBackend()
+    backend._client.mlsd_data["/dir"] = [
+        (name, {"type": "file", "size": "1"})
+        for name in ("..", ".", "a/b", "", "x\0y", "ok.txt")
+    ]
+    listing = dict(_ftp("ftp://host/dir", backend=backend)._scandir())
+    assert sorted(listing) == ["ok.txt"]
+
+
+def test_nlst_listing_skips_names_that_are_not_one_component():
+    backend = _FakeBackend()
+    backend._client.mlsd_unsupported = True
+    backend._client.nlst_data["/dir"] = [
+        "/dir/..",
+        "/dir/.",
+        "..",
+        ".",
+        "",
+        "/dir/x\0y",
+        "/dir/ok.txt",
+        "/dir/other.txt",
+    ]
+    listing = dict(_ftp("ftp://host/dir", backend=backend)._scandir())
+    assert sorted(listing) == ["ok.txt", "other.txt"]

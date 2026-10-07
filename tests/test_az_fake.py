@@ -617,3 +617,38 @@ def test_rejected_batch_falls_back_per_blob_with_each_blobs_error():
     )
     assert sorted(container.objects) == ["dir/f0.txt"]
     assert seen == ["OSError"]
+
+
+# --- a listed name is one component inside the directory that listed it ------
+
+
+def test_listing_skips_names_that_are_not_one_component(fake_blob_module):
+    backend, _container = _container_with(
+        **{
+            "dir/ok.txt": b"x",
+            "dir/..": b"x",
+            "dir/.": b"x",
+            "dir/../up/f": b"x",
+            "dir/./down/f": b"x",
+            "dir/sub/f": b"x",
+        }
+    )
+    listing = dict(_az("az://account/container/dir", backend)._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]
+    assert listing["sub"].is_dir()
+
+
+def test_listing_skips_names_a_server_reports_with_a_separator(fake_blob_module):
+    from azure.storage.blob import BlobPrefix
+
+    backend, container = _container_with(**{"dir/ok.txt": b"x", "dir/a/b": b"x"})
+
+    def raw(name_starts_with="", delimiter="/"):
+        yield _FakeBlobItem("dir/ok.txt", b"x")
+        yield _FakeBlobItem("dir/a/b", b"x")
+        for prefix in ("dir/sub/", "dir/p/q/", "dir//"):
+            yield BlobPrefix(prefix)
+
+    container.walk_blobs = raw
+    listing = dict(_az("az://account/container/dir", backend)._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]

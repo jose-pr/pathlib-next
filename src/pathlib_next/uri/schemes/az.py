@@ -320,13 +320,15 @@ class AzPath(UriPath):
         for item in items:
             if isinstance(item, BlobPrefix):
                 name = item.name[len(prefix) :].rstrip("/")
-                if name and name not in seen:
+                # A blob name segment is whatever its writer chose: "..", "."
+                # or an embedded "/" must not become a child path.
+                if _utils.is_safe_child_name(name) and name not in seen:
                     seen.add(name)
                     yield name, FileStat(is_dir=True)
                 continue
 
             name = item.name[len(prefix) :]
-            if name and name not in seen:
+            if _utils.is_safe_child_name(name) and name not in seen:
                 seen.add(name)
                 mtime = int(item.last_modified.timestamp()) if item.last_modified else 0
                 yield name, FileStat(

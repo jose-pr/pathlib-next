@@ -530,3 +530,44 @@ def test_bucket_root_permission_error_is_not_a_directory():
     backend.client_obj.bucket_obj = _Forbidding()
     with pytest.raises(PermissionError):
         _gs("gs://bucket/", backend).stat()
+
+
+# --- a listed name is one component inside the directory that listed it ------
+
+
+def test_listing_skips_names_that_are_not_one_component():
+    backend = _FakeBackend()
+    backend.client_obj.bucket_obj.objects.update(
+        {
+            "dir/ok.txt": b"x",
+            "dir/..": b"x",
+            "dir/.": b"x",
+            "dir/../up/f": b"x",
+            "dir/./down/f": b"x",
+            "dir/sub/f": b"x",
+        }
+    )
+    listing = dict(_gs("gs://bucket/dir", backend)._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]
+    assert listing["sub"].is_dir()
+
+
+class _RawListing(list):
+    """What `list_blobs(delimiter="/")` returns: the blobs, and `prefixes`."""
+
+    def __init__(self, blobs, prefixes):
+        super().__init__(blobs)
+        self.prefixes = prefixes
+
+
+def test_listing_skips_names_a_server_reports_with_a_separator():
+    class _Raw(_FakeBucket):
+        def list_blobs(self, prefix="", delimiter=None, **_kwargs):
+            blobs = [_FakeBlob(self, name) for name in ("dir/ok.txt", "dir/a/b")]
+            self.objects.update({blob.name: b"x" for blob in blobs})
+            return _RawListing(blobs, ["dir/sub/", "dir/p/q/", "dir//"])
+
+    backend = _FakeBackend()
+    backend.client_obj.bucket_obj = _Raw()
+    listing = dict(_gs("gs://bucket/dir", backend)._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]

@@ -4,6 +4,7 @@ import base64 as _base64
 import errno as _errno
 import urllib.parse as _urlparse
 
+from ... import utils as _utils
 from ...utils.stat import FileStat
 from ._gitrepo import (
     RepoBackend,
@@ -129,6 +130,9 @@ class GitHubPath(_RepoApiPath):
 
     def _scandir(self):
         for entry in self._entries(self.repo_path):
+            # The API's names are not trusted to be one path component.
+            if not _utils.is_safe_child_name(entry["name"]):
+                continue
             is_dir = entry["type"] == "dir"
             yield entry["name"], FileStat(
                 st_size=0 if is_dir else (entry.get("size", 0) or 0), is_dir=is_dir

@@ -243,7 +243,9 @@ class GsPath(UriPath):
             name = common_prefix[len(prefix) :].rstrip("/")
             if name in objects:
                 continue
-            if name and name not in seen:
+            # A key segment is whatever its writer chose: "..", "." or an
+            # embedded "/" must not become a child path.
+            if _utils.is_safe_child_name(name) and name not in seen:
                 seen.add(name)
                 yield name, FileStat(is_dir=True)
         # Blobs (files)
@@ -251,7 +253,7 @@ class GsPath(UriPath):
             name = blob.name[len(prefix) :]
             if name.endswith("/"):
                 continue
-            if name and name not in seen:
+            if _utils.is_safe_child_name(name) and name not in seen:
                 seen.add(name)
                 mtime = int(blob.updated.timestamp()) if blob.updated else 0
                 yield name, FileStat(

@@ -15,6 +15,7 @@ import pytest
 
 pytest.importorskip("requests")
 
+from pathlib_next.uri.schemes._gitrepo import BaseRepoBackend
 from pathlib_next.uri.schemes.github import GitHubPath, RepoBackend
 from pathlib_next.uri.schemes.git import GitHubGitPath, GitLabGitPath, GitPath
 from pathlib_next.uri.schemes.gitlab import GitLabPath
@@ -696,3 +697,60 @@ def test_read_stream_is_read_only(github_api_server, gitlab_api_server, provider
         assert not f.writable()
         with pytest.raises(io.UnsupportedOperation):
             f.write(b"patch")
+
+
+# --- a listed name is one component inside the directory that listed it ------
+
+_NOT_ONE_COMPONENT = ["..", ".", "a/b", "/abs", "", "x\0y"]
+
+
+class _Reply:
+    status_code = 200
+    headers = {}
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        pass
+
+
+class _CannedBackend(BaseRepoBackend):
+    """Answers every request with one canned directory listing."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def request(self, method, url, **kwargs):
+        return _Reply(self._payload)
+
+
+def test_github_listing_skips_names_that_are_not_one_component():
+    payload = [
+        {"name": name, "type": "dir", "size": 0, "sha": "0"}
+        for name in ["sub", *_NOT_ONE_COMPONENT]
+    ] + [{"name": "ok.txt", "type": "file", "size": 3, "sha": "1"}]
+    root = GitHubPath("github://github.com/o/r/dir", backend=_CannedBackend(payload))
+    listing = dict(root._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]
+    assert listing["sub"].is_dir()
+    assert sorted(child.name for child in root.iterdir()) == ["ok.txt", "sub"]
+
+
+def test_gitlab_listing_skips_names_that_are_not_one_component():
+    payload = [{"name": name, "type": "tree"} for name in ["sub", *_NOT_ONE_COMPONENT]]
+    payload.append({"name": "ok.txt", "type": "blob"})
+    root = GitLabPath("gitlab://gitlab.com/o/r/dir", backend=_CannedBackend(payload))
+    listing = dict(root._scandir())
+    assert sorted(listing) == ["ok.txt", "sub"]
+    assert listing["sub"].is_dir()
+    assert sorted(child.name for child in root.iterdir()) == ["ok.txt", "sub"]
+
+
+def test_gitlab_directory_holding_only_unsafe_names_is_still_a_directory():
+    payload = [{"name": "..", "type": "tree"}]
+    root = GitLabPath("gitlab://gitlab.com/o/r/dir", backend=_CannedBackend(payload))
+    assert list(root._scandir()) == []

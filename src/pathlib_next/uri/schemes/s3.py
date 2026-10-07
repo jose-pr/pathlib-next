@@ -353,13 +353,15 @@ class S3Path(UriPath):
                     name = common["Prefix"][len(prefix) :].rstrip("/")
                     if name in objects:
                         continue
-                    if name and name not in seen:
+                    # A key segment is whatever its writer chose: "..", "." or
+                    # an embedded "/" must not become a child path.
+                    if _utils.is_safe_child_name(name) and name not in seen:
                         seen.add(name)
                         yield name, FileStat(is_dir=True)
                 for obj in page.get("Contents", []):
                     empty = False
                     name = obj["Key"][len(prefix) :]
-                    if name and name not in seen:
+                    if _utils.is_safe_child_name(name) and name not in seen:
                         seen.add(name)
                         lm = obj.get("LastModified")
                         mtime = int(lm.timestamp()) if lm else 0

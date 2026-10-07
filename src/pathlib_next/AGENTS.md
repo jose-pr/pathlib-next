@@ -92,7 +92,10 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     per entry; default: `iterdir()` + one `stat(follow_symlinks=False)` per
     child. Consumed by `walk()`, `glob()`, `rm(recursive=True)` and
     `PathSyncer`; override it when the listing call already returns metadata.
-    `None` means "unknown", never "missing".
+    `None` means "unknown", never "missing". Never yield a name that is not
+    one path component (`utils.is_safe_child_name()`: `""`, `.`, `..`, or one
+    containing `/` or NUL): every URI scheme's listing skips such a name, the
+    `UriPath` default included, and an override must too.
   - `glob(pattern, *, case_sensitive=None, include_hidden=True,
     recursive=None, dironly=None, recurse_symlinks=False, native=True,
     on_error=None, bound_loops=False)` —
@@ -338,7 +341,8 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   - Listing: implement `_listdir() -> Iterator[str]` or override
     `_scandir()`; `iterdir()` wraps each name with the entry's stat as a
     single-use hint (the child's first `stat()` returns it, later calls
-    re-fetch).
+    re-fetch). The default `_scandir()` skips a listed name that is not one
+    path component; an override must do the same.
   - `/` and `joinpath()` choose the result class from the scheme.
   - `rename()`/`symlink_to()` take a `str` as an already-decoded path (`?`,
     `#`, `%`, `:` are filename characters); a relative `rename()` target is a

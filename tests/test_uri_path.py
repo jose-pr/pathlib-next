@@ -2,6 +2,7 @@ import pytest
 
 from pathlib_next.uri import Source, Uri, UriPath
 from pathlib_next.uri.schemes.file import FileUri
+from pathlib_next.utils.stat import FileStat
 
 
 def test_scheme_dispatch_file():
@@ -389,3 +390,22 @@ def test_joining_shares_a_backend_that_already_exists():
     assert (base / "c")._backend is sentinel
     assert base.joinpath("c", "d")._backend is sentinel
     assert base._make_child_relpath("c")._backend is sentinel
+
+
+# --- a listed name is one component inside the directory that listed it ---
+
+
+def test_default_scandir_skips_names_that_are_not_one_component():
+    class ListdirUri(UriPath):
+        __SCHEMES = ()
+        __slots__ = ()
+
+        def _listdir(self):
+            yield from ["..", ".", "a/b", "", "x\0y", "ok.txt"]
+
+        def stat(self, *, follow_symlinks=True):
+            return FileStat()
+
+    root = ListdirUri("memlist://host/dir")
+    assert [name for name, _ in root._scandir()] == ["ok.txt"]
+    assert [child.name for child in root.iterdir()] == ["ok.txt"]

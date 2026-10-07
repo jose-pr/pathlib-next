@@ -160,12 +160,10 @@ def _is_child_entry(name: str, facts: dict) -> bool:
     """Whether an MLSD entry names a child of the listed directory. The
     `cdir`/`pdir` entries describe the directory itself and its parent, and
     may carry any name -- RFC 3659's own example lists `tmp` and `/tmp` --
-    so they are skipped by type, not only as `.`/`..`; a name with a `/` is
-    not a child name either."""
+    so they are skipped by type, not only as `.`/`..`; a name that is not one
+    path component (`utils.is_safe_child_name()`) is not a child name either."""
     kind = str(facts.get("type", "")).lower()
-    return (
-        kind not in ("cdir", "pdir") and name not in ("", ".", "..") and "/" not in name
-    )
+    return kind not in ("cdir", "pdir") and _utils.is_safe_child_name(name)
 
 
 def _parse_mlsd_time(value: str) -> int:
@@ -424,7 +422,7 @@ class FtpPath(UriPath):
             listing = [
                 (base, None)
                 for base in (name.rsplit("/", 1)[-1] for name in names)
-                if base and base not in (".", "..")
+                if _utils.is_safe_child_name(base)
             ]
             if len(listing) <= 1:
                 # Servers answer NLST of a missing path with an empty list,
