@@ -950,7 +950,9 @@ async def _concurrent_copy(
     Every task the walk creates belongs to one `_TaskOwner`, which cancels
     and awaits the ones still running before this coroutine returns or
     raises: a copy that has raised has stopped, and a destination file whose
-    copy did not complete is removed.
+    copy did not complete is removed. A source is opened before the
+    destination it replaces is touched, and modes are applied as
+    `Path.copy()` applies them (see `_copy_mode` in `path.py`).
     """
     semaphore = _asyncio.Semaphore(max(1, max_concurrency))
     # Separate from `semaphore`, which every request inside copy_file also
@@ -960,6 +962,9 @@ async def _concurrent_copy(
     # its handles before the first file finishes.
     file_semaphore = _asyncio.Semaphore(max(1, max_concurrency))
     owner = _TaskOwner()
+    # The setuid, setgid and sticky bits are applied only between two paths of
+    # one class; a mode read from another class must not make a privileged file.
+    keep_special_bits = type(path) is type(target)
     if aclient is None:
         aclient = path._sftpclient._aclient
 
@@ -998,15 +1003,25 @@ async def _concurrent_copy(
         return children
 
     async def mkdir(current):
-        await sftp_call(
-            lambda: aclient.mkdir(current.path, _asyncssh.SFTPAttrs()), current.path
-        )
+        # The mode `Path.mkdir()` sends; the source's is applied afterwards.
+        attrs = _asyncssh.SFTPAttrs(permissions=0o777)
+        await sftp_call(lambda: aclient.mkdir(current.path, attrs), current.path)
 
     async def unlink(current):
         await sftp_call(lambda: aclient.remove(current.path), current.path)
 
-    async def chmod(current, mode):
-        await sftp_call(lambda: aclient.chmod(current.path, mode), current.path)
+    async def apply_mode(current, source_stat):
+        """Give `current` the permission bits `source_stat` reports, when it
+        reports any (`Path.copy()`'s `_copy_mode`)."""
+        if not (preserve_metadata and source_stat.mode_known and source_stat.st_mode):
+            return
+        mode = _stat.S_IMODE(source_stat.st_mode)
+        if not keep_special_bits:
+            mode &= ~(_stat.S_ISUID | _stat.S_ISGID | _stat.S_ISVTX)
+        try:
+            await sftp_call(lambda: aclient.chmod(current.path, mode), current.path)
+        except NotImplementedError:
+            pass
 
     async def quietly(make_awaitable, filename):
         # Cleanup of a copy that is already failing: its own failure is not
@@ -1042,11 +1057,17 @@ async def _concurrent_copy(
                 raise _path_error(IsADirectoryError, _errno.EISDIR, dst)
             if not overwrite:
                 raise _path_error(FileExistsError, _errno.EEXIST, dst)
-            await unlink(dst)
 
         async with file_semaphore:
+            # Open the source before the destination is touched at all: a
+            # source that cannot be read leaves an existing destination intact.
             src_file = await open_file(src, "rb")
             try:
+                if existing is not None:
+                    try:
+                        await unlink(dst)
+                    except FileNotFoundError:
+                        pass
                 dst_file = await open_file(dst, "wb")
                 try:
                     while True:
@@ -1111,11 +1132,7 @@ async def _concurrent_copy(
             await copy_with_sync_fallback(src, dst)
             return
 
-        if preserve_metadata:
-            try:
-                await chmod(dst, src_stat.st_mode)
-            except NotImplementedError:
-                pass
+        await apply_mode(dst, src_stat)
 
     async def settle(tasks):
         # Path.copy()'s contract: a callable is notified and the error
@@ -1148,6 +1165,8 @@ async def _concurrent_copy(
 
     try:
         await settle([owner.spawn(copy_child(child)) for child in await read_dir(path)])
+        # The root last, after what is in it, like every other directory.
+        await apply_mode(target, await stat_path(path))
     finally:
         await owner.close()
 
@@ -1168,13 +1187,19 @@ async def _concurrent_rm(
     """
     semaphore = _asyncio.Semaphore(max(1, max_concurrency))
     owner = _TaskOwner()
+    # Errors `on_error` declined, on their way up through the enclosing
+    # directories: each error is offered once.
+    declined: "list[Exception]" = []
     if aclient is None:
         aclient = path._sftpclient._aclient
 
     async def handled(error, current) -> bool:
-        if on_error is None:
+        if on_error is None or any(error is seen for seen in declined):
             return False
-        return bool(await _in_thread(on_error, error, current))
+        if await _in_thread(on_error, error, current):
+            return True
+        declined.append(error)
+        return False
 
     async def sftp_call(make_awaitable, filename=None):
         async with semaphore:
@@ -1219,9 +1244,16 @@ async def _concurrent_rm(
             for task in done:
                 task.result()
 
-    async def rm_one(current, *, allow_missing: bool = False):
+    async def rm_one(current, *, root: bool = False):
         try:
-            stat = await stat_path(current)
+            try:
+                stat = await stat_path(current)
+            except FileNotFoundError:
+                # `missing_ok` is about the path rm() was called on, not about
+                # an entry that vanished below it.
+                if root and missing_ok:
+                    return
+                raise
             if stat.is_dir():
                 tasks = [
                     owner.spawn(rm_one(child)) for child in await read_dir(current)
@@ -1231,16 +1263,11 @@ async def _concurrent_rm(
                 await remove_dir(current)
             else:
                 await remove_file(current)
-        except FileNotFoundError as error:
-            if allow_missing:
-                return
-            if not await handled(error, current):
-                raise
         except Exception as error:
             if not await handled(error, current):
                 raise
 
     try:
-        await rm_one(path, allow_missing=missing_ok)
+        await rm_one(path, root=True)
     finally:
         await owner.close()

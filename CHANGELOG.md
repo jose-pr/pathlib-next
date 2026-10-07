@@ -358,6 +358,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   error, a cancel, an interrupt) is removed instead of being left truncated.
   Code that relied on the work finishing after an error has to wait for the
   call itself.
+- **The asyncssh `copy(recursive=True, overwrite=True)` no longer deletes a
+  destination file before its source is known to be readable.** It unlinked
+  an existing destination and only then opened the source, so a source that
+  could not be opened (permission denied, locked) left the destination gone,
+  where the paramiko backend and `Path.copy()` keep it. The source is opened
+  first.
+- **A recursive `sftp:` copy between two paths with different supplied
+  backends goes through the generic copy.** Two paths of one authority that
+  hold distinct backends (a different ssh_config `HostName`, a tunnel, other
+  credentials) made the asyncssh fan-out create the target directory over the
+  target's connection and write every file over the source's. The fan-out now
+  runs only when `_same_filesystem()` holds, so each file reaches the target's
+  server.
+- **The asyncssh copy applies modes as `Path.copy()` does.** It sent
+  `st_mode` with its file-type bits (`0o100644`, `0o40755`), created
+  sub-directories without a mode and never set the mode of the directory
+  copied into. It now sends the permission bits only, creates directories
+  with `0o777` like `mkdir()`, settles every directory, the target included,
+  after what is in it, and drops the setuid, setgid and sticky bits between
+  two different classes, as the generic copy does.
+- **On asyncssh, `rm(recursive=True)` treats `missing_ok` and `ignore_error`
+  as the generic `rm()` does.** `missing_ok=True` swallowed a
+  `FileNotFoundError` from an entry that vanished below the path and
+  returned with the tree still there; it now covers the path `rm()` was
+  called on only. A callable `ignore_error` that returned False was handed
+  the same error again at every enclosing directory (five calls for a file
+  four levels down); each error is offered once.
 
 ## [0.9.11] - 2026-09-21
 

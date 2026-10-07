@@ -711,3 +711,264 @@ def test_cancelled_walk_waits_for_a_running_error_handler():
         assert handled.is_set()
 
     asyncio.run(scenario())
+
+
+# --- what a failed or refused operation leaves behind, on either backend ------
+
+
+@pytest.fixture
+def native_calls(monkeypatch):
+    """How often the asyncssh walks ran, to tell the native path from the
+    generic one."""
+    calls = collections.Counter()
+    for name in ("_concurrent_copy", "_concurrent_rm"):
+        real = getattr(backend_mod, name)
+
+        def counted(*args, _name=name, _real=real, **kwargs):
+            calls[_name] += 1
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(backend_mod, name, counted)
+    return calls
+
+
+def _native(kind, calls, name, times=1):
+    """A scenario that qualifies for the native walk takes it on asyncssh and
+    never on paramiko."""
+    assert calls[name] == (times if kind == "asyncssh" else 0)
+
+
+def test_unreadable_source_leaves_the_existing_destination_intact(
+    kind, server, root, wire, backends, native_calls
+):
+    (root / "src").mkdir()
+    (root / "src" / "keep.txt").write_bytes(b"new")
+    (root / "dst").mkdir()
+    (root / "dst" / "keep.txt").write_bytes(b"PRECIOUS OLD CONTENT")
+    backend = _backend(kind, backends)
+    wire.before["open"] = _deny(lambda p: p.endswith(b"/src/keep.txt"))
+
+    with pytest.raises(PermissionError):
+        _path(server, backend, "src").copy(
+            _path(server, backend, "dst"), recursive=True, overwrite=True
+        )
+
+    assert _files(root / "dst") == {"keep.txt": b"PRECIOUS OLD CONTENT"}
+    _native(kind, native_calls, "_concurrent_copy")
+
+
+def test_a_copy_that_fails_while_reading_leaves_no_file_behind(
+    kind, server, root, wire, backends, native_calls
+):
+    (root / "src").mkdir()
+    (root / "src" / "big.bin").write_bytes(b"x" * 3_000_000)
+    backend = _backend(kind, backends)
+    reads = [0]
+
+    def fail_second_read(server_, *args):
+        reads[0] += 1
+        if reads[0] == 2:
+            raise asyncssh.SFTPFailure("failed by the test")
+
+    wire.before["read"] = fail_second_read
+
+    with pytest.raises(OSError) as raised:
+        _path(server, backend, "src").copy(
+            _path(server, backend, "dst"), recursive=True
+        )
+
+    assert not isinstance(raised.value, FileExistsError)
+    assert reads[0] >= 2
+    assert _files(root / "dst") == {}
+    _native(kind, native_calls, "_concurrent_copy")
+
+
+def test_two_backends_for_one_host_copy_without_the_native_walk(
+    kind, server, root, backends, native_calls
+):
+    (root / "tree").mkdir()
+    (root / "tree" / "f.txt").write_bytes(b"content")
+    source = _path(server, _backend(kind, backends), "tree")
+    target = _path(server, _backend(kind, backends), "out")
+    assert not source._same_filesystem(target)
+
+    source.copy(target, recursive=True)
+
+    assert _files(root / "out") == {"f.txt": b"content"}
+    assert native_calls["_concurrent_copy"] == 0
+
+
+def _chain(root):
+    """root/tree/a/b/c/locked.txt, the only thing the tests make fail."""
+    folder = root / "tree" / "a" / "b" / "c"
+    folder.mkdir(parents=True)
+    (folder / "locked.txt").write_bytes(b"x")
+    return folder
+
+
+def test_error_the_handler_declined_is_offered_once(
+    kind, server, root, wire, backends, native_calls
+):
+    _chain(root)
+    backend = _backend(kind, backends)
+    wire.before["remove"] = _deny(lambda p: p.endswith(b"locked.txt"))
+    offered = []
+
+    def decline(error, path):
+        offered.append((type(error).__name__, path.name))
+        return False
+
+    with pytest.raises(PermissionError):
+        _path(server, backend, "tree").rm(recursive=True, ignore_error=decline)
+
+    assert offered == [("PermissionError", "locked.txt")]
+    assert (root / "tree" / "a" / "b" / "c" / "locked.txt").exists()
+    _native(kind, native_calls, "_concurrent_rm")
+
+
+def test_errors_the_handler_swallows_are_offered_one_by_one(
+    kind, server, root, wire, backends, native_calls
+):
+    _chain(root)
+    backend = _backend(kind, backends)
+    wire.before["remove"] = _deny(lambda p: p.endswith(b"locked.txt"))
+    offered = []
+
+    def swallow(error, path):
+        offered.append(path.name)
+        return True
+
+    _path(server, backend, "tree").rm(recursive=True, ignore_error=swallow)
+
+    # The file, then each directory above it that could not be removed.
+    assert offered == ["locked.txt", "c", "b", "a", "tree"]
+    assert (root / "tree" / "a" / "b" / "c" / "locked.txt").exists()
+    _native(kind, native_calls, "_concurrent_rm")
+
+
+def test_missing_ok_covers_the_path_itself_and_not_what_vanished_below_it(
+    kind, server, root, wire, backends, native_calls
+):
+    backend = _backend(kind, backends)
+    _path(server, backend, "absent").rm(recursive=True, missing_ok=True)
+
+    (root / "tree" / "sub").mkdir(parents=True)
+    (root / "tree" / "sub" / "ghost.txt").write_bytes(b"x")
+    wire.before["remove"] = _deny(
+        lambda p: p.endswith(b"ghost.txt"), error=asyncssh.SFTPNoSuchFile
+    )
+
+    with pytest.raises(FileNotFoundError):
+        _path(server, backend, "tree").rm(recursive=True, missing_ok=True)
+
+    assert (root / "tree" / "sub" / "ghost.txt").exists()
+    # `absent` is not a directory, so only `tree` took the native walk.
+    _native(kind, native_calls, "_concurrent_rm", times=2)
+
+
+def test_missing_root_is_an_error_without_missing_ok(kind, server, backends):
+    backend = _backend(kind, backends)
+
+    with pytest.raises(FileNotFoundError):
+        _path(server, backend, "absent").rm(recursive=True)
+
+
+# --- modes -----------------------------------------------------------------------
+
+#: What the server reports for each entry of the tree the mode tests copy:
+#: type bits plus a mode with a special bit where one is meant to be tested.
+_REPORTED = {
+    b"/src": 0o40751,
+    b"/src/a.txt": 0o104755,
+    b"/src/sub": 0o41777,
+    b"/src/sub/b.txt": 0o102640,
+}
+
+
+class _OtherSftpPath(SftpPath):
+    """A second class for the same scheme: `type(src) is not type(dst)`."""
+
+    __SCHEMES = ()
+
+
+def _mode_tree(root, wire):
+    (root / "src" / "sub").mkdir(parents=True)
+    (root / "src" / "a.txt").write_bytes(b"a")
+    (root / "src" / "sub" / "b.txt").write_bytes(b"b")
+
+    def reshape(result, path, *args):
+        if not isinstance(result, asyncssh.SFTPAttrs):
+            result = asyncssh.SFTPAttrs.from_local(result)
+        if path in _REPORTED:
+            result.permissions = _REPORTED[path]
+        return result
+
+    wire.after["stat"] = wire.after["lstat"] = reshape
+    sent = []
+
+    def record(server_, path, attrs, *args):
+        if attrs.permissions is not None:
+            sent.append((path.decode(), attrs.permissions))
+
+    wire.before["setstat"] = record
+    return sent
+
+
+def test_copy_sends_permission_bits_only(kind, server, root, wire, backends):
+    sent = _mode_tree(root, wire)
+    backend = _backend(kind, backends)
+
+    _path(server, backend, "src").copy(_path(server, backend, "dst"), recursive=True)
+
+    assert sent
+    assert [mode for _, mode in sent if mode > 0o7777] == []
+
+
+def test_directory_modes_are_settled_after_what_is_in_them(
+    kind, server, root, wire, backends
+):
+    sent = _mode_tree(root, wire)
+    backend = _backend(kind, backends)
+
+    _path(server, backend, "src").copy(_path(server, backend, "dst"), recursive=True)
+
+    order = [path for path, _ in sent]
+    for directory, child in (
+        ("/dst/sub", "/dst/sub/b.txt"),
+        ("/dst", "/dst/sub"),
+        ("/dst", "/dst/a.txt"),
+    ):
+        assert order.index(directory) > order.index(child), (directory, order)
+
+
+def test_special_mode_bits_are_kept_between_two_paths_of_one_class(
+    kind, server, root, wire, backends
+):
+    sent = _mode_tree(root, wire)
+    backend = _backend(kind, backends)
+
+    _path(server, backend, "src").copy(_path(server, backend, "dst"), recursive=True)
+
+    assert dict(sent) == {
+        "/dst/a.txt": 0o4755,
+        "/dst/sub/b.txt": 0o2640,
+        "/dst/sub": 0o1777,
+        "/dst": 0o751,
+    }
+
+
+def test_special_mode_bits_are_dropped_between_two_classes(
+    kind, server, root, wire, backends
+):
+    sent = _mode_tree(root, wire)
+    backend = _backend(kind, backends)
+    target = _OtherSftpPath(server.url("dst"), backend=backend)
+
+    _path(server, backend, "src").copy(target, recursive=True)
+
+    assert dict(sent) == {
+        "/dst/a.txt": 0o755,
+        "/dst/sub/b.txt": 0o640,
+        "/dst/sub": 0o777,
+        "/dst": 0o751,
+    }

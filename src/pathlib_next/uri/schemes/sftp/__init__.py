@@ -692,9 +692,12 @@ class SftpPath(UriPath):
             or not isinstance(self.backend, AsyncsshSftpBackend)
             or not recursive
             # The fan-out writes every destination file over THIS path's
-            # connection: only a target on the same host may use it.
+            # connection: only a target on the same host, and the same tree
+            # (two distinct supplied backends may reach different servers),
+            # may use it.
             or not isinstance(target, SftpPath)
             or not self._same_location(target)
+            or not self._same_filesystem(target)
             # A link copied as a link is the generic copy's job.
             or (not follow_symlinks and self.is_symlink())
             or not self.is_dir()

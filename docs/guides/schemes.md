@@ -167,7 +167,7 @@ loop bridges it to the synchronous API).
   (paramiko raises `NotImplementedError` without a round trip). `rename()`
   replaces an existing target where the server supports
   `posix-rename@openssh.com`. On asyncssh, `copy(recursive=True)` to the same
-  host and `rm(recursive=True)` run concurrently, bounded by
+  server and `rm(recursive=True)` run concurrently, bounded by
   `max_concurrency` (default 16); one that raises or is interrupted has
   stopped by the time the exception arrives, and a destination file whose copy
   did not complete is removed. `checksum()` uses the `check-file-handle`
