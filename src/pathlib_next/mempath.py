@@ -179,6 +179,11 @@ class MemPath(Path):
         # when they share the `MemPathBackend` instance.
         return self._backend is other._backend
 
+    def _node_key(self):
+        # I/O resolves through `normalized`, so "a.txt", "/a.txt" and
+        # "/d/../a.txt" are one node although their segments differ.
+        return self._backend, tuple(name for name in self.normalized if name)
+
     @property
     def normalized(self):
         if self._normalized is None:

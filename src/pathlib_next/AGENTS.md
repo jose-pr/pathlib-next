@@ -85,6 +85,15 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     it**, or a transfer between two of them spelled alike is refused
     (`OSError(EINVAL)` "same file" / `ValueError` "overlap"). `MemPath`:
     same `MemPathBackend` instance; `UriPath`: see `backend` below.
+  - `_node_key() -> (namespace, names) | None` — override hook for a type
+    whose segments spell one node several ways (`MemPath`: `a.txt`,
+    `/a.txt`, `/d/../a.txt`; an archive member: `zip:` and `archive:`
+    spellings, a query). `namespace` is an object two paths share exactly
+    when they resolve names in one tree (compared with `is`); `names` is the
+    node's normalized position in it (`()` for the root). `copy()` and
+    `move()` compare two paths that both answer it, whatever their classes.
+    Default `None`: two paths of one type that `_same_filesystem()` places
+    together are compared with `==` and `is_relative_to()`. No I/O.
   - `iterdir() -> Iterator[Self]` — **stub** (`NotImplementedError`); a
     listable `Path` must implement it (or, on `UriPath`, `_listdir()`/
     `_scandir()`).
@@ -181,11 +190,18 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     - Existing target: `FileExistsError` unless `overwrite=True`; a directory
       target of a file copy → `IsADirectoryError`; a directory source needs
       `recursive=True`; copying into its own subtree → `OSError(EINVAL)`; onto
-      the same file (or a case-insensitive alias) → `OSError(EINVAL)`. "Same"
-      is `samefile()` where `stat()` carries `st_dev`/`st_ino`; otherwise
-      equal paths of one type that `_same_filesystem()` places together.
+      the same file (or a case-insensitive alias) → `OSError(EINVAL)`. Two
+      files of this machine (`LocalPath`, a subclass, `pathlib.Path`, a
+      `file:` URI) are compared by identity whatever their classes, a
+      directory reached through a symlink included. A type that answers
+      `_node_key()` is compared by that, across classes. Otherwise "same" is
+      `samefile()` where `stat()` carries `st_dev`/`st_ino`, else equal paths
+      of one type that `_same_filesystem()` places together.
     - The source is opened before the target is touched; a failed stream
-      removes the partial target.
+      removes the partial target. `overwrite=True` removes an existing file
+      target with `unlink(missing_ok=True)` just before writing: a backend
+      whose write replaces the file and which cannot delete implements
+      `unlink()` so that `missing_ok=True` returns without removing.
     - A recursive copy refuses any child name that would not stay inside
       `target` — `..`, and when the target reads names with Windows rules
       (`utils.is_windows_flavoured()`) `\`, `:`, a trailing dot or space, and
@@ -212,9 +228,15 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   - `move(target, *, overwrite=False)` — validates first (missing source →
     `FileNotFoundError`, file onto directory → `IsADirectoryError`, existing
     target without `overwrite` → `FileExistsError`; a same-file spelling is
-    renamed in place). Tries `rename()` when `_rename_compatible(target)`,
-    falling back to `copy(recursive=True)` + `rm`/`unlink` on
-    `NotImplementedError` or `OSError(EXDEV)`. `overwrite=True` replaces a
+    renamed in place), and refuses before it removes anything a target that
+    holds the source (`OSError(ENOTEMPTY)`), lies inside it
+    (`OSError(EINVAL)`) or is a link to the same file (`OSError(EINVAL)`).
+    Sameness is decided as for `copy()`. Two hard links of one file are two
+    names: an existing target needs `overwrite=True`, and the source name is
+    then removed, so the target name keeps the content. Tries `rename()`
+    when `_rename_compatible(target)`, falling back to
+    `copy(recursive=True)` + `rm`/`unlink` on `NotImplementedError` or
+    `OSError(EXDEV)`. `overwrite=True` replaces a
     local file atomically (`replace()`); elsewhere the target is unlinked just
     before the rename. Returns `rename()`'s result (`None` on the fallback).
 - **`FsPathLike`** — `Protocol` with `__fspath__() -> str`.

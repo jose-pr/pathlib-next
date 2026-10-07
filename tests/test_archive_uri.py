@@ -294,6 +294,56 @@ def test_zip_rename_directory_moves_nested_entries(zip_archive):
     assert (root / "moved" / "readme.txt").read_text() == "hello world"
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "archive:{outer}!/top.txt",
+        "archive+zip:{outer}!/top.txt",
+        "zip:{outer}!/top.txt?x=1",
+    ],
+)
+def test_zip_move_onto_the_same_member_under_another_spelling_keeps_it(
+    zip_archive, spelling
+):
+    member = UriPath(_zip_uri(zip_archive, "top.txt"))
+    same = UriPath(spelling.format(outer=zip_archive.as_uri()))
+    try:
+        member.move(same, overwrite=True)
+    except OSError:
+        pass
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert zf.read("top.txt") == b"top level"
+        assert zf.namelist().count("top.txt") == 1
+
+
+@pytest.mark.parametrize(
+    "spelling", ["archive:{outer}!/top.txt", "zip:{outer}!/top.txt?x=1"]
+)
+def test_zip_copy_onto_the_same_member_under_another_spelling_raises(
+    zip_archive, spelling
+):
+    member = UriPath(_zip_uri(zip_archive, "top.txt"))
+    same = UriPath(spelling.format(outer=zip_archive.as_uri()))
+    with pytest.raises(OSError, match="same file"):
+        member.copy(same, overwrite=True)
+    with zipfile.ZipFile(zip_archive) as zf:
+        assert zf.read("top.txt") == b"top level"
+
+
+def test_zip_members_of_two_archives_are_not_the_same_file(tmp_path):
+    paths = []
+    for name in ("one.zip", "two.zip"):
+        path = tmp_path / name
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("top.txt", name)
+        paths.append(path)
+    first = UriPath(_zip_uri(paths[0], "top.txt"))
+    second = UriPath(_zip_uri(paths[1], "top.txt"))
+    first.copy(second, overwrite=True)
+    with zipfile.ZipFile(paths[1]) as zf:
+        assert zf.read("top.txt") == b"one.zip"
+
+
 def test_zip_overwrite_existing_entry_replaces_content_not_duplicates(zip_archive):
     root = UriPath(_zip_uri(zip_archive))
     (root / "top.txt").write_text("replaced content")

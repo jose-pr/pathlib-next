@@ -632,6 +632,14 @@ class ArchiveUri(UriPath):
             raise FileNotFoundError(self)
         self.backend.delete_member(index[marker])
 
+    def _node_key(self):
+        # One member per archive handle, whichever scheme alias (`zip:`,
+        # `archive:`), query or fragment names it.
+        member = self._member
+        if member is None:
+            return None
+        return self.backend, tuple(member.split("/")) if member else ()
+
     def _same_location(self, other: Uri) -> bool:
         # Every archive URI has the same bare "zip:"/"tar:" authority, so the
         # authority alone cannot tell two archives apart: an archive path is

@@ -207,3 +207,55 @@ def test_mempath_answers_by_backend_identity():
     assert not b._same_filesystem(a)
     assert a._same_filesystem(a / "child")
     assert a._same_filesystem(MemPath("/y", backend=a.backend))
+
+
+# --- a type that spells one node several ways ---------------------------------
+
+
+class AliasPath(HostPath):
+    """A host-style path whose `name` and `NAME` are one node."""
+
+    __slots__ = ()
+
+    def _node_key(self):
+        names = tuple(s.lower() for s in self._delegate.segments if s)
+        return self._delegate.backend, names
+
+
+class OtherAliasPath(AliasPath):
+    """Another class over the same stores."""
+
+    __slots__ = ()
+
+
+def test_node_key_makes_two_spellings_of_one_node_the_same_file():
+    host = _host(AliasPath)
+    (host / "etc").mkdir()
+    (host / "etc" / "app.conf").write_bytes(b"payload")
+    shout = AliasPath(delegate=MemPath("/ETC/APP.CONF", backend=host._delegate.backend))
+
+    assert (host / "etc" / "app.conf") != shout
+    assert _same_file(host / "etc" / "app.conf", shout)
+    assert _contains(host / "etc", shout)
+    assert not _same_file(host / "etc", shout)
+    with pytest.raises(OSError, match="same file"):
+        (host / "etc" / "app.conf").copy(shout, overwrite=True)
+    assert (host / "etc" / "app.conf").read_bytes() == b"payload"
+
+
+def test_node_key_is_compared_across_classes():
+    host = _host(AliasPath)
+    (host / "a.txt").write_bytes(b"payload")
+    other = OtherAliasPath(delegate=MemPath("/A.TXT", backend=host._delegate.backend))
+
+    assert _same_file(host / "a.txt", other)
+    assert not _same_file(host / "a.txt", _host(OtherAliasPath) / "a.txt")
+
+
+def test_node_key_of_a_nested_target_is_inside_its_source():
+    root = MemPath("/")
+    (root / "d").mkdir()
+    inner = MemPath("d/x", backend=root.backend)
+    assert _contains(root / "d", inner)
+    assert not _contains(inner, root / "d")
+    assert _contains(root, inner)

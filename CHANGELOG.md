@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`Path._node_key()`, an override hook** answering where a path's node
+  lives: `(namespace, names)`, the object two paths share when they resolve
+  names in one tree and the node's normalized position in it. `copy()` and
+  `move()` compare two paths that both answer it across classes. `MemPath`
+  and the archive paths override it; any other type keeps comparing two paths
+  of one type with `==`, so nothing needs to change.
+
 ### Changed
 - **The scheme extras now declare version ranges.** `uritools`, `requests`,
   `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
@@ -158,6 +166,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `C:\Temp\x` is an absolute path and `sub\x` is two names. Elsewhere a
   backslash is still an ordinary filename character, and every other scheme
   splits on `/` only.
+- **`move(overwrite=True)` no longer deletes the source when the target holds
+  it.** `dst/sub.move(dst, overwrite=True)` removed the whole of `dst`, the
+  source included, and then raised `FileNotFoundError`; the same happened on
+  `MemPath`. A target that holds the source now raises
+  `OSError(ENOTEMPTY)` and one that lies inside it `OSError(EINVAL)`, with both
+  trees intact, before anything is removed. Move the source out first, or
+  name a different target.
+- **`copy()` and `move()` recognise one file under another class or
+  spelling.** `LocalPath(f).move(target, overwrite=True)` deleted `f` when
+  `target` was a `LocalPath` subclass, a `file:` URI or a `pathlib.Path` for
+  the same file, and so did a relative and an absolute `MemPath` of one file
+  (`a.txt`, `/a.txt`, `/d/../a.txt`) and the `zip:`, `archive:` and
+  query-carrying spellings of one archive member; `copy()` across the same
+  spellings was not refused either. The move is now an in-place rename and the
+  copy raises `OSError(EINVAL)`, with the content kept. A directory reached
+  through a symlink is the same directory, so `copy(recursive=True)` into
+  it is refused as a copy into itself. A type whose segments spell one node
+  several ways overrides the new `_node_key()` hook.
+- **`move()` between two hard links of one file ends with the target name.**
+  On POSIX it reported success and left both names; on Windows it removed the
+  source even without `overwrite`. An existing target now needs
+  `overwrite=True` (`FileExistsError` otherwise), and the source name is then
+  removed. On POSIX a symlink moved onto the file it points at replaced the
+  file with a link to itself; it now raises `OSError(EINVAL)`.
+- **`copy(overwrite=True)` removes the target with `unlink(missing_ok=True)`.**
+  A backend whose write replaces the file and which cannot delete had to make
+  `unlink()` lie; it now implements `unlink()` so that `missing_ok=True`
+  returns without removing.
 
 ## [0.9.11] - 2026-09-21
 

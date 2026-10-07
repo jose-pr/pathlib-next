@@ -10,6 +10,7 @@ from __future__ import annotations
 import abc as _abc
 import errno as _errno
 import os as _os
+import pathlib as _pathlib
 import re as _re
 import stat as _stat
 import sys as _sys
@@ -1219,6 +1220,21 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         alike is refused."""
         return getattr(self, "_backend", None) is getattr(other, "_backend", None)
 
+    def _node_key(self) -> "tuple[object, tuple[str, ...]] | None":
+        """Where this path's node lives, for the same-file and nesting checks
+        of `copy()` and `move()`: `(namespace, names)`. `namespace` is an
+        object two paths share (compared with `is`) exactly when they resolve
+        names in one tree; `names` is the node's position in it, normalized
+        so that every spelling of one node gives the same tuple and the
+        root gives `()`.
+
+        Default `None`: two paths of one type that `_same_filesystem()`
+        places together are compared with `==` and `is_relative_to()`. A type
+        whose segments spell one node in several ways (a relative and an
+        absolute form, a `..` segment, an alias scheme) overrides this, and
+        its paths are then compared across classes. Must not do I/O."""
+        return None
+
     def is_junction(self) -> bool:
         """Whether this path is a Windows junction (pathlib 3.12 parity).
 
@@ -1487,7 +1503,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         # leave a new empty one behind.
         with src.open("rb") as input:
             if target_exists:
-                target.unlink()
+                target.unlink(missing_ok=True)
             created = False
             try:
                 with target.open("wb") as output:
@@ -1550,11 +1566,20 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 raise IsADirectoryError(target)
             if not overwrite:
                 raise FileExistsError(target)
-            target.unlink()
+            target.unlink(missing_ok=True)
         target.symlink_to(link, target_is_directory=self.is_dir())
 
     def move(self, target: "Path|str", *, overwrite=False):
-        """Move this file or directory to target, falling back to copy+unlink/rm if rename is unsupported."""
+        """Move this file or directory to target, falling back to copy+unlink/rm if rename is unsupported.
+
+        Nothing is removed until the move is known to be allowed: a missing
+        source, a file onto a directory, a target that holds the source
+        (`OSError` `ENOTEMPTY`) or lies inside it (`EINVAL`), and a second
+        name of the same file that is a link (`EINVAL`) all raise first. The
+        same file under another spelling (a case alias, `x.move(x)`) is
+        renamed in place. Between two hard links of one file, an existing
+        target needs `overwrite=True`, and the source name is then removed.
+        """
         if isinstance(target, str):
             target = self._coerce_target(target)
         src = self
@@ -1569,14 +1594,23 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             raise FileNotFoundError(
                 _errno.ENOENT, "No such file or directory", str(src)
             )
-        # The same file under another spelling (a case-only rename on a
+        # The same entry under another spelling (a case-only rename on a
         # case-insensitive filesystem, or `x.move(x)`) is renamed in place:
         # removing the "existing" target would delete the source itself.
-        if not _same_file(src, target):
+        relation = _relation(src, target, follow=False)
+        if relation != _SAME:
             target_stat = FileStat.from_path(target, follow_symlink=False)
+            if target_stat is not None and not overwrite:
+                raise FileExistsError(target)
+            if relation == _INNER:
+                raise OSError(
+                    _errno.EINVAL, "Cannot move a directory into itself", str(target)
+                )
             if target_stat is not None:
-                if not overwrite:
-                    raise FileExistsError(target)
+                if relation == _OUTER:
+                    raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(target))
+                if relation == _OTHER:
+                    return _drop_second_name(src, src_stat, target, target_stat)
                 if target_stat.is_dir() and not target_stat.is_symlink():
                     if not src_stat.is_dir():
                         raise IsADirectoryError(target)
@@ -1643,42 +1677,176 @@ def _check_follow(name: str, policy) -> None:
         raise ValueError(f"{name} must be True, False, None or a callable")
 
 
-def _contains(src: Path, target: Path) -> bool:
-    """Whether `target` is `src` or lies inside it, on the same backend
-    (pathlib 3.14's copy() refuses both). Conservative like `_same_file`:
-    paths of different types, or that `_same_filesystem()` reports as living
-    in different namespaces, are never reported as nested."""
-    if type(src) is not type(target):
-        return False
-    if not src._same_filesystem(target):
+# How `move()` and `copy()` find a target standing to the source (`_relation`).
+_SAME = "same"  # one directory entry, spelled differently
+_OTHER = "other"  # another name of the same file (a hard link, a link to it)
+_OUTER = "outer"  # the target is a directory that holds the source
+_INNER = "inner"  # the target lies inside the source
+
+
+def _local_file(path) -> "_pathlib.Path | None":
+    """The `pathlib.Path` through which `path` is a file of this machine, or
+    None: a `LocalPath`, a stdlib path, or a path holding one as `filepath`
+    (a `file:` URI)."""
+    if isinstance(path, _pathlib.Path):
+        return path
+    try:
+        local = getattr(path, "filepath", None)
+    except Exception:
+        return None
+    return local if isinstance(local, _pathlib.Path) else None
+
+
+def _location(path: "_pathlib.Path", follow: bool) -> str:
+    """Where `path` points: absolute, with every symlink of its directory part
+    resolved and, when `follow`, the final component's too."""
+    text = _os.path.join(_os.getcwd(), _os.fspath(path))
+    head, tail = _os.path.split(text)
+    if follow or tail in ("", ".", ".."):
+        return _os.path.realpath(text)
+    return _os.path.join(_os.path.realpath(head), tail)
+
+
+def _inside(outer: str, inner: str) -> bool:
+    """Whether `inner` lies strictly below `outer` (both `normcase`d)."""
+    if outer == inner:
         return False
     try:
-        return bool(target.is_relative_to(src))
-    except Exception:
+        return _os.path.commonpath([outer, inner]) == outer
+    except ValueError:
         return False
+
+
+def _is_one_entry(mine: str, theirs: str) -> bool:
+    """Whether two locations of one file are a single directory entry under
+    two spellings (a case or short-name alias) rather than two names of it
+    (hard links, which a directory lists both). Unsure counts as one entry:
+    that removes nothing."""
+    (head, name), (other_head, other_name) = (
+        _os.path.split(mine),
+        _os.path.split(theirs),
+    )
+    try:
+        if not _os.path.samefile(head, other_head):
+            return False
+        listed = set(_os.listdir(head))
+    except OSError:
+        return True
+    return not (name != other_name and name in listed and other_name in listed)
+
+
+def _local_relation(mine, theirs, follow: bool) -> "str | None":
+    """`_relation()` for two files of this machine, decided by where each
+    really is and, failing that, by their identity (`os.path.samefile`)."""
+    try:
+        at, there = _location(mine, follow), _location(theirs, follow)
+        normal, other = _os.path.normcase(at), _os.path.normcase(there)
+        if normal == other:
+            return _SAME
+        if _inside(other, normal):
+            return _OUTER
+        if _inside(normal, other):
+            return _INNER
+        if not _os.path.samefile(mine, theirs):
+            return None
+    except (OSError, ValueError):
+        return None
+    return _SAME if _is_one_entry(at, there) else _OTHER
+
+
+def _relation(
+    src: Path, target: Path, *, follow: bool, identity: bool = True
+) -> "str | None":
+    """How `target` stands to `src`: `_SAME`, `_OTHER`, `_OUTER`, `_INNER`,
+    or None when they are unrelated or this cannot tell.
+
+    Two files of this machine are compared by where they really are, whatever
+    their classes; a type that answers `_node_key()` is compared by that;
+    anything else only between two paths of one type that
+    `_same_filesystem()` places together, by `samefile()` where `stat()`
+    carries `st_dev`/`st_ino` (when `identity`; it costs a stat of each) and
+    by `==` otherwise. `follow` says whether a final symlink is looked
+    through (a copy reads it) or is the entry itself (a move renames it)."""
+    mine, theirs = _local_file(src), _local_file(target)
+    if mine is not None and theirs is not None:
+        return _local_relation(mine, theirs, follow)
+    try:
+        keys = (src._node_key(), target._node_key())
+    except Exception:
+        keys = (None, None)
+    if None not in keys:
+        (space, names), (other_space, other_names) = keys
+        if space is not other_space:
+            return None
+        if names == other_names:
+            return _SAME
+        if names[: len(other_names)] == other_names:
+            return _OUTER
+        if other_names[: len(names)] == names:
+            return _INNER
+        return None
+    if type(src) is not type(target):
+        return None
+    if identity:
+        try:
+            if src.samefile(target):
+                return _SAME
+        except (NotImplementedError, OSError, TypeError, ValueError):
+            pass
+    if not src._same_filesystem(target):
+        return None
+    try:
+        if src == target:
+            return _SAME
+        if target.is_relative_to(src):
+            return _INNER
+        if src.is_relative_to(target):
+            return _OUTER
+    except Exception:
+        pass
+    return None
+
+
+def _contains(src: Path, target: Path) -> bool:
+    """Whether `target` is `src` or lies inside it (pathlib 3.14's copy()
+    refuses both), looking through symlinks. Paths `_same_filesystem()`
+    reports in different namespaces are never nested."""
+    return _relation(src, target, follow=True, identity=False) in (
+        _SAME,
+        _OTHER,
+        _INNER,
+    )
 
 
 def _same_file(src: Path, target: Path) -> bool:
-    """Whether `src` and `target` name the same file, conservatively.
+    """Whether `src` and `target` name the same file, looking through
+    symlinks (see `_relation`)."""
+    mine, theirs = _local_file(src), _local_file(target)
+    if mine is not None and theirs is not None:
+        # The cheap form of `_local_relation()`: copy() asks this once per
+        # file, and only identity matters to it.
+        try:
+            return _os.path.samefile(mine, theirs)
+        except (OSError, ValueError):
+            pass
+        try:
+            return _os.path.normcase(_os.path.abspath(mine)) == _os.path.normcase(
+                _os.path.abspath(theirs)
+            )
+        except (OSError, ValueError):
+            return False
+    return _relation(src, target, follow=True) in (_SAME, _OTHER)
 
-    `samefile()` is trusted only between paths of the same concrete type:
-    `LocalPath.samefile()` accepts any os.PathLike, so a remote target whose
-    `__fspath__()` happens to spell a local path would otherwise "match".
-    Where `samefile()` is unavailable (no st_dev/st_ino), equal paths that
-    `_same_filesystem()` places in one namespace are the same file.
-    """
-    if type(src) is not type(target):
-        return False
-    try:
-        return bool(src.samefile(target))
-    except (NotImplementedError, OSError, TypeError, ValueError):
-        pass
-    if not src._same_filesystem(target):
-        return False
-    try:
-        return src == target
-    except Exception:
-        return False
+
+def _drop_second_name(src: Path, src_stat, target: Path, target_stat) -> Path:
+    """`move()` between two names of one file: the target name already holds
+    the content, so only the source name goes. A link to the file, or a
+    directory reachable twice, is refused: removing either name would leave
+    the other pointing at nothing."""
+    if src_stat.is_symlink() or target_stat.is_symlink() or src_stat.is_dir():
+        raise OSError(_errno.EINVAL, "Source and target are the same file", str(target))
+    src.unlink()
+    return target
 
 
 PathLike = _ty.Union[str, Path]

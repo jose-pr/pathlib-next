@@ -91,6 +91,22 @@ needs nothing: two URIs are told apart only when both were given a backend
 itself through `_initbackend()` adds nothing to what the URI already says --
 the path records that it built the backend, whatever the backend's class is.
 
+A type whose segments can spell one node in several ways (a relative and an
+absolute form, a `..` segment, an alias scheme) also overrides
+`_node_key()` (`MemPath` and the archive paths do). It returns
+`(namespace, names)`: an object that two paths share exactly when they resolve
+names in the same tree, and the node's normalized position in it (`()` for
+the root). `copy()` and `move()` compare two paths
+that both answer it, whatever their classes, so a file is never copied or
+moved onto itself under another spelling, and a directory is never moved onto
+its own ancestor or into itself. The default returns `None`, and two paths of
+one type are then compared with `==`.
+
+```python
+def _node_key(self):
+    return self._connection, tuple(self._normalized_names())
+```
+
 `MemPath` implements this surface over nested dicts (`MemPathBackend`: a
 `dict` value is a directory, a `bytearray` a file); see
 [Memory Path API](../api/mempath.md).
