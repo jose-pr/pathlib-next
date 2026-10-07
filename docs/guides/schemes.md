@@ -87,7 +87,9 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
     (works on any server, not atomic); `append_mode="patch"` sends `PATCH`
     with a `Content-Range` starting at the current size and never falls back.
     A refused `PATCH` raises `PermissionError` (401, 403, 405, 501) or
-    `OSError` with the HTTP status (other codes, such as 400).
+    `OSError` with the HTTP status (other codes, such as 400). An `open("a")`
+    that raises, because reading the current content or the `HEAD` failed,
+    has uploaded nothing.
   - `unlink()` refuses a directory; `rmdir()` requires an empty one.
   - Requests time out after `(10, 60)` seconds (connect, read) unless a
     `timeout` is given; `timeout=None` waits forever.

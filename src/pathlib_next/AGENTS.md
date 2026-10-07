@@ -425,6 +425,8 @@ chained (their text can carry credentials).
     atomic). `"a"`: `append_mode="rewrite"` (GET + full re-upload, not atomic)
     or `"patch"` (`PATCH` with `Content-Range` from `stat()`; a refusal raises
     `PermissionError` for 401/403/405/501, `OSError(EIO)` for other statuses).
+    An `open("a")` that raises (the read of the current content, or the
+    `HEAD` of patch mode, failed) has uploaded nothing.
   - `unlink()` sends `DELETE` and refuses a directory (`IsADirectoryError`,
     judged by `stat()`); `rmdir()` requires an empty directory. No `mkdir()`,
     `rename()`, `chmod()`.

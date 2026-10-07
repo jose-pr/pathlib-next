@@ -597,34 +597,50 @@ def _response_reader(path, response: _req.Response, buffering: int):
     return raw if buffer_size == 0 else _io.BufferedReader(raw, buffer_size)
 
 
-class HttpWriteStream(_io.BytesIO):
+class _UploadStream(_io.BytesIO):
+    """A write buffer whose `close()` uploads its content through `_upload()`.
+
+    `_ready` is set by a subclass as the last step of its constructor. A
+    stream whose constructor raised stays inert: `IOBase.__del__` still calls
+    `close()` on it, and that must neither upload a half-built buffer nor
+    fail on state the constructor never reached."""
+
+    _ready = False
+
     def __init__(self, path: "HttpPath"):
         super().__init__()
         self._path = path
+
+    def _upload(self, data: bytes) -> None:
+        raise NotImplementedError
 
     def close(self):
         if self.closed:
             return
-        data = self.getvalue()
         try:
-            with _translate_http_errors(self._path, conflict=FileNotFoundError):
-                resp = self._path.backend.request(
-                    self._path.backend.write_method,
-                    self._path.as_uri(),
-                    data=data,
-                )
-                resp.raise_for_status()
+            if self._ready:
+                self._upload(self.getvalue())
         finally:
-            # Mark closed even on a failed upload -- otherwise a later
-            # close() (context-manager __exit__ cleanup, or GC via
-            # IOBase.__del__) silently retries the PUT.
+            # Closed even when the upload fails: a later close() (context
+            # manager cleanup, or garbage collection) must not send it again.
             super().close()
 
 
-class HttpAppendStream(_io.BytesIO):
+class HttpWriteStream(_UploadStream):
     def __init__(self, path: "HttpPath"):
-        super().__init__()
-        self._path = path
+        super().__init__(path)
+        self._ready = True
+
+    def _upload(self, data):
+        backend = self._path.backend
+        with _translate_http_errors(self._path, conflict=FileNotFoundError):
+            resp = backend.request(backend.write_method, self._path.as_uri(), data=data)
+            resp.raise_for_status()
+
+
+class HttpAppendStream(_UploadStream):
+    def __init__(self, path: "HttpPath"):
+        super().__init__(path)
         if path.backend.append_mode == "rewrite":
             try:
                 existing = path.read_bytes()
@@ -643,47 +659,34 @@ class HttpAppendStream(_io.BytesIO):
             except FileNotFoundError:
                 self._start_offset = 0
                 self._existed = False
+        self._ready = True
 
-    def close(self):
-        if self.closed:
-            return
-        try:
-            if self._path.backend.append_mode == "rewrite":
-                with _translate_http_errors(self._path, conflict=FileNotFoundError):
-                    data = self.getvalue()
-                    resp = self._path.backend.request(
-                        self._path.backend.write_method,
-                        self._path.as_uri(),
-                        data=data,
-                    )
-                    resp.raise_for_status()
+    def _upload(self, data):
+        backend = self._path.backend
+        with _translate_http_errors(self._path, conflict=FileNotFoundError):
+            if backend.append_mode == "rewrite":
+                resp = backend.request(
+                    backend.write_method, self._path.as_uri(), data=data
+                )
+                resp.raise_for_status()
             else:
                 # "patch" mode: send only new content via Content-Range
-                with _translate_http_errors(self._path, conflict=FileNotFoundError):
-                    new_data = self.getvalue()
-                    if not new_data:
-                        # `bytes N-(N-1)/*` is not a valid range: there is
-                        # nothing to append, only a missing file to create.
-                        if not self._existed:
-                            resp = self._path.backend.request(
-                                self._path.backend.write_method,
-                                self._path.as_uri(),
-                                data=b"",
-                            )
-                            resp.raise_for_status()
-                        return
-                    start = self._start_offset
-                    end = start + len(new_data) - 1
-                    headers = {"Content-Range": f"bytes {start}-{end}/*"}
-                    resp = self._path.backend.request(
-                        "PATCH",
-                        self._path.as_uri(),
-                        data=new_data,
-                        headers=headers,
-                    )
-                    resp.raise_for_status()
-        finally:
-            super().close()
+                if not data:
+                    # `bytes N-(N-1)/*` is not a valid range: there is
+                    # nothing to append, only a missing file to create.
+                    if not self._existed:
+                        resp = backend.request(
+                            backend.write_method, self._path.as_uri(), data=b""
+                        )
+                        resp.raise_for_status()
+                    return
+                start = self._start_offset
+                end = start + len(data) - 1
+                headers = {"Content-Range": f"bytes {start}-{end}/*"}
+                resp = backend.request(
+                    "PATCH", self._path.as_uri(), data=data, headers=headers
+                )
+                resp.raise_for_status()
 
 
 class HttpBackend(_ty.NamedTuple):

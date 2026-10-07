@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unpack_archive()` skips such a member for a Windows destination with a
   `UserWarning`. Rename a source file with such a name, or extract it on
   another platform.
+- **A failed `open("a")` on `http:` no longer empties the remote file.** In the
+  default `append_mode="rewrite"`, a failure of the `GET` that reads the
+  current content (a 500, a 403, a timeout, a body cut short) raised to the
+  caller, and then the half-built stream was garbage-collected and uploaded
+  an empty body: the file was replaced by a zero-byte one. `open("a")` now
+  raises and sends nothing, in both append modes; a write stream whose
+  constructor did not finish never uploads.
 
 ## [0.9.11] - 2026-09-21
 

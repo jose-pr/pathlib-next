@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno as _errno
-import io as _io
 import os as _os
 import typing as _ty
 import urllib.parse as _urlparse
@@ -14,6 +13,7 @@ from ..source import _compose_uri
 from .http import (
     _IDENTITY_ENCODING,
     HttpPath,
+    _UploadStream,
     _path_error,
     _response_reader,
     _split_userinfo,
@@ -119,23 +119,14 @@ def _raise_for_multistatus(resp, path) -> None:
     raise OSError(_errno.EIO, message)
 
 
-class _DavWriteStream(_io.BytesIO):
+class _DavWriteStream(_UploadStream):
     def __init__(self, path: "DavPath"):
-        super().__init__()
-        self._path = path
+        super().__init__(path)
+        self._ready = True
 
-    def close(self):
-        if self.closed:
-            return
-        try:
-            # 409: an intermediate collection is missing (RFC 4918 9.7.1).
-            self._path._dav_request(
-                "PUT", data=self.getvalue(), statuses={409: FileNotFoundError}
-            )
-        finally:
-            # Mark closed even on a failed upload, as `HttpWriteStream`
-            # does: otherwise `IOBase.__del__` sends the PUT again at GC.
-            super().close()
+    def _upload(self, data):
+        # 409: an intermediate collection is missing (RFC 4918 9.7.1).
+        self._path._dav_request("PUT", data=data, statuses={409: FileNotFoundError})
 
 
 class DavPath(HttpPath):
