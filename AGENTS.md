@@ -80,13 +80,18 @@ Workflows live in `.github/workflows/`:
 - `test.yml` runs on `workflow_dispatch` (optional `ref` input) or on a pushed
   `ci-*` tag, never on ordinary pushes. To test a commit without the dashboard,
   push a uniquely named throwaway tag (`ci-<topic>-<timestamp>`), follow the run
-  to completion, then delete the tag locally and on the remote.
-- `release.yml` runs on a `v*` tag: test gate, build, PyPI publish through
-  Trusted Publishing, and a GitHub release whose notes come from that
-  version's `CHANGELOG.md` section. Its docs job only checks that the site
-  builds strictly; it never deploys.
-- `docs.yml` owns every GitHub Pages deploy: on a published release, on a push
-  to `main` that touches the docs sources, and on `workflow_dispatch`.
+  to completion, then delete the tag locally and on the remote. Its `floors` job
+  installs every dependency at the lower bound `pyproject.toml` declares, on
+  Python 3.9. Change a range in `pyproject.toml` only, and name the API that
+  needs a raised floor in a comment beside it.
+- `release.yml` runs on a `v*` tag: test and `floors` gates, build (the tag must
+  name the version built, `twine check`), an installed-wheel smoke test, a strict
+  docs build, then the GitHub release whose notes come from that version's
+  `CHANGELOG.md` section. For a final tag only (no `-` in it) it then publishes
+  to PyPI through Trusted Publishing and dispatches `docs.yml` at the tag.
+- `docs.yml` owns every GitHub Pages deploy: on a push to `main` that touches the
+  docs sources and on `workflow_dispatch`, which `release.yml` fires for a final
+  tag.
 
 ## Releasing
 
