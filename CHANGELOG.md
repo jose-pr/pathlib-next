@@ -37,6 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the target's names alike. A custom `_scandir()` should skip such names
   itself (`utils.is_safe_child_name()` decides). An object key with a `.` or
   `..` segment is no longer listed.
+- **Names Windows rewrites are refused for a Windows destination.**
+  `utils.is_safe_child_name(name, windows=True)` accepted a name ending in a
+  dot or a space and the reserved device names. Windows stores `report.` as
+  `report`, so `copy(recursive=True)` of a tree holding both merged them into
+  one file with no error, and a member `NUL` of an archive was written to the
+  device.
+  With `windows=True` the function now also refuses a trailing dot or space
+  and `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9` and `LPT1`-`LPT9`, in any case,
+  with or without an extension (`nul.txt`); `windows=False` is unchanged.
+  `copy(recursive=True)`, `PathSyncer` and `rm(recursive=True)` report such a
+  name as a `ValueError` per entry on a Windows-flavoured path, and
+  `unpack_archive()` skips such a member for a Windows destination with a
+  `UserWarning`. Rename a source file with such a name, or extract it on
+  another platform.
 
 ## [0.9.11] - 2026-09-21
 

@@ -16,6 +16,7 @@ import pytest
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
+from pathlib_next.utils.sync import PathSyncer
 
 LocalPath = pathlib_next.LocalPath
 
@@ -300,7 +301,36 @@ def test_unsafe_child_names_rejected_on_every_flavour(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["D:evil.txt", "C:..", "a\\..\\b", "x:stream", ".. ", ". "]
+    "name",
+    [
+        "D:evil.txt",
+        "C:..",
+        "a\\..\\b",
+        "x:stream",
+        ".. ",
+        ". ",
+        # Windows drops a trailing dot or space: "report." is the file "report".
+        "name.",
+        "report.",
+        "a ",
+        "x. .",
+        "...",
+        "trail. ",
+        # A reserved device name, in any case, with or without an extension.
+        "NUL",
+        "nul",
+        "Con",
+        "PRN",
+        "aux",
+        "COM1",
+        "com9",
+        "LPT1",
+        "lpt9",
+        "nul.txt",
+        "NUL.tar.gz",
+        "COM1.log",
+        "nul .txt",
+    ],
 )
 def test_windows_only_unsafe_child_names(name):
     from pathlib_next.utils import is_safe_child_name
@@ -309,7 +339,28 @@ def test_windows_only_unsafe_child_names(name):
     assert not is_safe_child_name(name, windows=True)
 
 
-@pytest.mark.parametrize("name", ["a.txt", ".hidden", "12-00.log", "...x", "name."])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a.txt",
+        ".hidden",
+        "12-00.log",
+        "...x",
+        # Resembling a device name is not being one.
+        "COM0",
+        "COM10",
+        "LPT0",
+        "console",
+        "null",
+        "nullable",
+        "auxiliary.txt",
+        ".nul",
+        "a.nul",
+        "com1x",
+        " nul",
+        "CONIN$",
+    ],
+)
 def test_ordinary_child_names_accepted(name):
     from pathlib_next.utils import is_safe_child_name
 
@@ -516,3 +567,95 @@ def test_rm_of_a_binding_named_directly_removes_the_binding(tmp_path):
     LocalPath(tmp_path / "bind").rm(recursive=True)
     assert not (tmp_path / "bind").exists()
     assert (tmp_path / "target" / "keep.txt").read_text() == "PRECIOUS"
+
+
+# --- names only Windows rewrites ------------------------------------------
+
+
+@pytest.fixture
+def windows_flavoured(monkeypatch):
+    """Every path counts as one read with Windows rules, so the rule runs on
+    any platform against `MemPath`."""
+    from pathlib_next import utils
+
+    monkeypatch.setattr(utils, "is_windows_flavoured", lambda path: True)
+
+
+def _refused(errors):
+    return sorted(str(error) for error in errors if isinstance(error, ValueError))
+
+
+def test_copy_recursive_never_merges_names_windows_rewrites(windows_flavoured):
+    source = MemPath("/rewrite-src")
+    source.mkdir()
+    for name in ("report", "report.", "a ", "nul", "Con.txt", "ok.txt"):
+        (source / name).write_text(f"data:{name}")
+    target = MemPath("/rewrite-dst")
+    errors = []
+
+    source.copy(target, recursive=True, ignore_error=errors.append)
+
+    assert sorted(child.name for child in target.iterdir()) == ["ok.txt", "report"]
+    assert (target / "report").read_text() == "data:report"
+    refused = _refused(errors)
+    assert len(refused) == 4
+    for name in ("report.", "a ", "nul", "Con.txt"):
+        assert any(repr(name) in message for message in refused), name
+
+
+def test_sync_never_merges_names_windows_rewrites(windows_flavoured):
+    source = MemPath("/rewrite-sync-src")
+    source.mkdir()
+    for name in ("report", "report.", "nul", "ok.txt"):
+        (source / name).write_text(f"data:{name}")
+    target = MemPath("/rewrite-sync-dst")
+    errors = []
+
+    PathSyncer(
+        lambda entry: entry.stat.st_size,
+        ignore_error=lambda error, *args: errors.append(error) or True,
+    ).sync(source, target)
+
+    assert sorted(child.name for child in target.iterdir()) == ["ok.txt", "report"]
+    assert (target / "report").read_text() == "data:report"
+    assert len(_refused(errors)) == 2
+
+
+def test_rm_recursive_leaves_names_windows_rewrites(windows_flavoured):
+    tree = MemPath("/rewrite-rm")
+    tree.mkdir()
+    for name in ("ok", "nul", "trail."):
+        (tree / name).write_text(name)
+    errors = []
+
+    tree.rm(
+        recursive=True, ignore_error=lambda error, path: errors.append(error) or True
+    )
+
+    assert sorted(child.name for child in tree.iterdir()) == ["nul", "trail."]
+    refused = _refused(errors)
+    assert len(refused) == 2
+    for name in ("nul", "trail."):
+        assert any(repr(name) in message for message in refused), name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs a Windows file system")
+def test_copy_recursive_to_a_windows_disk_keeps_report_apart_from_report_dot(tmp_path):
+    source = MemPath("/rewrite-disk-src")
+    source.mkdir()
+    (source / "report").write_text("kept")
+    (source / "report.").write_text("dot")
+    (source / "NUL").write_text("nul")
+    dest = tmp_path / "dest"
+    errors = []
+
+    source.copy(
+        pathlib_next.LocalPath(dest),
+        recursive=True,
+        overwrite=True,
+        ignore_error=errors.append,
+    )
+
+    assert sorted(os.listdir(dest)) == ["report"]
+    assert (dest / "report").read_text() == "kept"
+    assert len(_refused(errors)) == 2

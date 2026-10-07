@@ -894,3 +894,73 @@ def test_unpack_splits_a_backslash_name_for_a_windows_destination(
     assert (dest / "a" / "b").read_bytes() == b"one"
     # The escaping one would leave the destination: skipped, nothing written.
     assert not [p for p in dest.iterdir() if p.name.startswith("..")]
+
+
+# --- unpack_archive(): names only Windows rewrites ------------------------
+
+_REWRITTEN_MEMBERS = [
+    ("ok.txt", b"ok"),
+    ("report.txt", b"kept"),
+    ("report.txt.", b"dot"),
+    ("nul", b"nul"),
+    ("dir/CON.log", b"con"),
+    ("trail. ", b"trail"),
+]
+_REWRITTEN_SKIPPED = ["report.txt.", "'nul'", "dir/CON.log", "trail. "]
+
+
+def _unpack_recording(archive, dest):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        unpack_archive(LocalPath(archive), dest)
+    return [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+
+
+@pytest.mark.parametrize("fmt", ["zip", "tar"])
+def test_unpack_skips_names_windows_rewrites_with_a_warning(tmp_path, monkeypatch, fmt):
+    monkeypatch.setattr(archive_module, "is_windows_flavoured", lambda p: True)
+    write = _write_zip if fmt == "zip" else _write_tar
+    archive = write(tmp_path / f"rewrite.{fmt}", _REWRITTEN_MEMBERS)
+    dest = MemPath(f"/rewrite-unpack-{fmt}")
+    dest.mkdir(parents=True)
+
+    messages = _unpack_recording(archive, dest)
+
+    assert sorted(p.name for p in dest.iterdir()) == ["ok.txt", "report.txt"]
+    assert (dest / "report.txt").read_bytes() == b"kept"
+    assert len(messages) == len(_REWRITTEN_SKIPPED)
+    for name in _REWRITTEN_SKIPPED:
+        assert any(name in message for message in messages), name
+
+
+def test_unpack_keeps_names_windows_rewrites_on_a_posix_destination(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(archive_module, "is_windows_flavoured", lambda p: False)
+    archive = _write_tar(tmp_path / "posix.tar", _REWRITTEN_MEMBERS)
+    dest = MemPath("/rewrite-unpack-posix")
+    dest.mkdir(parents=True)
+
+    messages = _unpack_recording(archive, dest)
+
+    assert messages == []
+    assert sorted(p.name for p in dest.iterdir()) == sorted(
+        ["ok.txt", "report.txt", "report.txt.", "nul", "dir", "trail. "]
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs a Windows file system")
+def test_unpack_onto_a_windows_disk_leaves_existing_files_alone(tmp_path):
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "report.txt").write_text("ORIGINAL")
+    archive = _write_zip(
+        tmp_path / "disk.zip",
+        [("report.txt.", b"dot"), ("NUL", b"nul"), ("ok.txt", b"ok")],
+    )
+
+    messages = _unpack_recording(archive, LocalPath(dest))
+
+    assert len(messages) == 2
+    assert sorted(os.listdir(dest)) == ["ok.txt", "report.txt"]
+    assert (dest / "report.txt").read_text() == "ORIGINAL"

@@ -7,7 +7,7 @@ import typing as _ty
 import warnings
 import zipfile
 
-from . import is_safe_child_name, is_windows_flavoured
+from . import _is_safe_name, is_windows_flavoured
 from .stat import FileStat
 
 if _ty.TYPE_CHECKING:
@@ -30,20 +30,24 @@ def _detect_format(name: str, peek: "_ty.Callable[[], bytes] | None" = None) -> 
     return "zip" if magic.startswith(b"PK") else "tar"
 
 
-def _safe_member_parts(name: str, *, windows: bool) -> "list[str] | None":
+def _safe_member_parts(
+    name: str, *, windows: bool, rewrites: bool = True
+) -> "list[str] | None":
     """Split archive member `name` into the parts to join onto the
     extraction directory, or return None when the member must be skipped
     because a part would leave it (`..`, and with `windows=True` a drive
-    such as `D:x` or the drive-relative `C:..`). `/` always splits; a
-    backslash splits only for a Windows destination, the only place it means
-    "separator" -- on POSIX it is an ordinary filename character, and
-    splitting it unconditionally turned one legitimate member into a
-    directory plus a file on every platform. Empty and `.` parts are
-    dropped, so `/abs` and `./x` stay inside."""
+    such as `D:x` or the drive-relative `C:..`) or, with `windows=True` and
+    `rewrites`, because Windows would store a part under another name or send
+    it to a device (`nul`, `trail.`). `/` always splits; a backslash splits
+    only for a Windows destination, the only place it means "separator" -- on
+    POSIX it is an ordinary filename character, and splitting it
+    unconditionally turned one legitimate member into a directory plus a file
+    on every platform. Empty and `.` parts are dropped, so `/abs` and `./x`
+    stay inside."""
     if windows:
         name = name.replace("\\", "/")
     parts = [p for p in name.split("/") if p not in ("", ".")]
-    if not parts or not all(is_safe_child_name(p, windows=windows) for p in parts):
+    if not parts or not all(_is_safe_name(p, windows, rewrites) for p in parts):
         return None
     return parts
 
@@ -153,6 +157,9 @@ def unpack_archive(archive: Path, dest: Path) -> None:
     Operations run stream-first to support any Path implementation.
     Members whose name would land outside `dest` (a `..` part, or on a
     Windows-flavoured `dest` a drive such as `D:x` or `C:..`) are skipped.
+    On a Windows-flavoured `dest` so is a member with a part Windows would
+    store under another name (a trailing dot or space) or send to a device
+    (`NUL`, `CON`, `COM1`, ...), with a `UserWarning` naming it.
     A non-seekable archive stream (e.g. `HttpPath`) is buffered first.
     A tar hard link, or a symlink to a regular file inside the archive, is
     extracted as a regular file with the target member's content (no link
@@ -172,6 +179,21 @@ def unpack_archive(archive: Path, dest: Path) -> None:
     is_zip = _detect_format(archive.name, _peek) == "zip"
     windows = is_windows_flavoured(dest)
 
+    def member_parts(filename: str) -> "list[str] | None":
+        parts = _safe_member_parts(filename, windows=windows)
+        if (
+            parts is None
+            and windows
+            and _safe_member_parts(filename, windows=True, rewrites=False) is not None
+        ):
+            warnings.warn(
+                f"unpack_archive: skipped member {filename!r}: Windows would "
+                "store it under another name or send it to a device",
+                UserWarning,
+                stacklevel=3,
+            )
+        return parts
+
     with archive.open("rb") as raw_in, _Spool() as spool:
         in_f = raw_in
         seekable = getattr(raw_in, "seekable", None)
@@ -185,7 +207,7 @@ def unpack_archive(archive: Path, dest: Path) -> None:
             with zipfile.ZipFile(in_f) as zip_ref:
                 for member in zip_ref.infolist():
                     filename = member.filename
-                    parts = _safe_member_parts(filename, windows=windows)
+                    parts = member_parts(filename)
                     if parts is None:
                         continue
 
@@ -204,7 +226,7 @@ def unpack_archive(archive: Path, dest: Path) -> None:
             with tarfile.open(fileobj=in_f, mode="r") as tar_ref:
                 for member in tar_ref.getmembers():
                     filename = member.name
-                    parts = _safe_member_parts(filename, windows=windows)
+                    parts = member_parts(filename)
                     if parts is None:
                         continue
 

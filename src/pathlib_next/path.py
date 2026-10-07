@@ -1422,7 +1422,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     # key), so one that is not a single component inside
                     # `target` must never be joined onto it: on a Windows
                     # target "C:x" joins to a drive-relative path outside it
-                    # entirely, and so does "a\\b". Reported through
+                    # entirely, and so does "a\\b"; "report." is stored as
+                    # "report", over whatever that file held. Reported through
                     # `ignore_error` like any other per-child failure, not
                     # silently skipped. `PathSyncer` and
                     # `utils.unpack_archive()` apply the same rule per

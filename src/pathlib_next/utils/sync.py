@@ -674,10 +674,10 @@ class PathSyncer(object):
         other raise `ValueError`. Both go through `ignore_error`; a
         tolerated error ends the call without changes. Child names that
         would not stay a single component inside `target` (`..`, a
-        separator or drive on a Windows target) raise `ValueError` the
-        same way, decided on the name as the source or the target listed it,
-        and symlinks found inside `target` are replaced, never written,
-        listed or deleted through.
+        separator, drive, trailing dot or device name on a Windows target)
+        raise `ValueError` the same way, decided on the name as the source
+        or the target listed it, and symlinks found inside `target` are
+        replaced, never written, listed or deleted through.
         """
         _ignore_error = (
             self.ignore_error

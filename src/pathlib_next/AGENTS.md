@@ -163,10 +163,11 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     asked per entry, so one tree can keep one mount and follow another. The
     name matches `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
     a second vocabulary for the same idea. Path components before the final
-    one are followed as usual. A listed name that is not one path component
-    (`utils.is_safe_child_name()`) is never joined onto the directory: it
-    raises `ValueError`, offered to `ignore_error` as `(error, directory)`
-    once per entry, and nothing is removed for it.
+    one are followed as usual. A listed name that `utils.is_safe_child_name()`
+    refuses (`windows=` follows `utils.is_windows_flavoured()` of the
+    directory) is never joined onto it: it raises `ValueError`, offered to
+    `ignore_error` as `(error, directory)` once per entry, and nothing is
+    removed for it.
   - `rename(target)` — stub. Implementations return the new path.
   - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
     object) / `symlink_to(target, target_is_directory=False, *, force=False)`
@@ -186,12 +187,15 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     - The source is opened before the target is touched; a failed stream
       removes the partial target.
     - A recursive copy refuses any child name that would not stay inside
-      `target` — `..`, and `\`/`:`/a trailing dot when the target reads
-      names with Windows rules (`utils.is_windows_flavoured()`). The names
-      come from a listing the destination does not control (an archive, a
-      remote index, an object-store key), and on a Windows target `"C:x"`
-      joins to a drive-relative path outside it. Raised as `ValueError`
-      through `ignore_error`, per child, like any other child failure.
+      `target` — `..`, and when the target reads names with Windows rules
+      (`utils.is_windows_flavoured()`) `\`, `:`, a trailing dot or space, and
+      the reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+      `LPT1`-`LPT9`, with or without an extension). The names come from a
+      listing the destination does not control (an archive, a remote index,
+      an object-store key); on a Windows target `"C:x"` joins to a
+      drive-relative path outside it and `"report."` is stored as `"report"`.
+      Raised as `ValueError` through `ignore_error`, per child, like any other
+      child failure.
     - `follow_symlinks=False` on a symlink recreates the link
       (`NotImplementedError` if either side cannot).
     - `preserve_metadata=True` copies permission bits only, and only a mode the
@@ -701,11 +705,12 @@ class TestMyPath(PathContract):
     `.log(msg, *args)` (INFO on the same logger) is overridable.
   - Safety, all through `ignore_error`: a missing root `source` →
     `FileNotFoundError`; overlapping `source`/`target` (same implementation,
-    and `_same_filesystem()` places them together) → `ValueError`; a child name that would leave `target`
-    (`..`, or `\`/`:` on a Windows target) → `ValueError`, decided on the name
-    as listed, in the source's listing and the target's alike; a symlink inside
-    `target` is replaced, never followed. Listing entries with unknown stats
-    are re-stat'd.
+    and `_same_filesystem()` places them together) → `ValueError`; a child
+    name that would leave `target` (`..`, or on a Windows target `\`, `:`, a
+    trailing dot or space, a device name) → `ValueError`, decided on the name
+    as listed, in the source's listing and the target's alike; a symlink
+    inside `target` is replaced, never followed. Listing entries with unknown
+    stats are re-stat'd.
   - `remove_missing=True` deletes target entries absent from the source. With
     `False`, a non-empty target directory whose source became a file or link
     is kept (`IsADirectoryError`, event `TypeMismatch`).
@@ -743,13 +748,17 @@ class TestMyPath(PathContract):
   a temporary buffer, written to `target` only when complete; zip64 always)
   and `unpack_archive(archive, dest)` (format from the name, else magic
   bytes; creates `dest`; non-seekable streams are buffered; members that
-  would leave `dest` are skipped; tar hard links and links to regular files
-  are extracted as copies, other links skipped with `UserWarning`). Also
-  importable from `pathlib_next.utils`.
+  would leave `dest` are skipped, and for a Windows-flavoured `dest` so are
+  members with a part Windows would rewrite or send to a device
+  (`UserWarning`); tar hard links and links to regular files are extracted as
+  copies, other links skipped with `UserWarning`). Also importable from
+  `pathlib_next.utils`.
 - **`is_safe_child_name(name, *, windows=False) -> bool`** — `False` for a
   non-`str`, `""`, `.`, `..`, or a name containing `/` or NUL; with
-  `windows=True` also `\`, `:`, and names that are empty or dot-only after
-  trailing dots/spaces are stripped. **`is_windows_flavoured(path) -> bool`**
+  `windows=True` also `\`, `:`, a trailing dot or space, and the reserved
+  device names `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` (any
+  case, with or without an extension: `nul.txt`).
+  **`is_windows_flavoured(path) -> bool`**
   — `True` for a `PureWindowsPath` or a path whose `filepath` is one.
 - **`LRU(func, maxsize=128, on_evict=None)`** — thread-safe memoizing cache,
   called like `func`. `on_evict(key_tuple, value)` runs for every dropped
