@@ -496,6 +496,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   It returned success and removed nothing; it now raises `PermissionError`, as
   `S3Path.rmdir()` does for a bucket, and so does a non-recursive `rm()` of the
   root.
+- **A failed `ftp:` listing no longer leaves the cached connection out of step.**
+  `ftplib` reads a directory listing while the listing is iterated, outside the
+  guard that drops a connection on a failed transfer. A name the client could
+  not decode (`UnicodeDecodeError`) or a stalled data connection left the
+  server's final reply queued, and every later `stat()`, `exists()`,
+  `iterdir()` and `walk()` on that thread failed with `ftplib.error_reply`
+  until an unrelated read or write happened to reconnect. A listing is now
+  read whole inside the guard: a failure mid-transfer drops the connection and
+  the next request reconnects, a name that is not valid UTF-8 raises
+  `OSError(EILSEQ)` instead of `UnicodeDecodeError`, and a `4xx` reply to
+  `MLSD` (`425 Can't open data connection`) raises `OSError(EAGAIN)` instead of
+  a raw `ftplib.error_temp`, as it does for a read or a write. Code that
+  caught `UnicodeDecodeError` or `ftplib.error_temp` around a listing must
+  catch `OSError`.
+- **`ftp://host` with no path lists the root.** A path of `""` sent `MLSD`,
+  `NLST`, `RETR`, `STOR`, `DELE`, `MKD`, `RMD` and `SITE CHMOD` with an empty
+  argument, which a server reads as its working directory: the login
+  directory when it is not `/`, and whatever directory an earlier `is_dir()`
+  had changed into (`CWD`) when it is. `ftp://host/` always listed the root.
+  An empty path now sends `/` in every command that takes the path, so both
+  spellings name the same directory.
 
 ## [0.9.11] - 2026-09-21
 

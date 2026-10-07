@@ -9,6 +9,7 @@ import ssl as _ssl
 import stat as _stat
 import threading as _thread
 import time as _time
+import types as _types
 import typing as _ty
 
 import netimps as _netimps
@@ -320,16 +321,37 @@ class FtpPath(UriPath):
                 raise ConnectionError(
                     _errno.ECONNABORTED, f"FTP session failed: {error!r}", str(self)
                 ) from error
+            if isinstance(error, UnicodeDecodeError):
+                raise OSError(
+                    _errno.EILSEQ,
+                    "FTP listing is not valid "
+                    f"{getattr(client, 'encoding', 'utf-8')}: {error}",
+                    str(self),
+                ) from error
             raise
 
     def _call(self, method: str, *args):
         """`client.<method>(*args)` through `_wire()`. Only `error_perm` is
-        left for the caller; a transient `error_temp` becomes OSError."""
+        left for the caller; a transient `error_temp` becomes OSError.
+
+        `FTP.mlsd()` is a generator that runs its transfer while it is
+        iterated, so a listing is read whole here, inside the guard: a
+        failure half way through it evicts the client like any other."""
         try:
             with self._wire() as client:
-                return getattr(client, method)(*args)
+                result = getattr(client, method)(*args)
+                if isinstance(result, _types.GeneratorType):
+                    result = list(result)
+                return result
         except _ftplib.error_temp as error:
             raise OSError(_errno.EAGAIN, str(error), str(self)) from error
+
+    @property
+    def _wirepath(self) -> str:
+        """This path as a command argument. An empty path (`ftp://host`) is
+        the root, as `ftp://host/` is, and an empty argument would name the
+        session's working directory instead."""
+        return self.path or "/"
 
     def _translate(self, error: "_ftplib.error_perm", wrong_type=None) -> OSError:
         """OSError for a refused command on this path. A reply alone cannot
@@ -397,7 +419,7 @@ class FtpPath(UriPath):
         try:
             listing = [
                 (name, self._facts_to_filestat(facts))
-                for name, facts in self._call("mlsd", self.path)
+                for name, facts in self._call("mlsd", self._wirepath)
                 if _is_child_entry(name, facts)
             ]
             if (
@@ -416,7 +438,7 @@ class FtpPath(UriPath):
                 # A missing path, a file, or a refused listing.
                 raise self._translate(error, self._not_a_directory) from error
             try:
-                names = self._call("nlst", self.path)
+                names = self._call("nlst", self._wirepath)
             except _ftplib.error_perm as error:
                 raise self._translate(error, self._not_a_directory) from error
             listing = [
@@ -461,13 +483,13 @@ class FtpPath(UriPath):
         # directory affects nothing).
         try:
             self._call("voidcmd", "TYPE I")
-            size = self._call("size", self.path)
+            size = self._call("size", self._wirepath)
         except _ftplib.error_perm:
             size = None
         if size is not None:
             return FileStat(st_size=size, is_dir=False)
         try:
-            self._call("cwd", self.path)
+            self._call("cwd", self._wirepath)
         except _ftplib.error_perm as error:
             raise FileNotFoundError(self) from error
         return FileStat(is_dir=True)
@@ -476,7 +498,7 @@ class FtpPath(UriPath):
         if mode in ("r", "r+"):
             buf = _io.BytesIO()
             try:
-                self._call("retrbinary", f"RETR {self.path}", buf.write)
+                self._call("retrbinary", f"RETR {self._wirepath}", buf.write)
             except _ftplib.error_perm as error:
                 raise self._translate(error, self._is_a_directory) from error
             if mode == "r+":
@@ -495,7 +517,7 @@ class FtpPath(UriPath):
     def _store(self, cmd: str, fileobj) -> None:
         """Upload `fileobj` with STOR/APPE on a live connection."""
         try:
-            self._call("storbinary", f"{cmd} {self.path}", fileobj)
+            self._call("storbinary", f"{cmd} {self._wirepath}", fileobj)
         except _ftplib.error_perm as error:
             raise self._create_error(error) from error
 
@@ -525,7 +547,7 @@ class FtpPath(UriPath):
 
     def _mkdir(self, mode):
         try:
-            self._call("mkd", self.path)
+            self._call("mkd", self._wirepath)
         except _ftplib.error_perm as error:
             if self.exists():
                 raise FileExistsError(
@@ -535,7 +557,7 @@ class FtpPath(UriPath):
 
     def unlink(self, missing_ok=False):
         try:
-            self._call("delete", self.path)
+            self._call("delete", self._wirepath)
         except _ftplib.error_perm as error:
             translated = self._translate(error, self._is_a_directory)
             if missing_ok and isinstance(translated, FileNotFoundError):
@@ -544,7 +566,7 @@ class FtpPath(UriPath):
 
     def rmdir(self):
         try:
-            self._call("rmd", self.path)
+            self._call("rmd", self._wirepath)
         except _ftplib.error_perm as error:
             raise self._translate(error, self._rmdir_mismatch(error)) from error
 
@@ -569,7 +591,7 @@ class FtpPath(UriPath):
         # parent), matching sftp.py's rename() semantics.
         target = self._rename_target(target)
         try:
-            self._call("rename", self.path, target.path)
+            self._call("rename", self._wirepath, target.path or "/")
         except _ftplib.error_perm as error:
             raise self._translate(error) from error
         # pathlib returns the new path.
@@ -584,7 +606,7 @@ class FtpPath(UriPath):
             raise NotImplementedError("chmod(follow_symlinks=False)")
         mode = _utils.as_mode(mode)
         try:
-            self._call("voidcmd", f"SITE CHMOD {mode:o} {self.path}")
+            self._call("voidcmd", f"SITE CHMOD {mode:o} {self._wirepath}")
         except _ftplib.error_perm as error:
             if _reply_code(error) not in _UNSUPPORTED_REPLIES:
                 translated = self._translate(error)

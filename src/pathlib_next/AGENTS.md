@@ -543,7 +543,14 @@ chained (their text can carry credentials).
     are cached per (backend, source, tls, thread) (LRU of 128, closed on
     eviction), probed with `NOOP` and replaced when dead.
   - Listing/stat use `MLSD` (UTC `modify`; mode from `unix.mode` or the
-    `perm` fact); servers without it fall back to `NLST`/`SIZE`.
+    `perm` fact); servers without it fall back to `NLST`/`SIZE`. A listing is
+    read whole inside the guarded call: a transient `4xx` reply is
+    `OSError(EAGAIN)`, a name the client cannot decode is `OSError(EILSEQ)`,
+    and a listing that dies mid-transfer drops the connection, so the next
+    request reconnects.
+  - An empty path (`ftp://host`) is the root, as `ftp://host/` is: `/` is
+    sent in every command that takes a path, never an empty argument (which a
+    server reads as its working directory).
   - Reads download the whole file into memory; `"w"`/`"x"`/`"a"` (`APPE`)/
     `"r+"` buffer in memory and upload on close (`"x"` checks then writes).
   - `rename()` on the same server. `chmod()` via `SITE CHMOD`

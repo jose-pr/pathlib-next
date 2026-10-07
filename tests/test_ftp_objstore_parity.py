@@ -576,3 +576,123 @@ def test_s3_rplus_writes_land(moto_s3):
         f.seek(0, io.SEEK_END)
         f.write("!")
     assert p.read_text() == "Jello!"
+
+
+# --- a listing runs inside the guarded call ------------------------------------
+
+
+def _latin1_listing(handler):
+    """Make the server send MLSD names as latin-1 bytes, which the client
+    (utf-8) cannot decode."""
+    from pyftpdlib.filesystems import AbstractedFS
+
+    class LatinFS(AbstractedFS):
+        def format_mlsx(self, *args, **kwargs):
+            for line in super().format_mlsx(*args, **kwargs):
+                yield line.replace("é".encode("utf-8"), b"\xe9")
+
+    handler.abstracted_fs = LatinFS
+
+
+def test_ftp_failed_listing_raises_oserror_and_the_next_request_reconnects(
+    ftp_factory,
+):
+    url, handler, root = ftp_factory()
+    (root / "legacy").mkdir()
+    (root / "legacy" / "café.txt").write_bytes(b"x")
+    (root / "ok.txt").write_bytes(b"content-f")
+    _latin1_listing(handler)
+    backend = FtpBackend(timeout=5)
+    ok = FtpPath(f"{url}ok.txt", backend=backend)
+    assert ok.stat().st_size == 9
+    assert handler.connections == 1
+
+    with pytest.raises(OSError) as raised:
+        list(FtpPath(f"{url}legacy", backend=backend).iterdir())
+    assert raised.value.errno == errno.EILSEQ
+
+    # The queued reply of the dead transfer was not left for the next command:
+    # the client was dropped, and this request went out on a new connection.
+    assert ok.stat().st_size == 9
+    assert handler.connections == 2
+    assert ok.exists()
+    assert ok.is_file()
+    assert [p.name for p in ok.parent.iterdir() if p.name == "ok.txt"] == ["ok.txt"]
+    assert handler.connections == 2
+
+
+def test_ftp_listing_refused_with_a_4xx_is_a_transient_oserror(ftp_factory):
+    url, handler, _root = ftp_factory()
+
+    def refuse(self, path=None):
+        self.respond("425 Can't open data connection.")
+
+    handler.ftp_MLSD = refuse
+    backend = FtpBackend(timeout=5)
+    directory = FtpPath(f"{url}d", backend=backend)
+    with pytest.raises(OSError) as raised:
+        list(directory.iterdir())
+    assert raised.value.errno == errno.EAGAIN
+    with pytest.raises(OSError) as raised:
+        (directory / "f.txt").stat()
+    assert raised.value.errno == errno.EAGAIN
+    assert not (directory / "f.txt").exists()
+    # A complete reply leaves the control channel in step.
+    assert handler.connections == 1
+
+
+@pytest.mark.parametrize("mlsd", [True, False])
+def test_ftp_bare_host_is_the_root_whatever_the_working_directory(
+    ftp_factory, monkeypatch, mlsd
+):
+    url, handler, root = ftp_factory(mlsd=mlsd)
+    sent = []
+    base_cls = ftplib.FTP
+
+    class Recorder(base_cls):
+        def putline(self, line):
+            sent.append(line)
+            return super().putline(line)
+
+    monkeypatch.setattr(ftplib, "FTP", Recorder)
+    backend = FtpBackend(timeout=5)
+    bare = FtpPath(url.rstrip("/"), backend=backend)
+    assert bare.path == ""
+    # Moves the session's working directory (always without MLSD).
+    assert (bare / "d" / "sub").is_dir()
+    assert sorted(p.path for p in bare.iterdir()) == ["/d"]
+    assert sorted(p.path for p in FtpPath(url, backend=backend).iterdir()) == ["/d"]
+
+    for operation in (
+        bare.read_bytes,
+        lambda: bare.write_bytes(b"x"),
+        bare.unlink,
+        bare.rmdir,
+        bare.mkdir,
+        lambda: list(bare.glob("*")),
+        lambda: list(bare.walk()),
+    ):
+        try:
+            operation()
+        except Exception:
+            pass
+    takes_a_path = {
+        "MLSD",
+        "NLST",
+        "CWD",
+        "RETR",
+        "STOR",
+        "APPE",
+        "DELE",
+        "RMD",
+        "MKD",
+        "SIZE",
+    }
+    arguments = [
+        (line.partition(" ")[0], line.partition(" ")[2].strip())
+        for line in sent
+        if line.partition(" ")[0] in takes_a_path
+    ]
+    assert arguments
+    assert [verb for verb, argument in arguments if not argument] == []
+    assert ("MLSD" if mlsd else "NLST", "/") in arguments
