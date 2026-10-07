@@ -621,22 +621,17 @@ def test_sync_never_merges_names_windows_rewrites(windows_flavoured):
     assert len(_refused(errors)) == 2
 
 
-def test_rm_recursive_leaves_names_windows_rewrites(windows_flavoured):
+def test_rm_recursive_removes_names_its_own_listing_returned(windows_flavoured):
+    # The Windows rewrite rule is for a name arriving from elsewhere; a name a
+    # directory listed itself is removed like any other (`aux.c` is a file).
     tree = MemPath("/rewrite-rm")
     tree.mkdir()
-    for name in ("ok", "nul", "trail."):
+    for name in ("ok", "aux.c", "trail."):
         (tree / name).write_text(name)
-    errors = []
 
-    tree.rm(
-        recursive=True, ignore_error=lambda error, path: errors.append(error) or True
-    )
+    tree.rm(recursive=True)
 
-    assert sorted(child.name for child in tree.iterdir()) == ["nul", "trail."]
-    refused = _refused(errors)
-    assert len(refused) == 2
-    for name in ("nul", "trail."):
-        assert any(repr(name) in message for message in refused), name
+    assert not tree.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="needs a Windows file system")

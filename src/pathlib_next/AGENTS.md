@@ -163,11 +163,11 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     asked per entry, so one tree can keep one mount and follow another. The
     name matches `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
     a second vocabulary for the same idea. Path components before the final
-    one are followed as usual. A listed name that `utils.is_safe_child_name()`
-    refuses (`windows=` follows `utils.is_windows_flavoured()` of the
-    directory) is never joined onto it: it raises `ValueError`, offered to
-    `ignore_error` as `(error, directory)` once per entry, and nothing is
-    removed for it.
+    one are followed as usual. A listed name that is not one path component
+    (`utils.is_safe_child_name()` with `windows=False`: the names come from
+    the directory's own listing) is never joined onto it: it raises
+    `ValueError`, offered to `ignore_error` as `(error, directory)` once per
+    entry, and nothing is removed for it.
   - `rename(target)` — stub. Implementations return the new path.
   - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
     object) / `symlink_to(target, target_is_directory=False, *, force=False)`

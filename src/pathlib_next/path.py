@@ -1104,13 +1104,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 _handle(error, path)
                 return
 
-            windows = _utils.is_windows_flavoured(path)
             for name, child_stat in entries:
                 child = None
                 try:
                     # The name decides what is removed, so it is checked
-                    # before any child is built from it.
-                    if not _utils.is_safe_child_name(name, windows=windows):
+                    # before any child is built from it. Only the
+                    # one-component rule: a name this directory listed is not
+                    # rewritten by the platform that listed it.
+                    if not _utils.is_safe_child_name(name):
                         raise ValueError(
                             f"refusing unsafe child name {name!r} under {path}"
                         )

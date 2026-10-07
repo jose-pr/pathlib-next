@@ -46,8 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   With `windows=True` the function now also refuses a trailing dot or space
   and `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9` and `LPT1`-`LPT9`, in any case,
   with or without an extension (`nul.txt`); `windows=False` is unchanged.
-  `copy(recursive=True)`, `PathSyncer` and `rm(recursive=True)` report such a
-  name as a `ValueError` per entry on a Windows-flavoured path, and
+  `copy(recursive=True)` and `PathSyncer` report such a name as a
+  `ValueError` per entry for a Windows-flavoured target, and
   `unpack_archive()` skips such a member for a Windows destination with a
   `UserWarning`. Rename a source file with such a name, or extract it on
   another platform.
