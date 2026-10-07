@@ -467,6 +467,9 @@ class PathSyncer(object):
     link that already has the same raw target string (and, on a Windows
     target, the same file/directory link kind) is left alone. A directory
     link is created as one (`target_is_directory`), which Windows requires.
+    A symlink or a binding (`Path.is_dir_binding()`: a Windows junction, a
+    mount point) found inside the target, below its root, is replaced by a
+    real directory and never listed, written or deleted through.
 
     `remove_missing=False` never deletes a non-empty target directory: when
     the source entry became a file or a symlink, replacing that directory
@@ -713,7 +716,12 @@ class PathSyncer(object):
         separator, drive, trailing dot or device name on a Windows target)
         raise `ValueError` the same way, decided on the name as the source
         or the target listed it, and symlinks found inside `target` are
-        replaced, never written, listed or deleted through.
+        replaced, never written, listed or deleted through. So is a binding
+        below the root (`Path.is_dir_binding()`: a junction or a mount
+        point), which is another tree's second name: its own entry is
+        removed with `rmdir()`, which fails on a live mount, and the
+        failure goes through `ignore_error` with nothing written or removed
+        behind it. The root `target` the caller named is used as given.
         """
         _ignore_error = (
             self.ignore_error
@@ -950,17 +958,28 @@ class PathSyncer(object):
             # A symlink inside the destination is replaced by a real
             # directory: listing, writing or removing through it would act
             # on whatever it points at. unlink() removes only the link.
-            # Any other non-directory (a FIFO, socket or device) is replaced
-            # the same way.
-            if (target.is_symlink() and not root) or (
-                target.exists() and not target.is_dir() and not target.is_symlink()
+            # A binding (junction, mount point) is another tree's second
+            # name and is replaced the same way; rmdir() removes the binding
+            # itself and fails on a live mount. Any other non-directory (a
+            # FIFO, socket or device) is replaced the same way. The root
+            # target is the caller's choice and is used as given.
+            binding = (
+                not root
+                and target.is_dir()
+                and not target.is_symlink()
+                and target.path.is_dir_binding()
+            )
+            if (
+                (target.is_symlink() and not root)
+                or binding
+                or (target.exists() and not target.is_dir() and not target.is_symlink())
             ):
                 if self.hook(
                     source,
                     target,
                     SyncEvent.TypeMismatch,
                     dry_run,
-                    lambda: target.path.unlink(),
+                    target.path.rmdir if binding else target.path.unlink,
                     _ignore_error,
                 ):
                     return

@@ -1044,3 +1044,152 @@ def test_policy_receives_entries_when_the_root_stat_fails(denied):
     assert isinstance(source, PathAndStat) and isinstance(target, PathAndStat)
     assert (source if denied == "source" else target).path == broken
     assert (source if denied == "source" else target).stat is None
+
+
+# --- a binding inside the target is replaced, never listed or written through
+
+
+def _junction(target, link):
+    """A Windows junction at `link` naming `target`, both under tmp_path."""
+    import _winapi
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+@pytest.mark.parametrize("remove_missing", [True, False])
+def test_junction_in_target_is_replaced_and_what_it_names_is_untouched(
+    tmp_path, remove_missing
+):
+    outside = tmp_path / "outside"
+    _write(outside / "unrelated.txt", "unrelated")
+    src = tmp_path / "src"
+    _write(src / "sub" / "new.txt", "new")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    _junction(outside, dst / "sub")
+    events, hook = _events()
+
+    PathSyncer(_size, remove_missing=remove_missing, hook=hook).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
+
+    assert (outside / "unrelated.txt").read_text() == "unrelated"
+    assert sorted(p.name for p in outside.iterdir()) == ["unrelated.txt"]
+    assert not pathlib_next.LocalPath(dst / "sub").is_junction()
+    assert (dst / "sub" / "new.txt").read_text() == "new"
+    mismatches = [t for e, _, t, _ in events if e is SyncEvent.TypeMismatch]
+    assert mismatches == [str(dst / "sub")]
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+def test_dry_run_leaves_a_junction_in_target_and_reports_its_replacement(tmp_path):
+    outside = tmp_path / "outside"
+    _write(outside / "unrelated.txt", "unrelated")
+    src = tmp_path / "src"
+    _write(src / "sub" / "new.txt", "new")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    _junction(outside, dst / "sub")
+    dry_events, dry_hook = _events()
+    real_events, real_hook = _events()
+
+    PathSyncer(_size, remove_missing=True, hook=dry_hook).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst), dry_run=True
+    )
+
+    assert pathlib_next.LocalPath(dst / "sub").is_junction()
+    assert sorted(p.name for p in outside.iterdir()) == ["unrelated.txt"]
+    PathSyncer(_size, remove_missing=True, hook=real_hook).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
+    assert _mutations(dry_events) == _mutations(real_events)
+    assert sorted(p.name for p in outside.iterdir()) == ["unrelated.txt"]
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+def test_junction_missing_from_source_is_removed_without_emptying_what_it_names(
+    tmp_path,
+):
+    outside = tmp_path / "outside"
+    _write(outside / "unrelated.txt", "unrelated")
+    src = tmp_path / "src"
+    _write(src / "keep.txt", "keep")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    _junction(outside, dst / "gone")
+
+    PathSyncer(_size, remove_missing=True).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
+
+    assert not (dst / "gone").exists()
+    assert (outside / "unrelated.txt").read_text() == "unrelated"
+
+
+@pytest.fixture
+def mount_named_mounted(monkeypatch):
+    """`is_mount()` answers True for a directory called `mounted`; creating a
+    real mount point needs privileges."""
+    real_is_mount = pathlib_next.LocalPath.is_mount
+
+    def fake_is_mount(self):
+        return self.name == "mounted" or real_is_mount(self)
+
+    monkeypatch.setattr(pathlib_next.LocalPath, "is_mount", fake_is_mount)
+
+
+def test_mount_point_in_target_is_not_synced_into(tmp_path, mount_named_mounted):
+    # rmdir() of a live mount point fails, so the replacement is refused and
+    # reported; nothing is written into or removed from the mounted tree.
+    src = tmp_path / "src"
+    _write(src / "mounted" / "new.txt", "new")
+    _write(src / "own.txt", "own")
+    dst = tmp_path / "dst"
+    _write(dst / "mounted" / "theirs.txt", "NOT MINE")
+    _write(dst / "mounted" / "deep" / "more.txt", "NOT MINE EITHER")
+    calls, ignore = _collect()
+
+    PathSyncer(_size, remove_missing=True, ignore_error=ignore).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
+
+    assert sorted(p.name for p in (dst / "mounted").iterdir()) == ["deep", "theirs.txt"]
+    assert (dst / "mounted" / "theirs.txt").read_text() == "NOT MINE"
+    assert (dst / "mounted" / "deep" / "more.txt").read_text() == "NOT MINE EITHER"
+    assert (dst / "own.txt").read_text() == "own"
+    assert len(calls) == 1
+    error, source_entry, target_entry, event = calls[0]
+    assert isinstance(error, OSError)
+    assert event is SyncEvent.TypeMismatch
+    assert target_entry.path == pathlib_next.LocalPath(dst / "mounted")
+
+
+def test_mount_point_in_target_raises_by_default_and_keeps_its_content(
+    tmp_path, mount_named_mounted
+):
+    src = tmp_path / "src"
+    _write(src / "mounted" / "new.txt", "new")
+    dst = tmp_path / "dst"
+    _write(dst / "mounted" / "theirs.txt", "NOT MINE")
+
+    with pytest.raises(OSError):
+        PathSyncer(_size, remove_missing=True).sync(
+            pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+        )
+
+    assert sorted(p.name for p in (dst / "mounted").iterdir()) == ["theirs.txt"]
+
+
+def test_root_target_that_is_a_mount_point_is_used_as_given(
+    tmp_path, mount_named_mounted
+):
+    src = tmp_path / "src"
+    _write(src / "new.txt", "new")
+    dst = tmp_path / "mounted"
+    _write(dst / "theirs.txt", "theirs")
+
+    PathSyncer(_size).sync(pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst))
+
+    assert (dst / "new.txt").read_text() == "new"
+    assert (dst / "theirs.txt").read_text() == "theirs"

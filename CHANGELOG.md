@@ -289,6 +289,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reading `source.path` or `source.stat` raised `AttributeError` and hid the
   real error. Both arguments are now always `PathAndStat` (with an unknown
   `stat` when the stat is what failed).
+- **`PathSyncer` no longer lists, writes or deletes through a junction or a
+  mount point inside the target.** A symlink found below the root `target`
+  was replaced, but a Windows junction (or a POSIX mount point) looks like an
+  ordinary directory, so `remove_missing=True` removed the files of the
+  directory it names and wrote the source's files into it, while `rm()`
+  already refused to. A directory binding below the root (`is_dir_binding()`)
+  is now treated like a symlink: it is replaced by a real directory
+  (`SyncEvent.TypeMismatch`, `rmdir()` removes the junction and nothing
+  behind it). A live mount point cannot be removed: the `OSError` goes
+  through `ignore_error` and nothing is written into or removed from the
+  mounted tree. A target that holds a mount point where the source has a
+  directory now fails, or needs `ignore_error`, instead of syncing into the
+  mounted filesystem. The `target` passed to `sync()` is the caller's choice
+  and is used as given, binding or not.
 
 ## [0.9.11] - 2026-09-21
 
