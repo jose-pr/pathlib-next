@@ -190,6 +190,11 @@ loop bridges it to the synchronous API).
   `key/`, `mkdir()` writes a zero-byte `key/` marker, and `rmdir()` requires an
   empty prefix. A key that is both an object and a prefix is the object. A
   trailing `/` in the URI is dropped from the key.
+- A prefix that holds keys a directory walk does not reach (an empty, `.` or
+  `..` segment, the subtree under a key that is also an object, a `name/`
+  key that holds data) cannot be copied, moved or removed recursively: the
+  call raises `OSError` naming the keys and changes nothing. A write or
+  `rename()` onto a prefix directory raises `IsADirectoryError`.
 - Writes are uploaded on close; `open("x")` is a conditional create (an S3
   upload above 5 GiB checks first, then writes); append mode is not
   supported; writes below a missing "directory" succeed.

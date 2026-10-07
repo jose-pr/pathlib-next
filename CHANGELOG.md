@@ -459,6 +459,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `tarfile.ReadError`, as a listing and a member's `exists()` do. `mkdir()` of
   the root of a missing archive raises `FileNotFoundError`; an archive is
   still created by writing its first member.
+- **`move()` of an object-store prefix no longer deletes keys it did not copy,
+  and a recursive copy no longer leaves them behind.** On `s3:`, `gs:` and
+  `az:` a move copies by walking the prefix one level at a time and then
+  removes everything under it with a flat listing. Keys the walk cannot reach
+  were deleted without being copied: a key with an empty, `.` or `..` segment
+  (`d//y.txt`), the subtree under a key that is also an object (`d/logs` and
+  `d/logs/2026.txt`), and a `name/` key that holds data. `copy(recursive=True)`
+  skipped the same keys without a word. `copy(recursive=True)`, `move()` and
+  `rm(recursive=True)` of a prefix that holds such keys now raise
+  `OSError(EINVAL)` naming them and change nothing (a copy writes nothing, a
+  move leaves the source whole). `rm(recursive=True, ignore_error=...)` is
+  offered the error and, if it is ignored, removes only the keys a walk
+  reaches. Remove the named keys first, or `unlink()` the object that hides a
+  subtree, and repeat. A prefix of ordinary keys is unchanged, down to the one
+  batched delete. `iterdir()` and `walk()` are unchanged.
+- **On `az:` a name that is both a blob and a prefix lists as the blob.** The
+  SDK returns every prefix of a page before its blobs, so the prefix won, the
+  blob's content was neither listed nor copied, and `stat()` disagreed with the
+  listing. `iterdir()`, `walk()` and `copy(recursive=True)` now show the blob,
+  as `s3:` and `gs:` do.
+- **Writing or renaming a file onto an object-store prefix directory is
+  refused.** `write_bytes()` on `d` while `d/x.txt` existed stored an object
+  `d` that every listing then showed instead of the directory, and
+  `rename()` of a file onto `dst` did the same, leaving the keys below it
+  unreachable by `iterdir()`, `walk()`, `copy()` and `sync`. Both now raise
+  `IsADirectoryError` on `s3:`, `gs:` and `az:`, at the cost of one list
+  request per `open("w")` and `rename()`; credentials that may write but not
+  list are not stopped. Remove the directory (`rm(recursive=True)`) first.
+- **`mkdir()` no longer writes a marker when its existence probe fails.** The
+  object stores asked `exists()`, which reads any error as "missing", so a 403,
+  a 503 or a timeout on the probe wrote `existing.txt/` beside the object
+  `existing.txt` and returned. The probe is now `stat()`, only a not-found
+  answer means absent, and any other error is raised with nothing written.
+- **`rmdir()` of a `gs:` bucket root or an `az:` container root is refused.**
+  It returned success and removed nothing; it now raises `PermissionError`, as
+  `S3Path.rmdir()` does for a bucket, and so does a non-recursive `rm()` of the
+  root.
 
 ## [0.9.11] - 2026-09-21
 

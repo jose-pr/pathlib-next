@@ -10,6 +10,7 @@ from ... import utils as _utils
 from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
+from . import _objstore as _store
 
 
 class BaseAzBackend(object):
@@ -318,9 +319,20 @@ class AzPath(UriPath):
             # pathlib's iterdir() refuses. Only an empty listing pays this.
             if not self.stat().is_dir():
                 raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+        # A key that is both a blob and a prefix (`x` and `x/y`) lists as the
+        # blob, agreeing with stat()'s exact-blob precedence; the subtree
+        # under it is not listed. The SDK returns every prefix of a page
+        # before its blobs, so the blobs are collected first.
+        blobs = {
+            item.name[len(prefix) :]
+            for item in items
+            if not isinstance(item, BlobPrefix)
+        }
         for item in items:
             if isinstance(item, BlobPrefix):
                 name = item.name[len(prefix) :].rstrip("/")
+                if name in blobs:
+                    continue
                 # A blob name segment is whatever its writer chose: "..", "."
                 # or an embedded "/" must not become a child path.
                 if _utils.is_safe_child_name(name) and name not in seen:
@@ -364,7 +376,23 @@ class AzPath(UriPath):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
+        if mode == "w" and self._holds_keys(self.key):
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _AzWriteStream(self, exclusive=(mode == "x"))
+
+    def _holds_keys(self, key: str) -> bool:
+        """Whether any blob lies under the prefix `key/`: a write or rename
+        onto it would hide those blobs behind one. Credentials that may write
+        but not list cannot ask, and are not stopped."""
+        if not key:
+            return False
+        try:
+            with _translate_errors(self):
+                for _ in self._container.list_blobs(name_starts_with=f"{key}/"):
+                    return True
+        except PermissionError:
+            pass
+        return False
 
     def _upload(self, data: bytes, *, key=None, exclusive=False) -> None:
         blob_client = self._container.get_blob_client(self.key if key is None else key)
@@ -374,7 +402,12 @@ class AzPath(UriPath):
             blob_client.upload_blob(data, overwrite=not exclusive)
 
     def _mkdir(self, mode):
-        if self.exists():
+        # stat(), not exists(): a failed probe must not read as "missing".
+        try:
+            self.stat()
+        except FileNotFoundError:
+            pass
+        else:
             raise FileExistsError(self)
         self._upload(b"", key=f"{self.key}/", exclusive=True)
 
@@ -400,6 +433,10 @@ class AzPath(UriPath):
     def rmdir(self):
         if not self.stat().is_dir():
             raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+        if not self.key:
+            raise PermissionError(
+                _errno.EACCES, "removing a container is not supported", str(self)
+            )
         marker = f"{self.key}/"
         count = 0
         with _translate_errors(self):
@@ -464,15 +501,23 @@ class AzPath(UriPath):
         if not keys:
             marker = f"{self.key}/"
             try:
-                with _translate_errors(self):
-                    keys.extend(
-                        blob.name
-                        for blob in self._container.list_blobs(name_starts_with=marker)
-                    )
+                entries = self._flat_entries(marker)
             except Exception as error:
                 if not on_error(error):
                     raise
                 return
+            keys = [key for key, _size in entries]
+            # What a walk of the directory would not visit is not removed
+            # with it: a move copies by walking and then removes this set.
+            unreachable = _store.unreachable_keys(marker, entries)
+            if unreachable:
+                error = _store.refusal(self, "remove", unreachable)
+                if not on_error(error):
+                    raise error
+                skipped = set(unreachable)
+                keys = [key for key in keys if key not in skipped]
+                if not keys:
+                    return
 
         if not keys:
             if missing_ok:
@@ -501,6 +546,47 @@ class AzPath(UriPath):
             return
 
         self._delete_each(keys, on_error)
+
+    def _flat_entries(self, prefix: str) -> "list[tuple[str, int]]":
+        """`(name, size)` of every blob under `prefix`, with no delimiter."""
+        with _translate_errors(self):
+            return [
+                (blob.name, blob.size or 0)
+                for blob in self._container.list_blobs(name_starts_with=prefix)
+            ]
+
+    def _unreachable_keys(self) -> "list[str]":
+        """The names under this prefix directory that a walk does not reach,
+        or `[]` for a blob or a missing path."""
+        key = self.key
+        if key and self._properties(key) is not None:
+            return []
+        prefix = f"{key}/" if key else ""
+        return _store.unreachable_keys(prefix, self._flat_entries(prefix))
+
+    def copy(
+        self,
+        target,
+        *,
+        overwrite=False,
+        follow_symlinks=True,
+        preserve_metadata=True,
+        recursive=False,
+        ignore_error=None,
+        progress=None,
+    ):
+        # A prefix is copied by walking it; one that holds keys the walk
+        # cannot reach is refused up front rather than copied incompletely.
+        with _store.checked_copy(self, recursive):
+            return super().copy(
+                target,
+                overwrite=overwrite,
+                follow_symlinks=follow_symlinks,
+                preserve_metadata=preserve_metadata,
+                recursive=recursive,
+                ignore_error=ignore_error,
+                progress=progress,
+            )
 
     def _delete_each(self, keys, on_error, *, ignore_missing=False):
         for key in keys:
@@ -539,6 +625,8 @@ class AzPath(UriPath):
             self._pop_stat_hint()
             self.stat()
             raise NotImplementedError(f"rename() of the prefix directory {self}")
+        if self._holds_keys(dest_key):
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
         source_blob_client = self._container.get_blob_client(self.key)
         source_url = source_blob_client.url
         dest_blob_client = self._container.get_blob_client(dest_key)

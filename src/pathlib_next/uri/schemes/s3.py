@@ -12,6 +12,7 @@ from ... import utils as _utils
 from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
+from . import _objstore as _store
 
 try:
     from boto3.exceptions import S3UploadFailedError as _S3UploadFailedError
@@ -407,7 +408,26 @@ class S3Path(UriPath):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
+        if mode == "w" and self._holds_keys(self.key):
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _S3WriteStream(self, exclusive=(mode == "x"))
+
+    def _holds_keys(self, key: str) -> bool:
+        """Whether any key lies under the prefix `key/`: a write or rename
+        onto it would hide those keys behind an object. Credentials that may
+        write but not list cannot ask, and are not stopped."""
+        if not key:
+            return False
+        try:
+            resp = self._client.list_objects_v2(
+                Bucket=self.bucket, Prefix=f"{key}/", MaxKeys=1
+            )
+        except _S3_ERRORS as error:
+            translated = _oserror(error, self)
+            if isinstance(translated, PermissionError):
+                return False
+            raise translated from error
+        return resp.get("KeyCount", 0) > 0
 
     def _put_exclusive(self, body, key=None) -> bool:
         """PutObject that creates `key` (default: this path's) only if it
@@ -431,7 +451,12 @@ class S3Path(UriPath):
         return True
 
     def _mkdir(self, mode):
-        if self.exists():
+        # stat(), not exists(): a failed probe must not read as "missing".
+        try:
+            self.stat()
+        except FileNotFoundError:
+            pass
+        else:
             raise FileExistsError(self)
         marker = f"{self.key}/"
         if not self._put_exclusive(b"", key=marker):
@@ -521,15 +546,25 @@ class S3Path(UriPath):
                 return
         if not keys:
             marker = f"{self.key}/" if self.key else ""
-            paginator = self._client.get_paginator("list_objects_v2")
             try:
-                for page in paginator.paginate(Bucket=self.bucket, Prefix=marker):
-                    keys.extend(obj["Key"] for obj in page.get("Contents", []))
+                entries = list(self._flat_entries(marker))
             except _S3_ERRORS as error:
                 translated = _oserror(error, self)
                 if not on_error(translated):
                     raise translated from error
                 return
+            keys = [key for key, _size in entries]
+            # What a walk of the directory would not visit is not removed
+            # with it: a move copies by walking and then removes this set.
+            unreachable = _store.unreachable_keys(marker, entries)
+            if unreachable:
+                error = _store.refusal(self, "remove", unreachable)
+                if not on_error(error):
+                    raise error
+                skipped = set(unreachable)
+                keys = [key for key in keys if key not in skipped]
+                if not keys:
+                    return
 
         if not keys:
             if missing_ok:
@@ -559,6 +594,57 @@ class S3Path(UriPath):
                 if not on_error(error):
                     raise
 
+    def _flat_entries(self, prefix: str):
+        """`(key, size)` of every object under `prefix`, with no delimiter."""
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                yield obj["Key"], obj.get("Size", 0) or 0
+
+    def _unreachable_keys(self) -> "list[str]":
+        """The keys of this prefix directory that a walk does not reach, or
+        `[]` for an object or a missing path."""
+        key = self.key
+        if key:
+            try:
+                self._client.head_object(Bucket=self.bucket, Key=key)
+                return []
+            except _S3_ERRORS as error:
+                if not (
+                    isinstance(error, _botoexc.ClientError) and _is_not_found(error)
+                ):
+                    raise _oserror(error, self) from error
+        prefix = f"{key}/" if key else ""
+        try:
+            entries = list(self._flat_entries(prefix))
+        except _S3_ERRORS as error:
+            raise _oserror(error, self) from error
+        return _store.unreachable_keys(prefix, entries)
+
+    def copy(
+        self,
+        target,
+        *,
+        overwrite=False,
+        follow_symlinks=True,
+        preserve_metadata=True,
+        recursive=False,
+        ignore_error=None,
+        progress=None,
+    ):
+        # A prefix is copied by walking it; one that holds keys the walk
+        # cannot reach is refused up front rather than copied incompletely.
+        with _store.checked_copy(self, recursive):
+            return super().copy(
+                target,
+                overwrite=overwrite,
+                follow_symlinks=follow_symlinks,
+                preserve_metadata=preserve_metadata,
+                recursive=recursive,
+                ignore_error=ignore_error,
+                progress=progress,
+            )
+
     def rename(self, target: "S3Path | Uri | str"):
         target = self._rename_target(target)
         dest_key = _object_key(target.path)
@@ -580,6 +666,8 @@ class S3Path(UriPath):
             self._pop_stat_hint()
             self.stat()
             raise NotImplementedError(f"rename() of the prefix directory {self}")
+        if self._holds_keys(dest_key):
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
         extra = {}
         storage_class = head.get("StorageClass")
         if storage_class and storage_class != "STANDARD":

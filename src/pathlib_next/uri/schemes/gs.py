@@ -9,6 +9,7 @@ from ... import utils as _utils
 from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
+from . import _objstore as _store
 
 
 class BaseGsBackend(object):
@@ -288,7 +289,23 @@ class GsPath(UriPath):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
+        if mode == "w" and self._holds_keys(self.key):
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _GsWriteStream(self, exclusive=(mode == "x"))
+
+    def _holds_keys(self, key: str) -> bool:
+        """Whether any object lies under the prefix `key/`: a write or rename
+        onto it would hide those objects behind one. Credentials that may
+        write but not list cannot ask, and are not stopped."""
+        if not key:
+            return False
+        try:
+            with _translate_errors(self):
+                for _ in self._bucket.list_blobs(prefix=f"{key}/", max_results=1):
+                    return True
+        except PermissionError:
+            pass
+        return False
 
     def _upload(self, data: bytes, *, key=None, exclusive=False) -> None:
         blob = self._bucket.blob(self.key if key is None else key)
@@ -301,7 +318,12 @@ class GsPath(UriPath):
                 blob.upload_from_string(data)
 
     def _mkdir(self, mode):
-        if self.exists():
+        # stat(), not exists(): a failed probe must not read as "missing".
+        try:
+            self.stat()
+        except FileNotFoundError:
+            pass
+        else:
             raise FileExistsError(self)
         self._upload(b"", key=f"{self.key}/", exclusive=True)
 
@@ -327,6 +349,10 @@ class GsPath(UriPath):
     def rmdir(self):
         if not self.stat().is_dir():
             raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
+        if not self.key:
+            raise PermissionError(
+                _errno.EACCES, "removing a bucket is not supported", str(self)
+            )
         marker = f"{self.key}/"
         with _translate_errors(self):
             for blob in self._bucket.list_blobs(prefix=marker, max_results=2):
@@ -386,14 +412,23 @@ class GsPath(UriPath):
         if not keys:
             marker = f"{self.key}/"
             try:
-                with _translate_errors(self):
-                    keys.extend(
-                        blob.name for blob in self._bucket.list_blobs(prefix=marker)
-                    )
+                entries = self._flat_entries(marker)
             except Exception as error:
                 if not on_error(error):
                     raise
                 return
+            keys = [key for key, _size in entries]
+            # What a walk of the directory would not visit is not removed
+            # with it: a move copies by walking and then removes this set.
+            unreachable = _store.unreachable_keys(marker, entries)
+            if unreachable:
+                error = _store.refusal(self, "remove", unreachable)
+                if not on_error(error):
+                    raise error
+                skipped = set(unreachable)
+                keys = [key for key in keys if key not in skipped]
+                if not keys:
+                    return
 
         if not keys:
             if missing_ok:
@@ -411,6 +446,47 @@ class GsPath(UriPath):
                 if not on_error(error):
                     raise
 
+    def _flat_entries(self, prefix: str) -> "list[tuple[str, int]]":
+        """`(name, size)` of every object under `prefix`, with no delimiter."""
+        with _translate_errors(self):
+            return [
+                (blob.name, blob.size or 0)
+                for blob in self._bucket.list_blobs(prefix=prefix)
+            ]
+
+    def _unreachable_keys(self) -> "list[str]":
+        """The names under this prefix directory that a walk does not reach,
+        or `[]` for an object or a missing path."""
+        key = self.key
+        if key and self._reload(key) is not None:
+            return []
+        prefix = f"{key}/" if key else ""
+        return _store.unreachable_keys(prefix, self._flat_entries(prefix))
+
+    def copy(
+        self,
+        target,
+        *,
+        overwrite=False,
+        follow_symlinks=True,
+        preserve_metadata=True,
+        recursive=False,
+        ignore_error=None,
+        progress=None,
+    ):
+        # A prefix is copied by walking it; one that holds keys the walk
+        # cannot reach is refused up front rather than copied incompletely.
+        with _store.checked_copy(self, recursive):
+            return super().copy(
+                target,
+                overwrite=overwrite,
+                follow_symlinks=follow_symlinks,
+                preserve_metadata=preserve_metadata,
+                recursive=recursive,
+                ignore_error=ignore_error,
+                progress=progress,
+            )
+
     def rename(self, target: "GsPath | Uri | str"):
         target = self._rename_target(target)
         dest_key = _object_key(target.path)
@@ -427,6 +503,8 @@ class GsPath(UriPath):
             self._pop_stat_hint()
             self.stat()
             raise NotImplementedError(f"rename() of the prefix directory {self}")
+        if self._holds_keys(dest_key):
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
         with _translate_errors(self):
             self._bucket.copy_blob(source_blob, self._bucket, dest_key)
             source_blob.delete()

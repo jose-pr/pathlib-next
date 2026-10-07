@@ -571,3 +571,180 @@ def test_listing_skips_names_a_server_reports_with_a_separator():
     backend.client_obj.bucket_obj = _Raw()
     listing = dict(_gs("gs://bucket/dir", backend)._scandir())
     assert sorted(listing) == ["ok.txt", "sub"]
+
+
+# --- a prefix is moved, copied and removed as the same set of objects ---------
+
+_ODD_PREFIXES = {
+    "an-empty-segment": {"d/x.txt": b"x", "d//y.txt": b"y", "d/sub//z.txt": b"z"},
+    "an-object-that-is-also-a-prefix": {
+        "d/x.txt": b"x",
+        "d/logs": b"log",
+        "d/logs/2026.txt": b"c",
+        "d/logs/deep/z.txt": b"z",
+    },
+    "a-slash-name-that-holds-data": {"d/x.txt": b"x", "d/blob/": b"data"},
+    "a-dot-segment": {"d/x.txt": b"x", "d/sub/../z.txt": b"z"},
+}
+
+
+@pytest.fixture(params=list(_ODD_PREFIXES))
+def odd_prefix(request):
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update(_ODD_PREFIXES[request.param])
+    bucket.objects["unrelated.txt"] = b"keep"
+    return backend, bucket, dict(bucket.objects)
+
+
+def test_rm_recursive_of_a_prefix_with_hidden_objects_removes_none(odd_prefix):
+    backend, bucket, before = odd_prefix
+    with pytest.raises(OSError, match="nothing was changed"):
+        _gs("gs://bucket/d", backend).rm(recursive=True)
+    assert bucket.objects == before
+    assert bucket.deleted == []
+
+
+def test_copy_recursive_of_a_prefix_with_hidden_objects_is_refused(odd_prefix):
+    from pathlib_next.mempath import MemPath
+
+    backend, bucket, before = odd_prefix
+    target = MemPath("/copied")
+    with pytest.raises(OSError, match="nothing was changed"):
+        _gs("gs://bucket/d", backend).copy(target, recursive=True)
+    assert not target.exists()
+    assert bucket.objects == before
+
+
+def test_move_of_a_prefix_with_hidden_objects_keeps_every_object(odd_prefix):
+    backend, bucket, before = odd_prefix
+    with pytest.raises(OSError, match="nothing was changed"):
+        _gs("gs://bucket/d", backend).move(_gs("gs://bucket/moved", backend))
+    assert bucket.objects == before
+
+
+def test_the_refusal_names_the_objects_a_listing_does_not_show():
+    backend = _FakeBackend()
+    backend.client_obj.bucket_obj.objects.update(
+        {"d/x.txt": b"x", "d//y.txt": b"y", "d/logs": b"l", "d/logs/2026.txt": b"c"}
+    )
+    with pytest.raises(OSError) as raised:
+        _gs("gs://bucket/d", backend).rm(recursive=True)
+    assert "'d//y.txt'" in str(raised.value)
+    assert "'d/logs/2026.txt'" in str(raised.value)
+    assert "'d/x.txt'" not in str(raised.value)
+
+
+def test_rm_recursive_with_ignore_error_removes_only_the_objects_a_listing_shows():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update(
+        {"d/": b"", "d/x.txt": b"x", "d//y.txt": b"y", "d/logs": b"l", "d/logs/z": b"z"}
+    )
+    seen = []
+    _gs("gs://bucket/d", backend).rm(
+        recursive=True, ignore_error=lambda err, path: seen.append(err) or True
+    )
+    assert len(seen) == 1 and "'d//y.txt'" in str(seen[0])
+    assert sorted(bucket.objects) == ["d//y.txt", "d/logs/z"]
+
+
+def test_move_of_a_prefix_a_listing_shows_moves_every_object():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update(
+        {"d/": b"", "d/x.txt": b"x", "d/sub/a.txt": b"a", "d/empty/": b""}
+    )
+    _gs("gs://bucket/d", backend).move(_gs("gs://bucket/moved", backend))
+    assert sorted(bucket.objects) == [
+        "moved/",
+        "moved/empty/",
+        "moved/sub/",
+        "moved/sub/a.txt",
+        "moved/x.txt",
+    ]
+
+
+# --- a write or rename never turns a prefix directory into an object ----------
+
+
+def test_write_onto_a_prefix_directory_is_refused():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update({"d/": b"", "d/x.txt": b"x"})
+    with pytest.raises(IsADirectoryError):
+        _gs("gs://bucket/d", backend).write_bytes(b"clobber")
+    assert bucket.objects == {"d/": b"", "d/x.txt": b"x"}
+    assert bucket.uploads == []
+
+
+def test_rename_onto_a_prefix_directory_is_refused():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update({"b.txt": b"b", "dst/keep.txt": b"k"})
+    with pytest.raises(IsADirectoryError):
+        _gs("gs://bucket/b.txt", backend).rename("dst")
+    assert bucket.objects == {"b.txt": b"b", "dst/keep.txt": b"k"}
+
+
+def test_write_and_rename_onto_an_object_still_replace_it():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update({"a.txt": b"a", "b.txt": b"b"})
+    _gs("gs://bucket/a.txt", backend).write_bytes(b"new")
+    assert bucket.objects["a.txt"] == b"new"
+    _gs("gs://bucket/b.txt", backend).rename("a.txt")
+    assert bucket.objects == {"a.txt": b"b"}
+
+
+def test_write_where_the_prefix_cannot_be_listed_still_writes():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+
+    def denied(prefix="", delimiter=None, **_kwargs):
+        raise _Forbidden("403 list denied")
+
+    bucket.list_blobs = denied
+    _gs("gs://bucket/w.txt", backend).write_bytes(b"written")
+    assert bucket.objects == {"w.txt": b"written"}
+
+
+# --- mkdir treats only "not found" as absent ------------------------------------
+
+
+def test_mkdir_does_not_create_a_marker_when_the_probe_fails():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects["existing.txt"] = b"keep"
+    bucket.reload_errors["existing.txt"] = _ServiceUnavailable("503")
+    with pytest.raises(OSError) as raised:
+        _gs("gs://bucket/existing.txt", backend).mkdir()
+    assert not isinstance(raised.value, FileExistsError)
+    assert bucket.objects == {"existing.txt": b"keep"}
+    assert bucket.uploads == []
+
+
+def test_mkdir_on_an_object_is_file_exists_and_on_a_missing_path_writes_the_marker():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects["existing.txt"] = b"keep"
+    with pytest.raises(FileExistsError):
+        _gs("gs://bucket/existing.txt", backend).mkdir()
+    _gs("gs://bucket/newdir", backend).mkdir()
+    assert sorted(bucket.objects) == ["existing.txt", "newdir/"]
+
+
+# --- removing a bucket is not supported ----------------------------------------
+
+
+def test_rmdir_of_the_bucket_root_is_refused():
+    backend = _FakeBackend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects["a.txt"] = b"x"
+    root = _gs("gs://bucket/", backend)
+    with pytest.raises(PermissionError):
+        root.rmdir()
+    with pytest.raises(PermissionError):
+        root.rm()
+    assert bucket.objects == {"a.txt": b"x"}
+    assert bucket.deleted == []

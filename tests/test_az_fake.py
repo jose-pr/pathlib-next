@@ -30,6 +30,10 @@ class _ServiceUnavailable(_HttpResponseError):
     status_code = 503
 
 
+class _Forbidden(_HttpResponseError):
+    status_code = 403
+
+
 class _FakeBlobItem:
     def __init__(self, name, data):
         self.name = name
@@ -118,18 +122,23 @@ class _FakeContainer:
     def walk_blobs(self, name_starts_with="", delimiter="/"):
         from azure.storage.blob import BlobPrefix
 
-        seen = set()
+        # Like the SDK, every prefix of a page comes before its blobs, in
+        # whatever order the service listed them.
+        prefixes = []
+        blobs = []
         for name in sorted(self.objects):
             if not name.startswith(name_starts_with):
                 continue
             rest = name[len(name_starts_with) :]
             if delimiter in rest:
                 prefix = name_starts_with + rest.split(delimiter, 1)[0] + delimiter
-                if prefix not in seen:
-                    seen.add(prefix)
-                    yield BlobPrefix(prefix)
+                if prefix not in prefixes:
+                    prefixes.append(prefix)
                 continue
-            yield _FakeBlobItem(name, self.objects[name])
+            blobs.append(_FakeBlobItem(name, self.objects[name]))
+        for prefix in prefixes:
+            yield BlobPrefix(prefix=prefix)
+        yield from blobs
 
     def delete_blobs(self, *names):
         # Like the real SDK: a rejected batch deletes nothing; otherwise
@@ -188,8 +197,8 @@ def fake_blob_module(monkeypatch):
     built = []
 
     class BlobPrefix:
-        def __init__(self, name):
-            self.name = name
+        def __init__(self, *args, prefix=None, **kwargs):
+            self.name = prefix
 
     class BlobServiceClient:
         def __init__(self, account_url, credential=None, **kwargs):
@@ -208,6 +217,34 @@ def fake_blob_module(monkeypatch):
             monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, "azure.storage.blob", blob)
     return built
+
+
+@pytest.fixture
+def walk_sdk(monkeypatch):
+    """`azure.storage.blob.BlobPrefix`, which a `walk_blobs()` listing is made
+    of: the SDK's own when it is installed, else a stand-in that is named from
+    its `prefix=` argument as the SDK's is."""
+    import importlib
+    import sys
+    import types
+
+    try:
+        importlib.import_module("azure.storage.blob")
+    except ImportError:
+        pass
+    else:
+        return
+
+    class BlobPrefix:
+        def __init__(self, *args, prefix=None, **kwargs):
+            self.name = prefix
+
+    blob = types.ModuleType("azure.storage.blob")
+    blob.BlobPrefix = BlobPrefix
+    for name in ("azure", "azure.storage"):
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "azure.storage.blob", blob)
 
 
 def _az(uri, backend=None):
@@ -425,7 +462,7 @@ def test_connection_string_keeps_the_other_kwargs(fake_blob_module):
 # --- missing or wrong-type targets raise like pathlib ------------------------
 
 
-def test_iterdir_missing_and_file_raise(fake_blob_module):
+def test_iterdir_missing_and_file_raise(walk_sdk):
     backend, _container = _container_with(**{"file.txt": b"x", "d/": b""})
     with pytest.raises(FileNotFoundError):
         list(_az("az://account/container/typo", backend).iterdir())
@@ -508,7 +545,7 @@ def test_rplus_writes_land_and_read_stream_is_read_only():
 # --- rename/move of a prefix directory ---------------------------------------
 
 
-def test_rename_prefix_directory_falls_back_in_move(fake_blob_module):
+def test_rename_prefix_directory_falls_back_in_move(walk_sdk):
     backend, container = _container_with(**{"dir/a": b"a", "dir/sub/b": b"b"})
     src = _az("az://account/container/dir", backend)
     with pytest.raises(NotImplementedError):
@@ -550,7 +587,7 @@ def test_rm_recursive_one_failing_blob_does_not_leave_the_rest(bulk, batch_rejec
 # --- objstore-listing-hides-object-prefix-collision -----------------------------
 
 
-def test_key_that_is_object_and_prefix_lists_as_the_object(fake_blob_module):
+def test_key_that_is_object_and_prefix_lists_as_the_object(walk_sdk):
     backend, _container = _container_with(
         **{"src/logs": b"FILE-CONTENT", "src/logs/2026.txt": b"child", "src/d/x": b"x"}
     )
@@ -622,7 +659,7 @@ def test_rejected_batch_falls_back_per_blob_with_each_blobs_error():
 # --- a listed name is one component inside the directory that listed it ------
 
 
-def test_listing_skips_names_that_are_not_one_component(fake_blob_module):
+def test_listing_skips_names_that_are_not_one_component(walk_sdk):
     backend, _container = _container_with(
         **{
             "dir/ok.txt": b"x",
@@ -638,7 +675,7 @@ def test_listing_skips_names_that_are_not_one_component(fake_blob_module):
     assert listing["sub"].is_dir()
 
 
-def test_listing_skips_names_a_server_reports_with_a_separator(fake_blob_module):
+def test_listing_skips_names_a_server_reports_with_a_separator(walk_sdk):
     from azure.storage.blob import BlobPrefix
 
     backend, container = _container_with(**{"dir/ok.txt": b"x", "dir/a/b": b"x"})
@@ -647,8 +684,203 @@ def test_listing_skips_names_a_server_reports_with_a_separator(fake_blob_module)
         yield _FakeBlobItem("dir/ok.txt", b"x")
         yield _FakeBlobItem("dir/a/b", b"x")
         for prefix in ("dir/sub/", "dir/p/q/", "dir//"):
-            yield BlobPrefix(prefix)
+            yield BlobPrefix(prefix=prefix)
 
     container.walk_blobs = raw
     listing = dict(_az("az://account/container/dir", backend)._scandir())
     assert sorted(listing) == ["ok.txt", "sub"]
+
+
+# --- a prefix is moved, copied and removed as the same set of blobs ----------
+
+_ODD_PREFIXES = {
+    "an-empty-segment": {"d/x.txt": b"x", "d//y.txt": b"y", "d/sub//z.txt": b"z"},
+    "a-blob-that-is-also-a-prefix": {
+        "d/x.txt": b"x",
+        "d/logs": b"log",
+        "d/logs/2026.txt": b"c",
+        "d/logs/deep/z.txt": b"z",
+    },
+    "a-slash-name-that-holds-data": {"d/x.txt": b"x", "d/blob/": b"data"},
+    "a-dot-segment": {"d/x.txt": b"x", "d/sub/../z.txt": b"z"},
+}
+
+
+@pytest.fixture(params=list(_ODD_PREFIXES))
+def odd_prefix(request):
+    backend, container = _container_with(**_ODD_PREFIXES[request.param])
+    container.objects["unrelated.txt"] = b"keep"
+    return backend, container, dict(container.objects)
+
+
+def test_rm_recursive_of_a_prefix_with_hidden_blobs_removes_none(odd_prefix):
+    backend, container, before = odd_prefix
+    with pytest.raises(OSError, match="nothing was changed"):
+        _az("az://account/container/d", backend).rm(recursive=True)
+    assert container.objects == before
+    assert container.deleted == []
+
+
+def test_copy_recursive_of_a_prefix_with_hidden_blobs_is_refused(odd_prefix):
+    from pathlib_next.mempath import MemPath
+
+    backend, container, before = odd_prefix
+    target = MemPath("/copied")
+    with pytest.raises(OSError, match="nothing was changed"):
+        _az("az://account/container/d", backend).copy(target, recursive=True)
+    assert not target.exists()
+    assert container.objects == before
+
+
+def test_move_of_a_prefix_with_hidden_blobs_keeps_every_blob(odd_prefix):
+    backend, container, before = odd_prefix
+    with pytest.raises(OSError, match="nothing was changed"):
+        _az("az://account/container/d", backend).move(
+            _az("az://account/container/moved", backend)
+        )
+    assert container.objects == before
+
+
+def test_the_refusal_names_the_blobs_a_listing_does_not_show():
+    backend, container = _container_with(
+        **{"d/x.txt": b"x", "d//y.txt": b"y", "d/logs": b"l", "d/logs/2026.txt": b"c"}
+    )
+    with pytest.raises(OSError) as raised:
+        _az("az://account/container/d", backend).rm(recursive=True)
+    assert "'d//y.txt'" in str(raised.value)
+    assert "'d/logs/2026.txt'" in str(raised.value)
+    assert "'d/x.txt'" not in str(raised.value)
+
+
+def test_rm_recursive_with_ignore_error_removes_only_the_blobs_a_listing_shows():
+    backend, container = _container_with(
+        **{
+            "d/": b"",
+            "d/x.txt": b"x",
+            "d//y.txt": b"y",
+            "d/logs": b"l",
+            "d/logs/z": b"z",
+        }
+    )
+    seen = []
+    _az("az://account/container/d", backend).rm(
+        recursive=True, ignore_error=lambda err, path: seen.append(err) or True
+    )
+    assert len(seen) == 1 and "'d//y.txt'" in str(seen[0])
+    assert sorted(container.objects) == ["d//y.txt", "d/logs/z"]
+
+
+def test_move_of_a_prefix_a_listing_shows_moves_every_blob(walk_sdk):
+    backend, container = _container_with(
+        **{"d/": b"", "d/x.txt": b"x", "d/sub/a.txt": b"a", "d/empty/": b""}
+    )
+    _az("az://account/container/d", backend).move(
+        _az("az://account/container/moved", backend)
+    )
+    assert sorted(container.objects) == [
+        "moved/",
+        "moved/empty/",
+        "moved/sub/",
+        "moved/sub/a.txt",
+        "moved/x.txt",
+    ]
+
+
+def test_rm_recursive_of_a_prefix_a_listing_shows_is_one_batched_delete():
+    backend, container = _container_with(
+        **{"d/": b"", "d/x.txt": b"x", "d/sub/a.txt": b"a", "d/empty/": b"", "k": b""}
+    )
+    _az("az://account/container/d", backend).rm(recursive=True)
+    assert container.bulk_delete_calls == [("d/", "d/empty/", "d/sub/a.txt", "d/x.txt")]
+    assert container.objects == {"k": b""}
+
+
+# --- a key that is both a blob and a prefix lists as the blob ----------------
+
+
+def test_blob_wins_over_a_prefix_of_the_same_name_whatever_the_listing_order(walk_sdk):
+    backend, container = _container_with(
+        **{"src/logs": b"FILE-CONTENT", "src/logs/2026.txt": b"child", "src/d/x": b"x"}
+    )
+    names = [
+        item.name
+        for item in container.walk_blobs(name_starts_with="src/", delimiter="/")
+    ]
+    # The SDK puts every prefix of a page before its blobs.
+    assert names == ["src/d/", "src/logs/", "src/logs"]
+    listing = dict(_az("az://account/container/src", backend)._scandir())
+    assert sorted(listing) == ["d", "logs"]
+    assert not listing["logs"].is_dir()
+    assert listing["logs"].st_size == len(b"FILE-CONTENT")
+
+
+# --- a write or rename never turns a prefix directory into a blob -------------
+
+
+def test_write_onto_a_prefix_directory_is_refused():
+    backend, container = _container_with(**{"d/": b"", "d/x.txt": b"x"})
+    with pytest.raises(IsADirectoryError):
+        _az("az://account/container/d", backend).write_bytes(b"clobber")
+    assert container.objects == {"d/": b"", "d/x.txt": b"x"}
+    assert container.uploads == []
+
+
+def test_rename_onto_a_prefix_directory_is_refused():
+    backend, container = _container_with(**{"b.txt": b"b", "dst/keep.txt": b"k"})
+    with pytest.raises(IsADirectoryError):
+        _az("az://account/container/b.txt", backend).rename("dst")
+    assert container.objects == {"b.txt": b"b", "dst/keep.txt": b"k"}
+
+
+def test_write_and_rename_onto_a_blob_still_replace_it():
+    backend, container = _container_with(**{"a.txt": b"a", "b.txt": b"b"})
+    _az("az://account/container/a.txt", backend).write_bytes(b"new")
+    assert container.objects["a.txt"] == b"new"
+    _az("az://account/container/b.txt", backend).rename("a.txt")
+    assert container.objects == {"a.txt": b"b"}
+
+
+def test_write_where_the_prefix_cannot_be_listed_still_writes():
+    backend, container = _container_with()
+
+    def denied(name_starts_with="", **_kwargs):
+        raise _Forbidden("AuthorizationFailure")
+
+    container.list_blobs = denied
+    _az("az://account/container/w.txt", backend).write_bytes(b"written")
+    assert container.objects == {"w.txt": b"written"}
+
+
+# --- mkdir treats only "not found" as absent -----------------------------------
+
+
+def test_mkdir_does_not_create_a_marker_when_the_probe_fails():
+    backend, container = _container_with(**{"existing.txt": b"keep"})
+    container.properties_errors["existing.txt"] = _ServiceUnavailable("503")
+    with pytest.raises(OSError) as raised:
+        _az("az://account/container/existing.txt", backend).mkdir()
+    assert not isinstance(raised.value, FileExistsError)
+    assert container.objects == {"existing.txt": b"keep"}
+    assert container.uploads == []
+
+
+def test_mkdir_on_a_blob_is_file_exists_and_on_a_missing_path_writes_the_marker():
+    backend, container = _container_with(**{"existing.txt": b"keep"})
+    with pytest.raises(FileExistsError):
+        _az("az://account/container/existing.txt", backend).mkdir()
+    _az("az://account/container/newdir", backend).mkdir()
+    assert sorted(container.objects) == ["existing.txt", "newdir/"]
+
+
+# --- removing a container is not supported --------------------------------------
+
+
+def test_rmdir_of_the_container_root_is_refused():
+    backend, container = _container_with(**{"a.txt": b"x"})
+    root = _az("az://account/container/", backend)
+    with pytest.raises(PermissionError):
+        root.rmdir()
+    with pytest.raises(PermissionError):
+        root.rm()
+    assert container.objects == {"a.txt": b"x"}
+    assert container.deleted == []

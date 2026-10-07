@@ -88,3 +88,54 @@ def test_az_open_modes(az_server):
     # Exclusive mode (should fail if exists)
     with pytest.raises(FileExistsError):
         test_path.open("x")
+
+
+def _blob_that_is_also_a_prefix(path):
+    base = path / "col"
+    (base / "logs").write_bytes(b"FILE-CONTENT")
+    (base / "logs" / "2026.txt").write_bytes(b"child")
+    (base / "d" / "x").write_bytes(b"x")
+    return base
+
+
+def test_az_blob_that_is_also_a_prefix_lists_as_the_blob(az_server):
+    """The SDK lists a page's prefixes before its blobs; the blob still wins."""
+    path, _ = az_server
+    base = _blob_that_is_also_a_prefix(path)
+    listing = dict(base._scandir())
+    assert sorted(listing) == ["d", "logs"]
+    assert not listing["logs"].is_dir()
+    assert listing["logs"].st_size == len(b"FILE-CONTENT")
+    assert not (base / "logs").stat().is_dir()
+
+
+def test_az_prefix_with_a_hidden_subtree_is_not_copied_moved_or_removed(az_server):
+    from pathlib_next.mempath import MemPath
+
+    path, _ = az_server
+    base = _blob_that_is_also_a_prefix(path)
+    target = MemPath("/copied")
+    with pytest.raises(OSError, match="nothing was changed"):
+        base.copy(target, recursive=True)
+    assert not target.exists()
+    with pytest.raises(OSError, match="nothing was changed"):
+        base.move(path / "moved")
+    with pytest.raises(OSError, match="nothing was changed"):
+        base.rm(recursive=True)
+    assert (base / "logs" / "2026.txt").read_bytes() == b"child"
+    assert (base / "d" / "x").read_bytes() == b"x"
+    assert not (path / "moved").exists()
+
+
+def test_az_write_onto_a_prefix_directory_is_refused(az_server):
+    path, _ = az_server
+    with pytest.raises(IsADirectoryError):
+        (path / "sub").write_bytes(b"clobber")
+    assert (path / "sub").is_dir()
+
+
+def test_az_rmdir_of_the_container_root_is_refused(az_server):
+    path, _ = az_server
+    with pytest.raises(PermissionError):
+        path.rmdir()
+    assert (path / "a.txt").exists()

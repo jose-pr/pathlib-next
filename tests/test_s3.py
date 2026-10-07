@@ -431,10 +431,12 @@ def test_key_that_is_object_and_prefix_lists_as_the_object(moto_s3):
     assert not listing["logs"].is_dir()
     assert listing["logs"].st_size == len(b"FILE-CONTENT")
     assert not S3Path("s3://bkt/src/logs").stat().is_dir()
+    # The subtree under the object is not listed, so a recursive copy of the
+    # prefix is refused instead of leaving it behind.
     dst = MemPath("/dst")
-    src.copy(dst, recursive=True)
-    assert (dst / "logs").read_bytes() == b"FILE-CONTENT"
-    assert (dst / "other" / "x.txt").read_bytes() == b"x"
+    with pytest.raises(OSError, match="nothing was changed"):
+        src.copy(dst, recursive=True)
+    assert not dst.exists()
 
 
 # --- objstore-open-read-returns-writable-buffer (regression) ------------------
@@ -575,3 +577,231 @@ def test_sync_from_a_prefix_with_dot_segment_keys_copies_only_its_own_tree(moto_
     PathSyncer(hook=hook).sync(S3Path("s3://bkt/u/alice"), target)
     assert sorted(copied) == ["s3://bkt/u/alice/ok.txt", "s3://bkt/u/alice/sub/z.txt"]
     assert sorted(p.name for p in target.iterdir()) == ["ok.txt", "sub"]
+
+
+# --- a prefix is moved, copied and removed as the same set of keys --------------
+
+_ODD_PREFIXES = {
+    "an-empty-segment": ["d/x.txt", "d//y.txt", "d/sub//z.txt"],
+    "an-object-that-is-also-a-prefix": [
+        "d/x.txt",
+        "d/logs",
+        "d/logs/2026.txt",
+        "d/logs/deep/z.txt",
+    ],
+    "a-slash-key-that-holds-data": ["d/x.txt", "d/blob/"],
+    "a-dot-segment": ["d/x.txt", "d/sub/../z.txt"],
+}
+
+
+def _put_all(client, keys):
+    for key in keys:
+        empty = key.endswith("/") and key != "d/blob/"
+        client.put_object(Bucket="bkt", Key=key, Body=b"" if empty else key.encode())
+    client.put_object(Bucket="bkt", Key="unrelated.txt", Body=b"keep")
+
+
+@pytest.fixture(params=list(_ODD_PREFIXES))
+def odd_prefix(request, moto_s3):
+    keys = _ODD_PREFIXES[request.param]
+    _put_all(moto_s3, keys)
+    return sorted(keys + ["unrelated.txt"])
+
+
+def test_move_of_a_prefix_with_keys_a_listing_hides_keeps_every_key(
+    moto_s3, odd_prefix
+):
+    with pytest.raises(OSError, match="nothing was changed"):
+        S3Path("s3://bkt/d").move(S3Path("s3://bkt/moved"))
+    assert _moto_keys(moto_s3) == odd_prefix
+
+
+def test_move_of_such_a_prefix_to_memory_creates_nothing_there(moto_s3, odd_prefix):
+    from pathlib_next.mempath import MemPath
+
+    target = MemPath("/moved")
+    with pytest.raises(OSError):
+        S3Path("s3://bkt/d").move(target)
+    assert not target.exists()
+    assert _moto_keys(moto_s3) == odd_prefix
+
+
+def test_rm_recursive_of_such_a_prefix_removes_nothing(moto_s3, odd_prefix):
+    with pytest.raises(OSError, match="nothing was changed"):
+        S3Path("s3://bkt/d").rm(recursive=True)
+    assert _moto_keys(moto_s3) == odd_prefix
+
+
+def test_copy_recursive_of_such_a_prefix_is_refused_before_anything_is_written(
+    moto_s3, odd_prefix
+):
+    with pytest.raises(OSError, match="nothing was changed"):
+        S3Path("s3://bkt/d").copy(S3Path("s3://bkt/copied"), recursive=True)
+    assert _moto_keys(moto_s3) == odd_prefix
+
+
+def test_the_refusal_names_the_keys_the_listing_does_not_show(moto_s3):
+    _put_all(moto_s3, ["d/x.txt", "d//y.txt", "d/logs", "d/logs/2026.txt"])
+    with pytest.raises(OSError) as raised:
+        S3Path("s3://bkt/d").rm(recursive=True)
+    message = str(raised.value)
+    assert "'d//y.txt'" in message
+    assert "'d/logs/2026.txt'" in message
+    assert "'d/x.txt'" not in message
+
+
+def test_rm_recursive_with_ignore_error_removes_only_the_keys_a_listing_shows(
+    moto_s3,
+):
+    _put_all(
+        moto_s3, ["d/", "d/x.txt", "d/sub/a.txt", "d//y.txt", "d/logs", "d/logs/z"]
+    )
+    seen = []
+    S3Path("s3://bkt/d").rm(
+        recursive=True, ignore_error=lambda error, path: seen.append(error) or True
+    )
+    assert len(seen) == 1 and "'d//y.txt'" in str(seen[0])
+    assert _moto_keys(moto_s3) == ["d//y.txt", "d/logs/z", "unrelated.txt"]
+
+
+def test_removing_the_blocking_object_lets_the_prefix_be_moved(moto_s3):
+    _put_all(moto_s3, ["d/x.txt", "d/logs", "d/logs/2026.txt"])
+    S3Path("s3://bkt/d/logs").unlink()
+    S3Path("s3://bkt/d").move(S3Path("s3://bkt/moved"))
+    assert _moto_keys(moto_s3) == [
+        "moved/",
+        "moved/logs/",
+        "moved/logs/2026.txt",
+        "moved/x.txt",
+        "unrelated.txt",
+    ]
+
+
+def test_move_of_a_prefix_a_listing_shows_whole_moves_every_key(moto_s3):
+    _put_all(moto_s3, ["d/", "d/x.txt", "d/sub/a.txt", "d/sub/deep/b.txt", "d/empty/"])
+    S3Path("s3://bkt/d").move(S3Path("s3://bkt/moved"))
+    assert _moto_keys(moto_s3) == [
+        "moved/",
+        "moved/empty/",
+        "moved/sub/",
+        "moved/sub/a.txt",
+        "moved/sub/deep/",
+        "moved/sub/deep/b.txt",
+        "moved/x.txt",
+        "unrelated.txt",
+    ]
+
+
+def _counting_backend():
+    from pathlib_next.uri.schemes.s3 import S3Backend
+
+    class Counting(S3Backend):
+        __slots__ = ("calls",)
+
+        def client(self):
+            first = self._client is None
+            client = super().client()
+            if first:
+                self.calls = []
+                original = client._make_api_call
+
+                def counted(operation, params):
+                    self.calls.append(operation)
+                    return original(operation, params)
+
+                client._make_api_call = counted
+            return client
+
+    return Counting()
+
+
+def test_rm_recursive_of_a_prefix_a_listing_shows_is_one_batched_delete(moto_s3):
+    _put_all(moto_s3, ["d/", "d/x.txt", "d/sub/a.txt", "d/sub/deep/b.txt", "d/empty/"])
+    backend = _counting_backend()
+    S3Path("s3://bkt/d", backend=backend).rm(recursive=True)
+    assert backend.calls.count("DeleteObjects") == 1
+    assert "DeleteObject" not in backend.calls
+    assert _moto_keys(moto_s3) == ["unrelated.txt"]
+
+
+# --- a write or rename never turns a prefix directory into an object -----------
+
+
+def test_write_onto_a_prefix_directory_is_refused(moto_s3):
+    _put_all(moto_s3, ["d/", "d/x.txt"])
+    with pytest.raises(IsADirectoryError):
+        S3Path("s3://bkt/d").write_bytes(b"clobber")
+    with pytest.raises(IsADirectoryError):
+        S3Path("s3://bkt/d").write_text("clobber")
+    assert _moto_keys(moto_s3) == ["d/", "d/x.txt", "unrelated.txt"]
+
+
+def test_rename_onto_a_prefix_directory_is_refused(moto_s3):
+    _put_all(moto_s3, ["b.txt", "dst/keep.txt"])
+    with pytest.raises(IsADirectoryError):
+        S3Path("s3://bkt/b.txt").rename("dst")
+    assert _moto_keys(moto_s3) == ["b.txt", "dst/keep.txt", "unrelated.txt"]
+
+
+def test_write_and_rename_onto_an_object_still_replace_it(moto_s3):
+    _put_all(moto_s3, ["a.txt", "b.txt"])
+    S3Path("s3://bkt/a.txt").write_bytes(b"new")
+    assert moto_s3.get_object(Bucket="bkt", Key="a.txt")["Body"].read() == b"new"
+    S3Path("s3://bkt/b.txt").rename("a.txt")
+    assert moto_s3.get_object(Bucket="bkt", Key="a.txt")["Body"].read() == b"b.txt"
+    assert _moto_keys(moto_s3) == ["a.txt", "unrelated.txt"]
+
+
+def _failing_backend(operation, code):
+    from pathlib_next.uri.schemes.s3 import S3Backend
+
+    backend = S3Backend()
+    client = backend.client()
+    original = client._make_api_call
+
+    def failing(name, params):
+        if name == operation:
+            raise _client_error(code)
+        return original(name, params)
+
+    client._make_api_call = failing
+    return backend
+
+
+def test_write_where_the_prefix_cannot_be_listed_still_writes(moto_s3):
+    backend = _failing_backend("ListObjectsV2", "AccessDenied")
+    S3Path("s3://bkt/w.txt", backend=backend).write_bytes(b"written")
+    assert _moto_keys(moto_s3) == ["w.txt"]
+
+
+# --- mkdir treats only "not found" as absent ------------------------------------
+
+
+@pytest.mark.parametrize("code", ["503", "AccessDenied"])
+def test_mkdir_does_not_create_a_marker_beside_an_object_when_the_probe_fails(
+    moto_s3, code
+):
+    moto_s3.put_object(Bucket="bkt", Key="existing.txt", Body=b"keep")
+    backend = _failing_backend("HeadObject", code)
+    with pytest.raises(OSError):
+        S3Path("s3://bkt/existing.txt", backend=backend).mkdir()
+    assert _moto_keys(moto_s3) == ["existing.txt"]
+
+
+def test_mkdir_does_not_create_a_marker_when_the_prefix_probe_fails(moto_s3):
+    backend = _failing_backend("ListObjectsV2", "503")
+    with pytest.raises(OSError):
+        S3Path("s3://bkt/newdir", backend=backend).mkdir()
+    assert _moto_keys(moto_s3) == []
+
+
+def test_mkdir_on_an_existing_object_is_file_exists(moto_s3):
+    moto_s3.put_object(Bucket="bkt", Key="existing.txt", Body=b"keep")
+    with pytest.raises(FileExistsError):
+        S3Path("s3://bkt/existing.txt").mkdir()
+    assert _moto_keys(moto_s3) == ["existing.txt"]
+
+
+def test_mkdir_of_a_missing_path_writes_the_marker(moto_s3):
+    S3Path("s3://bkt/newdir").mkdir()
+    assert _moto_keys(moto_s3) == ["newdir/"]

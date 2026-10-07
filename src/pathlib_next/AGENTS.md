@@ -626,19 +626,33 @@ chained (their text can carry credentials).
   - Directories are key prefixes: `mkdir()` writes a zero-byte `key/` marker,
     `rmdir()` needs an empty prefix, a key that is both an object and a prefix
     is the object (in `stat()` and listings). No hierarchy enforcement (writes
-    below a missing "directory" succeed).
+    below a missing "directory" succeed), but a write (`"w"`) or `rename()`
+    onto a prefix directory raises `IsADirectoryError` (one list request;
+    credentials that may write but not list are not stopped). `mkdir()` treats
+    only `FileNotFoundError` from `stat()` as absent; any other probe error is
+    raised and no marker is written.
   - Reads stream; `"w"`/`"x"`/`"r+"` spool and upload on close; `"x"` is a
     conditional put (check-then-put above 5 GiB); `"a"` unsupported.
     `st_mtime` from `LastModified`.
   - `rename()`: server-side copy + delete in the same bucket; a prefix
     directory → `NotImplementedError` (`move()` copies). `rm(recursive=True)`
     batch-deletes; at the bucket root → `PermissionError`. No `chmod()`.
+  - A prefix that holds keys a directory walk does not reach (a key with an
+    empty, `.` or `..` segment; the subtree under a key that is also an
+    object; a `name/` key that holds data) is refused by
+    `copy(recursive=True)`, `move()` and `rm(recursive=True)`:
+    `OSError(EINVAL)` naming the keys, nothing created or removed
+    (`rm(..., ignore_error=...)` is offered the error and then removes only the
+    keys a walk reaches). Remove the named keys, or `unlink()` the object
+    that hides a subtree, first. `iterdir()`/`walk()` skip such keys as
+    before.
 - **`GsPath`** (`gs://bucket/key`; `gs` extra; `schemes.gs`) — `bucket_name`,
   `key`. `GsBackend(**client_kwargs)` → `google.cloud.storage.Client(
   **client_kwargs)` unchanged (emulator: `client_options={"api_endpoint":
   url}, use_auth_w_custom_endpoint=False`, or set `STORAGE_EMULATOR_HOST`
-  yourself); `BaseGsBackend.client()`. Same prefix model and rename rules as
-  `S3Path` (same bucket); reads load the whole object; `"x"` uses
+  yourself); `BaseGsBackend.client()`. Same prefix model, rename and
+  recursive-copy/remove rules as `S3Path` (same bucket); `rmdir()` of the
+  bucket root → `PermissionError`; reads load the whole object; `"x"` uses
   `if_generation_match=0`; `"a"` unsupported; `st_mtime` from `updated`.
 - **`AzPath`** (`az://account/container/key`; `az` extra; `schemes.az`) —
   `account`, `container`, `key` (one trailing `/` dropped, interior `//`
@@ -649,7 +663,10 @@ chained (their text can carry credentials).
   `azure-identity`'s `DefaultAzureCredential` unless `credential=` is passed.
   Without `backend=`, one shared backend per URI account is used, which needs
   `azure-identity` (installed by the `az` extra; `ImportError` otherwise). Same
-  prefix model as `S3Path`; `rename()` within one container; `"x"` sends
+  prefix model and recursive-copy/remove rules as `S3Path` (a name that is
+  both a blob and a prefix is the blob, whatever order the SDK lists them
+  in); `rmdir()` of the container root → `PermissionError`; `rename()` within
+  one container; `"x"` sends
   `If-None-Match: *`; `"a"` unsupported; `st_mtime` from `last_modified`.
 - **`GitHubPath`** (`github://[TOKEN@]host/owner/repo/path?ref=REF`; `http`
   extra; `schemes.github`) — read-only; `open()` other than `"r"` and every
