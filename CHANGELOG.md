@@ -103,8 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `with_name()`, `with_suffix()`, `with_query()`, `relative_to()`,
   `UriPath(base, x)` and a join with a `Uri` or `PurePath` built the source's
   backend: the first `parent` of an `sftp:` path imported asyncssh, and
-  raised `ImportError` where neither SSH library is installed. They now copy the backend the source already holds, or leave the new path
-  without one until its first I/O. Paths derived before any I/O therefore
+  raised `ImportError` where neither SSH library is installed. They now copy
+  the backend the source already holds, or leave the new path without one
+  until its first I/O. Paths derived before any I/O therefore
   build their own backend instead of sharing one made for the source; read
   `path.backend` first, or pass `backend=`, to share a connection.
 - **A backend that cannot be weakly referenced no longer turns off the
@@ -122,12 +123,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `http://h/x`, and a join with a `Uri` argument (`/ Uri("../x")`,
   `Uri(base, "../x")`) kept `http://h/d/../x` unresolved. All of them now give
   `http://h/x`. The dot segments of the whole joined path are removed, so
-  `Uri("http://h/d/x") / ".."` is `http://h/d/` (it was `http://h/d`) and
+  `Uri("http://h/d/x") / ".."` is `http://h/d/` (it was `http://h/d`),
+  `Uri("http://h/d/x") / "."` is `http://h/d/x/` (it was `http://h/d/x`) and
   `Uri("a") / "../../x"` is `../x`, as the constructor gives for
   `Uri("a/../../x")` (the join gave `x`). Code that relied on `..` after a
   trailing slash staying inside the directory must join the name instead
-  (`base / "x"`), and a caller that needs a parent without the slash uses
-  `.parent`.
+  (`base / "x"`). A join key that ends in `.` or `..` now gives a path ending
+  in a slash, whose `name` is empty: use `.parent` for the parent, and skip a
+  `"."` key (`base if rel == "." else base / rel`) where the result must
+  equal `base`.
 - **A percent-encoded dot segment is removed after decoding.**
   `Uri("http://h/safe/%2e%2e/secret")` kept the segment `..`, so `.parent`,
   `.name` and `as_uri()` disagreed with the path that was fetched
