@@ -552,7 +552,12 @@ chained (their text can carry credentials).
 - **`SftpPath`** (`sftp:`; `sftp` or `sftp-async` extra; `schemes.sftp`)
   - `SftpPath(*uris, backend=None, ssh_config=<default>)` — `ssh_config`:
     default `~/.ssh/config`, `None` for none, a path or iterable of paths;
-    inherited by derived paths.
+    inherited by derived paths. A host that is not a plain host name or
+    address -- an IP address (an IPv6 one may carry a `%zone`), or ASCII
+    letters, digits, `.`, `_`, `-` (not first) and the letters and digits of
+    other scripts -- raises `ValueError` naming it where a connection or an
+    ssh_config lookup would start, on both backends; building, joining and
+    comparing such a path still work.
   - Backend selection, highest first: `backend=` → subclass attribute
     `_default_backend_cls` → env `PATHLIB_NEXT_SFTP_BACKEND`
     (`auto`|`asyncssh`|`paramiko`; a named backend that is not installed
@@ -568,12 +573,18 @@ chained (their text can carry credentials).
     (`connect_opts` values win; `None` leaves them unset); requests on an open
     connection are unbounded. ssh_config: `HostName`, `Port`, `User`,
     `IdentityFile`, `ProxyCommand`, `Include`; `ProxyJump` →
-    `NotImplementedError` unless `connect_opts["sock"]` is given. Connections
-    cached per (backend, source, thread), replaced when dropped.
+    `NotImplementedError` unless `connect_opts["sock"]` is given. A
+    `ProxyCommand` expands `%h`, `%n`, `%p`, `%r` and `%%` with the host,
+    port and user this connection uses (a user with white space, a quote, a
+    shell metacharacter or a leading `-` is refused when `%r` is used); an
+    `Include` inside a `Host` or `Match` block applies the included file's
+    blocks only where the enclosing one does. Connections cached per
+    (backend, source, thread), replaced when dropped.
   - **`AsyncsshSftpBackend(connect_opts=None, *, max_concurrency=None,
     sftp_version=4, ssh_config=<default>, timeout=60.0)`**. asyncssh verifies
     host keys against `known_hosts`/ssh_config; opt-out
-    `connect_opts={"known_hosts": None}`. `timeout` bounds single requests
+    `connect_opts={"known_hosts": None}`. The port is the URI's, else the
+    ssh_config `Port` of the host. `timeout` bounds single requests
     (a timed-out request is cancelled and raises `TimeoutError`); recursive
     `copy()`/`rm()`, streamed reads/writes and a native `checksum()` are
     unbounded (use asyncssh's

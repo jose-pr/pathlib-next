@@ -169,7 +169,8 @@ def test_opts_uses_ssh_config_defaults(monkeypatch):
     assert opts["port"] == 2200
     assert opts["username"] == "cfg-user"
     assert opts["key_filename"] == ["id_test"]
-    assert _RecordedProxyCommand.commands == ["ssh jump nc %h %p"]
+    # The tokens are expanded with the host name and port of this connection.
+    assert _RecordedProxyCommand.commands == ["ssh jump nc real-host 2200"]
     assert isinstance(opts["sock"], _RecordedProxyCommand)
 
 

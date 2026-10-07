@@ -385,6 +385,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   called on only. A callable `ignore_error` that returned False was handed
   the same error again at every enclosing directory (five calls for a file
   four levels down); each error is offered once.
+- **The asyncssh backend honours an ssh_config `Port` for a host alias.** It
+  always passed a port to asyncssh (22 when the URI had none), which outranks
+  the config, so `sftp://box/` with `Host box` / `HostName 127.0.0.1` /
+  `Port 2222` connected to port 22 and offered the URI's password to whatever
+  answered there. A port is now passed only when the URI names one; the
+  URI's port still outranks the config's.
+- **An `sftp:` host that is not a plain host name or address is refused before
+  any connection or config lookup.** The host reached the config lookup and
+  then a `ProxyCommand` command line unchanged, so `sftp://u@host%20--flag/x`
+  with `ProxyCommand prog %h %p` ran `prog host --flag 22`, and a host
+  starting with `-` arrived as an option. `ValueError` naming the host is
+  now raised where a connection or a config lookup would start, on both
+  backends; building, joining and comparing such a path still work. A host is
+  accepted when it is an IP address (an IPv6 one may carry a zone) or a name
+  of ASCII letters, digits, `.`, `_` and `-` (not first) and the letters and
+  digits of other scripts (an IDN); anything else is refused.
+- **The paramiko backend expands `ProxyCommand` tokens with the connection's
+  own values.** `%p` and `%r` came from the config or its defaults, so
+  `sftp://alice@example.invalid:2222/x` with `ProxyCommand prog %h %p %r` ran
+  `prog example.invalid 22` and the local user name: the tunnel went to port
+  22 as the local user while the client believed it was talking to port 2222
+  as `alice`. `%h`, `%n`, `%p`, `%r` and `%%` now expand, in one pass, with
+  the host name, the host as written, the port and the user this connection
+  uses. A user name with white space, a quote, a shell metacharacter or a
+  leading `-` is refused (`ValueError`) when the command holds `%r`.
+- **An `Include` inside a `Host` or `Match` block stays conditional on the
+  paramiko backend.** The included file's own blocks were spliced in as
+  top-level blocks, so a `Host *` section in a file included from
+  `Host internal` set the user and `ProxyCommand` of every host. Each of the
+  included file's blocks now applies only where the enclosing block does, as
+  in OpenSSH. An `Include` outside any block is unchanged.
 
 ## [0.9.11] - 2026-09-21
 

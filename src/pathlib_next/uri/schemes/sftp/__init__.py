@@ -99,7 +99,7 @@ class BaseSftpBackend(object):
 
 # The default-config sentinel is paramiko-free (lives in `_sshconfig`) so
 # importing this scheme never pulls paramiko in just to have the sentinel.
-from ._sshconfig import _DEFAULT_SSH_CONFIG
+from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host
 
 # "No ssh_config argument given" -- distinct from _DEFAULT_SSH_CONFIG so a
 # later lazy `_init()` keeps a value captured at construction.
@@ -288,6 +288,9 @@ class SftpPath(UriPath):
 
     @property
     def _sftpclient(self):
+        # Before any backend is built or any ssh_config is read: a host that
+        # is not a plain name or address could reach a ProxyCommand's argv.
+        _check_host(self.source.host)
         return self.backend.client(self.source)
 
     def _listdir(self):

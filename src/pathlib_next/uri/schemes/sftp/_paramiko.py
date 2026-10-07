@@ -17,7 +17,9 @@ from . import _checkfile
 # code did ``from ._paramiko import _DEFAULT_SSH_CONFIG``).
 from ._sshconfig import (
     _DEFAULT_SSH_CONFIG,
+    _check_host,
     _expand_includes,
+    _expand_proxy_command,
     _normalize_config_paths,
 )
 
@@ -26,9 +28,21 @@ from ._sshconfig import (
 _DEFAULT_KNOWN_HOSTS = object()
 
 
+class _SSHConfig(_paramiko.SSHConfig):
+    """paramiko's parser, except that a ProxyCommand comes back with its
+    ``%`` tokens unexpanded: ``SftpBackend.opts()`` expands them with the host,
+    port and user chosen for the connection, which a lookup by host name
+    alone cannot know."""
+
+    TOKENS_BY_CONFIG_KEY = {
+        **_paramiko.SSHConfig.TOKENS_BY_CONFIG_KEY,
+        "proxycommand": ["~"],
+    }
+
+
 @_utils.LRU
-def _load_ssh_config(config_paths: "tuple[str, ...]") -> "_paramiko.SSHConfig | None":
-    config = _paramiko.SSHConfig()
+def _load_ssh_config(config_paths: "tuple[str, ...]") -> "_SSHConfig | None":
+    config = _SSHConfig()
     loaded = False
     for path in config_paths:
         ssh_path = _pathlib.Path(path).expanduser()
@@ -173,10 +187,12 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
         self.timeout = timeout
 
     def opts(self, source: Source):
-        config = _lookup_ssh_config(str(source.host), self.ssh_config)
+        _check_host(source.host)
+        host = str(source.host)
+        config = _lookup_ssh_config(host, self.ssh_config)
         connect_ops = {
             **self.connect_opts,
-            "hostname": config.get("hostname", str(source.host)),
+            "hostname": config.get("hostname", host),
             "port": source.port
             or int(config.get("port", _netimps.get_default_port("sftp"))),
         }
@@ -195,7 +211,13 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
         if "sock" not in connect_ops:
             if config.get("proxycommand"):
                 connect_ops["sock"] = _paramiko.ProxyCommand(
-                    str(config["proxycommand"])
+                    _expand_proxy_command(
+                        str(config["proxycommand"]),
+                        host=host,
+                        hostname=str(connect_ops["hostname"]),
+                        port=connect_ops["port"],
+                        user=connect_ops.get("username"),
+                    )
                 )
             elif str(config.get("proxyjump") or "none").lower() != "none":
                 # Connecting directly would silently bypass the jump host.
@@ -215,6 +237,7 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
             if isinstance(known_hosts, (str, _pathlib.PurePath)):
                 return [str(known_hosts)]
             return [str(path) for path in known_hosts]
+        _check_host(source.host)
         home = str(_pathlib.Path.home())
         files = [str(_pathlib.Path(home, ".ssh", "known_hosts"))]
         config = _lookup_ssh_config(str(source.host), self.ssh_config)

@@ -14,13 +14,12 @@ import typing as _ty
 
 import asyncssh as _asyncssh
 import asyncssh.packet as _packet
-import netimps as _netimps
 
 from ... import Source
 from .... import utils as _utils
 from ....utils.stat import FileStat
 from . import _checkfile
-from ._sshconfig import _DEFAULT_SSH_CONFIG
+from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host
 
 # --- shared background event loop -------------------------------------
 # asyncssh is asyncio-only end to end (connect(), every SFTPClient method,
@@ -751,6 +750,7 @@ async def _aconnect(
     sftp_version: int = 4,
     timeout: "float | None" = _UNSET_TIMEOUT,
 ) -> _ConnectionEntry:
+    _check_host(source.host)
     user, password = source.parsed_userinfo()
     # No `known_hosts` default: asyncssh then verifies the server key against
     # ~/.ssh/known_hosts and the ssh_config's UserKnownHostsFile.
@@ -761,9 +761,11 @@ async def _aconnect(
         kwargs["username"] = user
     if password:
         kwargs["password"] = password
-    conn = await _asyncssh.connect(
-        str(source.host), source.port or _netimps.get_default_port("sftp"), **kwargs
-    )
+    if source.port:
+        # Only a port the URI names: an explicit one outranks the ssh_config
+        # `Port`, which asyncssh applies when none is passed.
+        kwargs["port"] = source.port
+    conn = await _asyncssh.connect(str(source.host), **kwargs)
     try:
         # asyncssh currently supports SFTP protocol versions 3 and 4 here --
         # request the configured maximum and let the server negotiate down

@@ -157,9 +157,16 @@ loop bridges it to the synchronous API).
   each single request at 60 seconds (`AsyncsshSftpBackend(timeout=...)`);
   recursive `copy()`/`rm()` and file transfers have no wall-clock bound.
 - **ssh_config**: `SftpPath(url, ssh_config=...)` takes a path, a list of
-  paths or `None` (default `~/.ssh/config`). The paramiko backend expands
-  `Include` and refuses `ProxyJump` (use asyncssh, a `ProxyCommand`, or
-  `connect_opts["sock"]`).
+  paths or `None` (default `~/.ssh/config`). The port is the URI's, else the
+  `Port` of the host's config entry, on both backends. The paramiko backend
+  expands `Include` (inside a `Host` or `Match` block the included blocks stay
+  conditional on it), expands a `ProxyCommand`'s `%h`, `%n`, `%p`, `%r` and
+  `%%` with the host, port and user of the connection, and refuses
+  `ProxyJump` (use asyncssh, a `ProxyCommand`, or `connect_opts["sock"]`).
+- **Host names**: a URI host that is not a plain host name or address (white
+  space, quotes, control characters, a leading `-`, shell metacharacters)
+  raises `ValueError` on the first connection or config lookup, never a
+  `ProxyCommand` argument; the path itself can still be built and joined.
 - **Connections** are cached per backend and server (paramiko also per
   thread) and replaced when they drop; `backend.close()` closes them.
 - **Capabilities**: `readlink()`/`symlink_to()` on both backends;
