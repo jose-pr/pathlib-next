@@ -12,7 +12,7 @@ import typing as _ty
 import uuid as _uuid
 
 from .. import utils as _utils
-from ..path import Path
+from ..path import Path, _relation
 from ..utils.stat import FileStat
 from . import checksum as _checksum
 from . import glob as _glob
@@ -351,33 +351,16 @@ def _child_name(path: Path) -> str:
 
 
 def _paths_overlap(source: Path, target: Path) -> bool:
-    """Whether `source` and `target` are the same tree or one contains the
-    other. Only decided for two paths of the same implementation: different
-    implementations (e.g. `LocalPath` vs `FileUri`) are never reported.
-    Path equality ignores where the segments are resolved, so the paths'
-    own `_same_filesystem()` is asked first: two `MemPath` trees on separate
+    """Whether `source` and `target` are the same tree, one contains the
+    other, or they are two names of one file. Decided by `path._relation()`:
+    two files of this machine by where each really is (a symlink cannot hide
+    the overlap), whatever their classes; a type answering `_node_key()`
+    (`MemPath`, archive members) by the node, across classes and spellings;
+    anything else only between two paths of one type that
+    `_same_filesystem()` places together, so two `MemPath` trees on separate
     backends, or two hosts behind one path type, do not overlap even with
-    equal segments. `LocalPath` is resolved first so a symlink cannot hide
-    the overlap."""
-    if type(source) is not type(target):
-        return False
-    if not source._same_filesystem(target):
-        return False
-    if isinstance(source, _pathlib.Path):
-        resolved = []
-        for path in (source, target):
-            try:
-                path = path.resolve()
-            except (OSError, RuntimeError):
-                pass
-            # Python < 3.10 on Windows returns a relative path unchanged
-            # when no part of it exists.
-            resolved.append(path if path.is_absolute() else path.absolute())
-        source, target = resolved
-    try:
-        return target.is_relative_to(source) or source.is_relative_to(target)
-    except (TypeError, ValueError, NotImplementedError):
-        return False
+    equal segments."""
+    return _relation(source, target, follow=True, identity=False) is not None
 
 
 class SyncEvent(_enum.Enum):

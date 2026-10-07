@@ -796,8 +796,11 @@ class TestMyPath(PathContract):
     `pathlib_next.sync` and reported to `hook` as `SyncEvent.Error`.
     `.log(msg, *args)` (INFO on the same logger) is overridable.
   - Safety, all through `ignore_error`: a missing root `source` →
-    `FileNotFoundError`; overlapping `source`/`target` (same implementation,
-    and `_same_filesystem()` places them together) → `ValueError`; a child
+    `FileNotFoundError`; overlapping `source`/`target` (one inside the other,
+    or two names of one file: decided like `copy()`/`move()` decide "same
+    file", so two files of this machine whatever their classes, two spellings
+    of one `MemPath` or archive node, and else one type that
+    `_same_filesystem()` places together) → `ValueError`; a child
     name that would leave `target` (`..`, or on a Windows target `\`, `:`, a
     trailing dot or space, a device name) → `ValueError`, decided on the name
     as listed, in the source's listing and the target's alike; a symlink

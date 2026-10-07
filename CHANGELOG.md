@@ -341,6 +341,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   anything is touched, offer the same `NotImplementedError` to `ignore_error`
   and fire no `Symlink` event for it; the command's dry run exits 1 with the
   same message.
+- **`PathSyncer` sees one tree under two spellings or classes as overlapping.**
+  The overlap check compared two paths of the same class lexically, so
+  `MemPath("r")` and `MemPath("/r")` on one backend, one archive directory
+  under `zip:` and `archive:` (or with a query), and a `LocalPath` and the
+  `file:` URI of the same directory were not reported, so a sync could copy a
+  tree onto or into itself. It now asks the question `copy()` and `move()` ask
+  about "same file", so all of these raise `ValueError` through `ignore_error`
+  before anything is touched; two paths of an unrelated class are still never
+  reported.
 
 ## [0.9.11] - 2026-09-21
 

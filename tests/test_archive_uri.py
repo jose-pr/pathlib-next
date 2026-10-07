@@ -486,3 +486,33 @@ def test_zip_rename_str_destination_is_a_literal_member_name(zip_archive, name):
         assert name in zf.namelist()
         assert zf.read(name) == b"top level"
         assert "top.txt" not in zf.namelist()
+
+
+# --- PathSyncer refuses two spellings of one archive tree ---
+
+
+@pytest.mark.parametrize(
+    "inner_source, spelling, overlap",
+    [
+        ("docs", "archive:{outer}!/docs", True),
+        ("docs", "zip:{outer}!/docs?x=1", True),
+        ("", "archive:{outer}!/docs", True),
+        ("docs", "archive:{outer}!/", True),
+        ("docs", "archive:{outer}!/top.txt", False),
+    ],
+)
+def test_sync_overlap_sees_one_archive_member_under_another_spelling(
+    zip_archive, inner_source, spelling, overlap
+):
+    from pathlib_next.utils.sync import PathSyncer, _paths_overlap
+
+    source = UriPath(_zip_uri(zip_archive, inner_source))
+    target = UriPath(spelling.format(outer=zip_archive.as_uri()))
+
+    assert _paths_overlap(source, target) is overlap
+    assert _paths_overlap(target, source) is overlap
+    if overlap:
+        with pytest.raises(ValueError):
+            PathSyncer(lambda entry: entry.stat.st_size).sync(source, target)
+        with zipfile.ZipFile(zip_archive) as zf:
+            assert sorted(zf.namelist()) == ["docs/readme.txt", "top.txt"]

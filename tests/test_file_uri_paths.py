@@ -194,3 +194,27 @@ def test_another_scheme_splits_a_key_on_slashes_only():
     for target in ("C:" + BACKSLASH + "Temp" + BACKSLASH + "x", "a" + BACKSLASH + "b"):
         assert source._coerce_target(target).parent.path == "/mnt/dir"
         assert source._rename_target(target).parent.path == "/mnt/dir"
+
+
+# --- PathSyncer refuses one directory under two classes ---
+
+
+def test_sync_overlap_sees_a_local_path_and_its_file_uri(tmp_path):
+    from pathlib_next.utils.sync import PathSyncer, _paths_overlap
+
+    tree = tmp_path / "tree"
+    (tree / "inner").mkdir(parents=True)
+    (tree / "keep.txt").write_text("keep")
+    local = LocalPath(tree)
+    as_uri = UriPath(tree.as_uri())
+    assert isinstance(as_uri, FileUri)
+
+    assert _paths_overlap(local, as_uri) and _paths_overlap(as_uri, local)
+    assert _paths_overlap(local / "inner", as_uri)
+    assert _paths_overlap(as_uri / "inner", local)
+    assert not _paths_overlap(local / "inner", as_uri / "keep.txt")
+    with pytest.raises(ValueError):
+        PathSyncer(lambda entry: entry.stat.st_size, remove_missing=True).sync(
+            local, as_uri
+        )
+    assert (tree / "keep.txt").read_text() == "keep"

@@ -1684,3 +1684,47 @@ def test_dry_run_offers_the_same_refusal_to_the_policy_and_goes_on(tmp_path):
 
     assert outcomes[True] == outcomes[False]
     assert (SyncEvent.Error, str(source / "lnk"), "/dst/lnk") in outcomes[True]
+
+
+# --- overlap is decided by where a path is, not how it is spelled ------------
+
+
+def _mem_tree():
+    backend = MemPathBackend()
+    root = MemPath("/r", backend=backend)
+    (root / "in").mkdir(parents=True)
+    (root / "keep.txt").write_text("keep")
+    return backend, root
+
+
+@pytest.mark.parametrize(
+    "spelling, overlap",
+    [
+        ("r", True),
+        ("/r/", True),
+        ("/x/../r", True),
+        ("/r/./in", True),
+        ("r/in", True),
+        ("rr", False),
+        ("/", True),
+        ("/other", False),
+    ],
+)
+def test_overlap_sees_one_mempath_tree_under_another_spelling(spelling, overlap):
+    from pathlib_next.utils.sync import _paths_overlap
+
+    backend, root = _mem_tree()
+    other = MemPath(spelling, backend=backend)
+
+    assert _paths_overlap(root, other) is overlap
+    assert _paths_overlap(other, root) is overlap
+    if overlap:
+        for source, target in ((root, other), (other, root)):
+            with pytest.raises(ValueError):
+                PathSyncer(_size, remove_missing=True).sync(source, target)
+            with pytest.raises(ValueError):
+                PathSyncer(_size, remove_missing=True).sync(
+                    source, target, dry_run=True
+                )
+        assert (root / "keep.txt").read_text() == "keep"
+        assert sorted(backend["r"]) == ["in", "keep.txt"]
