@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an empty body: the file was replaced by a zero-byte one. `open("a")` now
   raises and sends nothing, in both append modes; a write stream whose
   constructor did not finish never uploads.
+- **A write through a redirect no longer reports success without storing the
+  bytes.** `http:` and `dav:` followed a redirect for `PUT`, `PATCH`,
+  `DELETE`, `MKCOL` and `MOVE` the way a browser does. A 301 re-sent the
+  `PUT` without its body and replaced the file with an empty one; a 302 or
+  303 turned the request into a `GET`, so `write_bytes()` returned having
+  written nothing and `unlink()`, `mkdir()` and `rename()` returned having
+  done nothing. Those requests now go out with `allow_redirects=False`
+  (an `allow_redirects` in `with_session()` does not apply to them). A 307
+  or 308 to the same scheme, host and port is sent once more with the same
+  method and body; any other 3xx, a redirect to another origin, a second
+  redirect and a body that cannot be sent twice raise `OSError` (`EIO`)
+  naming the status and the `Location`, without its userinfo. A server that
+  redirects writes must be addressed by its final URL.
 
 ## [0.9.11] - 2026-09-21
 

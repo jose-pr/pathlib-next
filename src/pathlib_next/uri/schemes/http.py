@@ -689,6 +689,77 @@ class HttpAppendStream(_UploadStream):
                 resp.raise_for_status()
 
 
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PROPFIND"})
+"""Methods whose redirects `requests` follows. Every other method changes
+state, and a redirect must not turn it into a different request."""
+
+
+def _redirect_location(url: str, resp) -> "str | None":
+    """`resp`'s `Location` as an absolute URL without userinfo, or `None`
+    when there is none or it cannot be parsed."""
+    location = resp.headers.get("Location")
+    if not location:
+        return None
+    try:
+        # http.client decodes header bytes as Latin-1; servers send UTF-8.
+        location = location.encode("latin1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    try:
+        return _split_userinfo(_urlparse.urljoin(url, location))[0]
+    except ValueError:
+        return None
+
+
+def _refused_redirect(method, url, resp, location, reason) -> OSError:
+    status = f"HTTP {resp.status_code} {getattr(resp, 'reason', None) or ''}".rstrip()
+    return OSError(
+        _errno.EIO,
+        f"{status} for {method} {url}: redirect to {location or '(none)'} "
+        f"not followed ({reason})",
+    )
+
+
+def _can_resend_body(args: dict) -> bool:
+    """Whether `requests` can send the request body a second time: a file
+    object or an iterator has been read to its end by the first attempt."""
+    body = args.get("data")
+    return args.get("files") is None and (
+        body is None
+        or isinstance(body, (bytes, bytearray, memoryview, str, dict, list, tuple))
+    )
+
+
+def _send_without_redirects(session, method: str, url: str, args: dict):
+    """Send a state-changing request. `requests` follows a redirect as a
+    browser does: a 301 re-sends a PUT without its body, a 302 or 303 turns
+    it into a GET, and the final 2xx then reads as the write succeeding. So
+    nothing is followed by `requests` here: a 307 or 308 to the same scheme,
+    host and port is sent once more with the same method and body, and any
+    other 3xx raises `OSError(EIO)` naming the status and the `Location`."""
+    args = {**args, "allow_redirects": False}
+    resp = session.request(method=method, url=url, **args)
+    if not 300 <= resp.status_code < 400:
+        return resp
+    location = _redirect_location(url, resp)
+    if resp.status_code not in (307, 308):
+        reason = "only 307 and 308 send the request again"
+    elif location is None:
+        reason = "no usable Location"
+    elif _origin(_urlparse.urlsplit(location)) != _origin(_urlparse.urlsplit(url)):
+        reason = "it leaves the scheme, host and port of the request"
+    elif not _can_resend_body(args):
+        reason = "the request body cannot be sent twice"
+    else:
+        resp.close()
+        resp = session.request(method=method, url=location, **args)
+        if not 300 <= resp.status_code < 400:
+            return resp
+        url, location = location, _redirect_location(location, resp)
+        reason = "a second redirect"
+    raise _refused_redirect(method, url, resp, location, reason)
+
+
 class HttpBackend(_ty.NamedTuple):
     """Per-instance `requests.Session` + extra request kwargs shared by an
     `HttpPath` tree (see `with_session()`).
@@ -698,7 +769,15 @@ class HttpBackend(_ty.NamedTuple):
     waits forever). URL userinfo (`http://user:password@host/`) is never
     sent inside the request URL: it is stripped and sent as `auth=(user,
     password)` -- unless `requests_args`/the call pass their own `auth`
-    or the session has `session.auth` set, which win as they did before."""
+    or the session has `session.auth` set, which win as they did before.
+
+    Redirects: `GET`, `HEAD`, `OPTIONS` and `PROPFIND` follow them as
+    `requests` does. Any other method (`PUT`, `PATCH`, `DELETE`, `MKCOL`,
+    `MOVE`, a `write_method` such as `POST`) is sent with
+    `allow_redirects=False`, whatever `requests_args` or the call say: a 307
+    or 308 to the same scheme, host and port is sent once more with the same
+    method and body, and any other 3xx, a redirect to another origin or a
+    second redirect raises `OSError(EIO)`."""
 
     session: _req.Session
     requests_args: dict
@@ -721,7 +800,9 @@ class HttpBackend(_ty.NamedTuple):
             and not getattr(self.session, "auth", None)
         ):
             args["auth"] = auth
-        return self.session.request(method=method, url=url, **args)
+        if method.upper() in _READ_METHODS:
+            return self.session.request(method=method, url=url, **args)
+        return _send_without_redirects(self.session, method, url, args)
 
 
 class _DerivedHttpBackend(HttpBackend, _DerivedBackend):

@@ -93,6 +93,14 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
   - `unlink()` refuses a directory; `rmdir()` requires an empty one.
   - Requests time out after `(10, 60)` seconds (connect, read) unless a
     `timeout` is given; `timeout=None` waits forever.
+  - Redirects are followed for reads (`GET`, `HEAD`, `PROPFIND`) but not for
+    writes: `PUT`, `PATCH`, `DELETE`, `MKCOL`, `MOVE` and a custom
+    `write_method` are sent with `allow_redirects=False` (an
+    `allow_redirects` in `with_session()` does not apply to them). A 307 or
+    308 to the same scheme, host and port is sent once more with the same
+    method and body; a 301, 302 or 303, a redirect to another origin and a
+    second redirect raise `OSError` (`EIO`) naming the status and the
+    `Location`. Point the path at the final URL if the server redirects.
   - Credentials in the URL (`https://user:pw@host/`) are sent as Basic
     `auth=`, never inside the request URL, and take priority over `~/.netrc`.
 - **`dav(s):`** (`DavPath`) is WebDAV (RFC 4918) over the equivalent

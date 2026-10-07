@@ -411,6 +411,14 @@ chained (their text can carry credentials).
     headers merge over them.
   - Timeout: `DEFAULT_TIMEOUT = (10, 60)` (connect, read) unless given;
     `timeout=None` waits forever.
+  - Redirects: `GET`/`HEAD`/`OPTIONS`/`PROPFIND` follow them as `requests`
+    does. Every other request (`write_method`, `PATCH`, `DELETE`, `MKCOL`,
+    `MOVE`) is sent with `allow_redirects=False`, and an `allow_redirects` in
+    `requests_args` or the call does not change that: a 307/308 to the same
+    scheme, host and port is re-sent once with the same method and body; any
+    other 3xx, another origin or a second redirect raises `OSError(EIO)`
+    naming the status and the `Location` (userinfo removed). A body that is
+    not bytes or `str` cannot be re-sent, so it raises too.
   - URL userinfo is sent as Basic `auth=` (not in the URL) unless
     `requests_args`/`session.auth` set auth; it takes priority over `~/.netrc`.
   - `stat(*, follow_symlinks=True, walk_up_last_modified=False)` — `HEAD`
@@ -441,7 +449,9 @@ chained (their text can carry credentials).
   `rmdir()` checks emptiness first; `rm(recursive=True)` is one recursive
   `DELETE` (failed members of a 207 raise). `rename()` = `MOVE` with
   `Overwrite: F` (existing target → `FileExistsError`), no credentials in
-  `Destination`. 423 → `PermissionError`. No `chmod()`.
+  `Destination`. 423 → `PermissionError`. `PUT`, `MKCOL`, `DELETE` and `MOVE`
+  follow the `HttpPath` redirect rule above; `PROPFIND` follows redirects.
+  No `chmod()`.
 - **`FtpPath`** (`ftp:`/`ftps:`; `uri` extra; `schemes.ftp`)
   - `FtpBackend(timeout=30.0, ssl_context=None, verify=True)` — `timeout`
     bounds connect, replies and transfers (`None` = forever). `ftps:` is
