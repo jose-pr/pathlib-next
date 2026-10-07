@@ -1,33 +1,32 @@
 name: Docs
 
 # Builds the docs site and deploys it to GitHub Pages. Kept separate from
-# release.yml so the site can be rebuilt/redeployed without cutting a release,
-# and a release is not the first time the docs build is exercised. This
-# workflow owns ALL Pages deploys (main = latest, release = the version just
-# shipped); release.yml only gates on a strict docs build.
+# release.yml (three workflow files: test, release, docs) so the docs site can
+# be rebuilt/redeployed without cutting a release, and a release is not the
+# first time the docs build is exercised. This workflow owns ALL Pages deploys
+# (main = latest, a release = the version just shipped); release.yml only gates
+# on a strict docs build, then dispatches this one at its tag.
 #
 # Triggers:
-#   - release published (a v* release ships its matching docs). A release
-#     created by release.yml with GITHUB_TOKEN does not fire this event, so
-#     release.yml dispatches this workflow for the tag instead; this trigger
-#     covers a release published by hand.
-#   - push to main touching docs sources (keeps Pages current between releases).
-#   - workflow_dispatch, for a manual redeploy against any ref.
+#   - push to the default branch touching docs sources (keeps Pages current);
+#     CHANGELOG.md counts when the docs embed it.
+#   - workflow_dispatch, for a manual redeploy of any ref, and the one a release
+#     uses. (A release made with GITHUB_TOKEN fires no `release` event for other
+#     workflows, which is why this does not listen for one.)
 #
-# Repo settings this workflow cannot set for itself: default workflow
-# permissions must be read and write (or `pages: write` cannot be granted),
-# and the github-pages environment's deployment policy must allow `v*` tags
-# as well as main.
+# It self-enables Pages on every run (configure-pages with enablement). Two repo
+# settings a workflow cannot set for itself: default workflow permissions must
+# be read and write (Settings -> Actions -> General), or `pages: write` cannot be
+# granted; and the `github-pages` environment's deployment policy must allow
+# `v*` tags, or a release's deploy is rejected after a successful build.
 on:
-  release:
-    types: [published]
   push:
     branches: ["main"]
     paths:
       - "docs/**"
       - "mkdocs.yml"
       - "src/**"
-      - "CHANGELOG.md" # embedded by docs/changelog.md
+      - "CHANGELOG.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -45,23 +44,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write # configure-pages enablement
+      pages: write   # configure-pages' enablement turns Pages on when it is off
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         with:
-          # Self-enable Pages (source: GitHub Actions) on every run, so a fresh
-          # clone or fork does not fail with "Get Pages site failed".
           enablement: true
       - name: Install package with docs tooling
         run: python -m pip install -e ".[dev,docs,uri,http,sftp,sftp-async,s3]"
       - name: Build docs
         run: mkdocs build --strict
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site/
 
@@ -73,11 +70,9 @@ jobs:
       pages: write
       id-token: write
     environment:
-      # Schema linters flag `github-pages` as invalid; it is a name GitHub
-      # reserves, not an error.
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

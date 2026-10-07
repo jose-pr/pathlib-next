@@ -66,10 +66,10 @@ jobs:
           - os: macos-latest
             python-version: "3.14"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package with all extras
@@ -82,6 +82,48 @@ jobs:
         # -rs lists every skip with its reason, so a missing extra shows up.
         run: python -m pytest -q -rs
 
+  # The declared floors, exercised: every runtime dependency and feature extra
+  # installed AT the lower bound pyproject.toml declares (`>=X.Y.0` -> `==X.Y.0`),
+  # on the oldest supported Python, gs and az included. The matrix above only
+  # ever gets the newest releases, so a floor that no longer works would
+  # otherwise go unnoticed.
+  floors:
+    name: Test at the declared dependency floors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+      - name: Pin every declared dependency to its floor
+        shell: python
+        run: |
+          import re
+          import subprocess
+          import sys
+
+          subprocess.run([sys.executable, "-m", "pip", "install", "-q", "tomli"], check=True)
+          import tomli
+
+          project = tomli.load(open("pyproject.toml", "rb"))["project"]
+          specs = list(project.get("dependencies", []))
+          for extra, deps in project.get("optional-dependencies", {}).items():
+              if extra not in ("dev", "docs"):
+                  specs += deps
+          pins = []
+          for spec in specs:
+              m = re.match(r"^\s*([A-Za-z0-9._-]+)(\[[^\]]*\])?\s*[^;]*?>=\s*([^,;\s]+)", spec)
+              if m:
+                  pins.append("%s==%s" % (m.group(1), m.group(3)))
+          open("floors.txt", "w").write("\n".join(pins) + "\n")
+          print("\n".join(pins) or "(no floors declared)")
+      - name: Install at the floors
+        run: python -m pip install -c floors.txt -e ".[dev,uri,http,sftp,sftp-async,s3,gs,az]"
+      - name: Run tests
+        run: python -m pytest -q -rs
+
   test-cloud-sdks:
     name: Test with gs/az SDKs (py${{ matrix.python-version }}, ubuntu)
     runs-on: ubuntu-latest
@@ -90,10 +132,10 @@ jobs:
       matrix:
         python-version: ["3.9", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package with every extra, gs and az included
@@ -111,10 +153,10 @@ jobs:
       matrix:
         python-version: ["3.9", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package without extras
@@ -140,10 +182,10 @@ jobs:
       matrix:
         python-version: ["3.9", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package with only the uri extra
@@ -198,10 +240,10 @@ jobs:
           - windows-latest
           - macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install benchmark dependencies
@@ -213,7 +255,7 @@ jobs:
         run: |
           python benchmarks/bench.py --save --name "ci-${{ matrix.os }}-py3.14" | Tee-Object -FilePath benchmark.txt
       - name: Upload benchmark artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-${{ matrix.os }}
           path: |
