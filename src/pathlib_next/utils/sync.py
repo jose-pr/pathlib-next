@@ -525,7 +525,8 @@ class PathSyncer(object):
     (most backends -- only `LocalPath` and `SftpPath` currently implement
     `symlink_to()`), `"preserve"` mode raises `NotImplementedError` too,
     through the same `ignore_error`/`hook()` machinery as every other
-    branch -- decided before an existing target entry is touched. Replacing
+    branch -- decided before an existing target entry is touched, and by a
+    dry run as by a real one. Replacing
     an existing entry creates the new link under a temporary sibling name
     first, so a runtime refusal also leaves the entry in place. A target
     link that already has the same raw target string (and, on a Windows
@@ -970,12 +971,6 @@ class PathSyncer(object):
                 return
 
             def create_symlink():
-                # Decided before the target is touched: a backend without
-                # symlinks used to lose the existing entry and then fail.
-                if not _supports_symlinks(target.path):
-                    raise NotImplementedError(
-                        "symlink_to() not supported by " f"{type(target.path).__name__}"
-                    )
                 # Raw, unresolved target string, never resolved against
                 # source's parent -- a relative target stays relative.
                 raw_target = _link_text(source.path)
@@ -1026,12 +1021,19 @@ class PathSyncer(object):
             # identity, left a window with no entry, and reported a change
             # on every run.
             if not (target.is_symlink() and _same_link(source.path, target.path)):
-                # A backend without symlinks fails in create_symlink() with
-                # NotImplementedError before touching anything; the
-                # directory guard only matters when a link could replace it.
-                if _supports_symlinks(target.path) and self._keeps_directory(
-                    source, target, dry_run, _ignore_error
-                ):
+                # Decided here and not inside create_symlink(), which a dry
+                # run never calls: both runs refuse a target that cannot
+                # hold links, before an existing entry is touched.
+                if not _supports_symlinks(target.path):
+                    error = NotImplementedError(
+                        f"symlink_to() not supported by {type(target.path).__name__}"
+                    )
+                    if not self._tolerate(
+                        _ignore_error, error, source, target, SyncEvent.Symlink, dry_run
+                    ):
+                        raise error
+                    return
+                if self._keeps_directory(source, target, dry_run, _ignore_error):
                     return
                 if target.exists() or target.is_symlink():
                     self._sweep(

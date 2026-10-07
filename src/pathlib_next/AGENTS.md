@@ -816,8 +816,8 @@ class TestMyPath(PathContract):
     is kept (`IsADirectoryError`, event `TypeMismatch`).
   - `follow_symlinks=False` + `symlink_mode="preserve"` recreates source links
     with the raw `readlink()` text (target must implement `symlink_to()`, else
-    `NotImplementedError` through `ignore_error`); `"reject"` raises
-    `NotImplementedError`.
+    `NotImplementedError` through `ignore_error`, in a dry run too);
+    `"reject"` raises `NotImplementedError`.
   - Changed files are written to a hidden temporary sibling
     (`.NAME.<12 hex>.pathlib-next-tmp`, NAME cut to keep the whole within 255
     bytes) and renamed over the target where the target supports `rename()`;

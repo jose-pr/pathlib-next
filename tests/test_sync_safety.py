@@ -1621,3 +1621,66 @@ def test_temp_file_of_a_transfer_running_in_this_process_is_kept():
     assert bytes(backend["dst"]["a.bin"]) == b"new content"
     assert bytes(backend["dst"]["c.bin"]) == b"new content"
     assert _leftovers(backend["dst"]) == []
+
+
+# --- a dry run refuses what the real run refuses ------------------------------
+
+
+def _link_source(tmp_path):
+    source = tmp_path / "src"
+    _write(source / "a.txt", "aaa")
+    _symlink("a.txt", source / "lnk")
+    _write(source / "z.txt", "zzz")
+    return pathlib_next.LocalPath(source)
+
+
+@pytest.mark.parametrize("remove_missing", [False, True])
+def test_dry_run_raises_what_the_real_run_raises_for_a_target_without_links(
+    tmp_path, remove_missing
+):
+    source = _link_source(tmp_path)
+    outcomes = {}
+    for dry_run in (True, False):
+        target = MemPath("/dst")
+        target.mkdir()
+        (target / "lnk").write_text("existing entry")
+        events, hook = _events()
+        with pytest.raises(NotImplementedError) as caught:
+            PathSyncer(
+                _size, follow_symlinks=False, remove_missing=remove_missing, hook=hook
+            ).sync(source, target, dry_run=dry_run)
+        assert (target / "lnk").read_text() == "existing entry"
+        outcomes[dry_run] = (str(caught.value), _mutations(events))
+
+    assert outcomes[True] == outcomes[False]
+    message, mutations = outcomes[True]
+    assert "MemPath" in message
+    assert all(event is not SyncEvent.Symlink for event, _, _ in mutations)
+
+
+def test_dry_run_offers_the_same_refusal_to_the_policy_and_goes_on(tmp_path):
+    source = _link_source(tmp_path)
+    outcomes = {}
+    for dry_run in (True, False):
+        target = MemPath("/dst")
+        target.mkdir()
+        calls, ignore = _collect()
+        events, hook = _events()
+
+        PathSyncer(_size, follow_symlinks=False, hook=hook, ignore_error=ignore).sync(
+            source, target, dry_run=dry_run
+        )
+
+        assert len(calls) == 1
+        error, source_entry, target_entry, event = calls[0]
+        assert isinstance(error, NotImplementedError)
+        assert event is SyncEvent.Symlink
+        assert source_entry.path.name == "lnk" and source_entry.is_symlink()
+        assert target_entry.path == target / "lnk"
+        assert (target / "z.txt").exists() is not dry_run
+        outcomes[dry_run] = [
+            (e, s, t) for e, s, t, _ in events if e is not SyncEvent.Synced
+        ]
+
+    assert outcomes[True] == outcomes[False]
+    assert (SyncEvent.Error, str(source / "lnk"), "/dst/lnk") in outcomes[True]

@@ -332,6 +332,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   full pattern. A file you named `.x.<12 hex digits>.pathlib-next-tmp` by
   hand is skipped as a source; rename it to have it synced. The removal is a
   `SyncEvent.RemovedMissing`.
+- **A `PathSyncer` dry run refuses a symlink the target cannot hold, as the
+  real run does.** With `follow_symlinks=False`, a symlink in the source and a
+  target that cannot create links (`MemPath`, an object store), `dry_run=True`
+  returned and reported `SyncEvent.Symlink` while the real run raised
+  `NotImplementedError`, so `uripath sync --dry-run` printed `would symlink`
+  for something the real run refuses. Both now take the decision before
+  anything is touched, offer the same `NotImplementedError` to `ignore_error`
+  and fire no `Symlink` event for it; the command's dry run exits 1 with the
+  same message.
 
 ## [0.9.11] - 2026-09-21
 

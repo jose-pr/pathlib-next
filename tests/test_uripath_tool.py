@@ -391,3 +391,43 @@ def test_shipped_schemes_reads_this_distribution(without_uri_extra):
 
 def test_unknown_scheme_with_an_authority_is_still_a_uri(without_uri_extra):
     assert uripath._looks_like_uri("notascheme://host/x")
+
+
+# --- a dry run fails where the real run fails ---
+
+
+def test_sync_dry_run_fails_for_a_link_the_target_cannot_hold_like_the_real_run(
+    tmp_path, monkeypatch
+):
+    from pathlib_next.mempath import MemPath
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.txt").write_text("aaa", encoding="utf-8")
+    try:
+        (source / "lnk").symlink_to("a.txt")
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink unavailable: {error}")
+    target = MemPath("/target")
+    target.mkdir()
+    real_path = uripath._path
+    monkeypatch.setattr(
+        uripath, "_path", lambda text: target if text == "memory" else real_path(text)
+    )
+
+    results = {}
+    for flag in ("--dry-run", "-v"):
+        stdout, stderr = io.BytesIO(), io.StringIO()
+        code = uripath.main(
+            ["sync", flag, "--no-follow-symlinks", str(source), "memory"],
+            stdout=stdout,
+            stderr=stderr,
+        )
+        lines = stdout.getvalue().decode("utf-8").splitlines()
+        assert not [x for x in lines if x.startswith(("would symlink", "symlink"))]
+        results[flag] = (code, stderr.getvalue())
+
+    assert results["--dry-run"] == results["-v"]
+    code, message = results["--dry-run"]
+    assert code == 1
+    assert "NotImplementedError" in message and "MemPath" in message
