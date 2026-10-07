@@ -830,8 +830,8 @@ class TestMyPath(PathContract):
     that form is the library's own: never a source, never removed as
     "missing"; a stale one (not being written by this process, modification
     time known and over a day old) is removed from a target directory when a
-    changed file or link in it is next written, and by `remove_missing=True`.
-    FIFOs, sockets and devices are skipped. A dry run makes the same
+    changed file or link in it is next written, and by `remove_missing=True`
+    (event `RemovedMissing`). FIFOs, sockets and devices are skipped. A dry run makes the same
     decisions without changes.
   - **`SyncEvent`** members: `Copy`, `RemovedMissing`, `Synced`,
     `CreatedDirectory`, `SyncStart`, `TypeMismatch`, `CheckTargetChild`,
