@@ -168,7 +168,9 @@ loop bridges it to the synchronous API).
   replaces an existing target where the server supports
   `posix-rename@openssh.com`. On asyncssh, `copy(recursive=True)` to the same
   host and `rm(recursive=True)` run concurrently, bounded by
-  `max_concurrency` (default 16). `checksum()` uses the `check-file-handle`
+  `max_concurrency` (default 16); one that raises or is interrupted has
+  stopped by the time the exception arrives, and a destination file whose copy
+  did not complete is removed. `checksum()` uses the `check-file-handle`
   extension where the server has it (OpenSSH does not).
 - `os.fspath()`/`host_fspath()` return the path on the remote host.
 

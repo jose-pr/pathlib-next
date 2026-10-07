@@ -347,6 +347,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   about "same file", so all of these raise `ValueError` through `ignore_error`
   before anything is touched; two paths of an unrelated class are still never
   reported.
+- **A recursive `copy()` or `rm()` on the asyncssh backend has stopped when it
+  raises.** After the first error, a timeout or a `KeyboardInterrupt` in the
+  calling thread, the tasks below the failing entry kept copying and deleting
+  on the server in the background, so a caller that retried or cleaned up
+  raced them, and a failed task's own error was logged as never retrieved.
+  Every task of the walk is now cancelled and awaited before the call returns
+  or raises, an exception delivered to the waiting thread cancels the walk
+  like a timeout does, and a destination file whose copy did not complete (an
+  error, a cancel, an interrupt) is removed instead of being left truncated.
+  Code that relied on the work finishing after an error has to wait for the
+  call itself.
 
 ## [0.9.11] - 2026-09-21
 

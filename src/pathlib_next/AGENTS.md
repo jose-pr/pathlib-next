@@ -583,7 +583,10 @@ chained (their text can carry credentials).
     thread (inside a callback running there) raises `RuntimeError`.
     `max_concurrency` (`None` → `DEFAULT_MAX_CONCURRENCY = 16`) bounds
     requests in flight and files open during recursive `copy()` (target on
-    the same host only) and `rm()`.
+    the same host only) and `rm()`. Such a call that raises, times out or is
+    interrupted (`KeyboardInterrupt`) has stopped when the exception reaches
+    the caller: no further request is sent, and a destination file whose copy
+    did not complete is removed.
   - Both backends: `close()` closes every cached connection (the backend stays
     usable); `default(ssh_config=...)` classmethod.
     `BaseSftpBackend.client(source)` is the override point
