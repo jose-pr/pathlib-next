@@ -82,12 +82,28 @@ def _decode_host(host: str) -> "str | _IPAddress":
         return _uritools.uridecode(host, errors=_ERRORS).lower()
 
 
-def _remove_dot_segments(path: str) -> str:
-    """RFC 3986 5.2.4 dot-segment removal on a raw (still percent-encoded)
-    path -- ported from `uritools.SplitResult.getpath()`'s private
-    `__remove_dot_segments` helper, applied BEFORE percent-decoding (a
-    percent-encoded `%2e` must not be treated as a literal `.` segment,
-    matching uritools' own ordering)."""
+def _is_drive(segment: str) -> bool:
+    """Whether a path segment is a Windows drive ("C:")."""
+    return len(segment) == 2 and segment[1] == ":" and segment[0].isalpha()
+
+
+def _remove_dot_segments(path: str, *, drive: bool = False) -> str:
+    """RFC 3986 5.2.4 dot-segment removal on a path -- ported from
+    `uritools.SplitResult.getpath()`'s private `__remove_dot_segments`
+    helper. Apply it to a raw (still percent-encoded) path before decoding,
+    and again to the decoded path: a `%2e` only becomes a `.` segment
+    once decoded. A `..` that would pass the root of an absolute path is
+    dropped; a relative path keeps its leading `..`.
+
+    `drive=True` (a `file:` path on Windows) makes a leading drive segment
+    ("C:/x", "/C:/x") the anchor, which `..` never climbs above, as for
+    `PureWindowsPath`."""
+    if drive:
+        head = path[1:] if path.startswith("/") else path
+        letter, sep, rest = head.partition("/")
+        if sep and _is_drive(letter):
+            lead = path[: len(path) - len(head)]
+            return lead + letter + _remove_dot_segments("/" + rest)
     pseg = []
     for s in path.split("/"):
         if s == ".":

@@ -293,7 +293,14 @@ silently absent and `from pathlib_next.uri import UriPath` raises
 - **`Uri(*uris, **options)`** — pure RFC 3986 URI, parsed lazily. Arguments
   (`str`, `bytes`, `Uri`, `pathlib`/`pathlib_next` paths, `os.PathLike`) join
   right to left like `joinpath` (an absolute one restarts); this is not RFC
-  3986 reference resolution and `..` is not resolved during a join. An
+  3986 reference resolution (`Uri("http://h/d") / "x"` is `http://h/d/x`),
+  but the dot segments of the joined path are removed as RFC 3986 5.2.4
+  says: `Uri("http://h/d/", "../x")`, `Uri("http://h/d/") / "../x"`,
+  `Uri("http://h/d/") / Uri("../x")` and `Uri("http://h/d/../x")` are all
+  `http://h/x`, and `Uri("http://h/d/x") / ".."` is `http://h/d/`. A `..`
+  that would pass the root of an absolute path is dropped; a relative path
+  keeps its leading `..` (`Uri("a") / "../../x"` is `../x`). A
+  percent-encoded dot segment (`%2e%2e`) is removed after decoding. An
   absolute local path becomes `file:`; a relative one joins like a
   `PurePath`.
   - `/` and `joinpath()` take a `str` as an **already-decoded path**: `?`,
@@ -301,7 +308,8 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     (`base / "cache?v=2"` names that file), which is what `iterdir()` builds.
     A `Uri`/`UriPath` argument keeps URI semantics and is the only form that
     can cross to another endpoint -- where a credential-bearing backend is
-    dropped. Dot segments are removed from the joined result either way.
+    dropped. Dot segments are removed from the joined result either way, but
+    a `%2e%2e` in a `str` key is a literal name.
   - Properties: `source -> Source`, `path -> str` (percent-decoded),
     `query -> Query` (**percent-encoded as received**, sent unchanged),
     `fragment -> str`, `parts -> (source, path, query, fragment)` (not path

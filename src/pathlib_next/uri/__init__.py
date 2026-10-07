@@ -23,6 +23,7 @@ from .source import (
     Source,
     _compose_uri,
     _decode_host,
+    _is_drive,
     _remove_dot_segments,
     _split_authority,
 )
@@ -117,8 +118,16 @@ _FILE_SOURCE = Source("file", None, "", None)
 _ENTRY_POINT_MISSES: "dict[str, object]" = {}
 
 
-def _is_drive(segment: str) -> bool:
-    return len(segment) == 2 and segment[1] == ":" and segment[0].isalpha()
+def _remove_dots(path: str, scheme: "str | None") -> str:
+    """`_remove_dot_segments()`, keeping the drive of a `file:` path on
+    Windows."""
+    return _remove_dot_segments(path, drive=scheme == "file" and os.name == "nt")
+
+
+def _has_dot_segment(path: str) -> bool:
+    # A "." or ".." segment starts with a dot right after a "/" or at the
+    # start; a cheap superset test that decides whether to run the real one.
+    return "/." in path or path.startswith(".")
 
 
 class Uri(Pathname):
@@ -230,8 +239,14 @@ class Uri(Pathname):
             userinfo = uritools.uridecode(userinfo, errors=_ERRORS)
         host = _decode_host(host) if host is not None else ""
         if scheme != "data":
-            path = _remove_dot_segments(path)
-        path = uritools.uridecode(path, errors=_ERRORS)
+            path = _remove_dots(path, scheme)
+        decoded = uritools.uridecode(path, errors=_ERRORS)
+        if decoded != path and scheme != "data":
+            # An escaped dot (`%2e%2e`) or separator (`..%2Fx`) is a dot
+            # segment only now; `as_uri()` would otherwise render one that
+            # parses to a different path.
+            decoded = _remove_dots(decoded, scheme)
+        path = decoded
         if fragment is not None:
             fragment = uritools.uridecode(fragment, errors=_ERRORS)
         return (
@@ -250,11 +265,12 @@ class Uri(Pathname):
         """Join semantics (B26, documented -- this is deliberate, not RFC
         3986 reference resolution): multiple constructor arguments are
         joined pathlib-`joinpath`-style, right to left, stopping at the
-        first absolute segment. `..` is never resolved during join (unlike
-        RFC 3986 relative-reference resolution). `source` is taken from the
-        last (rightmost) segment that has one; `query`/`fragment` likewise
-        come from the last segment that actually sets one (a later
-        segment with no query/fragment does not blank out an earlier one).
+        first absolute segment, and then RFC 3986 5.2.4 removes the dot
+        segments of the joined path (`Uri("http://h/d/", "../x")` is
+        `http://h/x`). `source` is taken from the last (rightmost) segment
+        that has one; `query`/`fragment` likewise come from the last
+        segment that actually sets one (a later segment with no
+        query/fragment does not blank out an earlier one).
         """
         uris = self._raw_uris
         source = _NOSOURCE
@@ -304,6 +320,11 @@ class Uri(Pathname):
             and not _path.startswith("/")
         ):
             _path = "/" + _path
+
+        if len(uris) > 1 and _has_dot_segment(_path) and source.scheme != "data":
+            # Each argument was resolved on its own; a `..` in one can now
+            # climb out of what precedes it.
+            _path = _remove_dots(_path, source.scheme)
 
         self._init(source, _path, query, fragment)
 
@@ -366,12 +387,12 @@ class Uri(Pathname):
     def _join_decoded(self, key: str) -> "Uri":
         """Join `key` as an already-decoded path, one segment at a time.
 
-        Each segment goes through `_make_child_relpath()` -- what
-        `iterdir()` uses -- so a hand-typed name and a listed one are built
-        by the same code, including in schemes that give a name special
-        meaning (`gitlab:`'s "-"). `.` is skipped, `..` takes the parent
-        (RFC 3986 dot-segment removal, which this type documents), and an
-        absolute key restarts from the root of this same source.
+        Each name goes through `_make_child_relpath()` -- what `iterdir()`
+        uses -- so a hand-typed name and a listed one are built by the same
+        code, including in schemes that give a name special meaning
+        (`gitlab:`'s "-"). An absolute key restarts from the root of this
+        same source. A key with `.` or `..` segments is joined as a whole
+        and has them removed as RFC 3986 5.2.4 says (`_join_dotted`).
 
         A `data:` payload is an opaque octet string, so it never gets
         segment treatment: the key is appended verbatim, exactly as
@@ -389,17 +410,56 @@ class Uri(Pathname):
         result = self
         if self._is_absolute_decoded(key):
             result = self.with_path("/")
-        for segment in key.split("/"):
-            if segment in ("", "."):
-                continue
-            if segment == "..":
-                result = result.parent
-                continue
-            result = result._make_child_relpath(segment)
-        if key.endswith("/") and not result.path.endswith("/"):
+        segments = key.split("/")
+        if "." in segments or ".." in segments:
+            return result._join_dotted(segments)
+        for segment in segments:
+            if segment:
+                result = result._make_child_relpath(segment)
+        if segments[-1] == "" and not result.path.endswith("/"):
             # A trailing "/" is load-bearing: for http/dav it is how a
             # directory URL is spelled, and `name`/`parent` are documented
             # to keep it (see docs/divergences.md).
+            result = result.with_path(result.path + "/")
+        return result
+
+    def _join_dotted(self, segments: "list[str]") -> "Uri":
+        """`_join_decoded()` for a key holding `.` or `..` segments.
+
+        The key is concatenated pathlib-style (`/d` + `x` is `/d/x`, whether
+        or not `/d` ends in a slash) and the dot segments of the whole path
+        are then removed, so `/d/` + `../x` is `/x` and `/d/x` + `..` is
+        `/d/`: the same answer the constructor gives for that spelling.
+        The names the key adds that survive are built as children of what
+        is left of this path."""
+        given = [segment for segment in segments if segment]
+        base = self.path or ("/" if self._has_authority() else "")
+        if base and not base.endswith("/"):
+            base += "/"
+        # A key ending in a slash, `.` or `..` names a directory.
+        trailing = segments[-1] in ("", ".", "..")
+        joined = base + "/".join(given) + ("/" if segments[-1] == "" else "")
+        final = _remove_dots(joined, self.source.scheme)
+        names: list[str] = []
+        for segment in given:
+            if segment == "..":
+                if names:
+                    names.pop()
+            elif segment != ".":
+                names.append(segment)
+        parts = final.split("/")
+        tail = names + [""] if trailing else names
+        if not names or parts[-len(tail) :] != tail:
+            return self.with_path(final)
+        head = "/".join(parts[: -len(tail)])
+        if not head and final.startswith("/"):
+            head = "/"
+        result = self
+        if head not in (self.path, self.path.rstrip("/")):
+            result = self.with_path(head)
+        for name in names:
+            result = result._make_child_relpath(name)
+        if trailing and not result.path.endswith("/"):
             result = result.with_path(result.path + "/")
         return result
 

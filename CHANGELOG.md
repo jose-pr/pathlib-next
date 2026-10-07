@@ -115,6 +115,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that it built its backend and passes the record on, so such a backend reads
   as derived and the copy is refused. A backend given through `backend=` or
   `with_backend()` still reads as supplied.
+- **Dot segments are removed from a joined path, as the constructor removes
+  them.** From 0.9.7 to 0.9.11, `Uri("http://h/d/") / "../x"` (a `str` join
+  onto a path ending in a slash) addressed `http://h/d/x`, because `..` was
+  resolved against the empty last segment, while `Uri("http://h/d/../x")` is
+  `http://h/x`, and a join with a `Uri` argument (`/ Uri("../x")`,
+  `Uri(base, "../x")`) kept `http://h/d/../x` unresolved. All of them now give
+  `http://h/x`. The dot segments of the whole joined path are removed, so
+  `Uri("http://h/d/x") / ".."` is `http://h/d/` (it was `http://h/d`) and
+  `Uri("a") / "../../x"` is `../x`, as the constructor gives for
+  `Uri("a/../../x")` (the join gave `x`). Code that relied on `..` after a
+  trailing slash staying inside the directory must join the name instead
+  (`base / "x"`), and a caller that needs a parent without the slash uses
+  `.parent`.
+- **A percent-encoded dot segment is removed after decoding.**
+  `Uri("http://h/safe/%2e%2e/secret")` kept the segment `..`, so `.parent`,
+  `.name` and `as_uri()` disagreed with the path that was fetched
+  (`http://h/secret`) and the URI did not parse back to itself. A `%2e%2e`,
+  `.%2e` or `..%2F` in a parsed URI now resolves like `..`. A `str` join key
+  is a decoded path, where `%2e%2e` is still a literal name.
+- **Dot segments never climb above a Windows drive.**
+  `UriPath("file:///D:/data/../../x")` was `\x` on the current drive, and a
+  join such as `UriPath("file:///C:/d/") / "../../../x"` lost the drive the
+  same way. On Windows they now stay on `C:/`, as `PureWindowsPath` does.
 
 ## [0.9.11] - 2026-09-21
 
