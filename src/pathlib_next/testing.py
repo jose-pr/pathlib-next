@@ -434,6 +434,33 @@ class PathContract(ReadPathContract):
         d.rm(recursive=True)
         assert not d.exists()
 
+    def test_rm_recursive_accepts_the_follow_policies(self, root):
+        # `rm()` takes `follow_symlinks=` and `follow_binds=` on every
+        # implementation; a tree holding no link or binding comes out the
+        # same under each of them.
+        policies = (
+            {"follow_symlinks": False, "follow_binds": False},
+            {"follow_symlinks": True, "follow_binds": True},
+            {"follow_symlinks": None, "follow_binds": None},
+            {"follow_symlinks": lambda path: False, "follow_binds": lambda path: None},
+        )
+        for index, keywords in enumerate(policies):
+            d = root / f"new_rm_policy_{index}"
+            d.mkdir()
+            (d / "f.txt").write_text("x")
+            (d / "sub_pol").mkdir()
+            (d / "sub_pol" / "g.txt").write_text("y")
+            d.rm(recursive=True, **keywords)
+            assert not d.exists()
+
+    def test_rm_rejects_a_policy_that_is_not_one(self, root):
+        d = root / "new_rm_bad_policy"
+        d.mkdir()
+        (d / "f.txt").write_text("x")
+        with pytest.raises(ValueError):
+            d.rm(recursive=True, ignore_error=True, follow_symlinks="always")
+        assert (d / "f.txt").read_text() == "x"
+
     def test_rm_non_recursive_directory_requires_empty(self, root):
         with pytest.raises(OSError) as info:
             (root / "sub").rm()

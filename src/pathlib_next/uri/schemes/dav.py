@@ -7,6 +7,7 @@ import urllib.parse as _urlparse
 import xml.etree.ElementTree as _ET
 
 from ... import utils as _utils
+from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri
 from ..source import _compose_uri
@@ -355,10 +356,21 @@ class DavPath(HttpPath):
         recursive: bool = False,
         missing_ok: bool = False,
         ignore_error: "bool | _ty.Callable[[Exception, DavPath], bool]" = False,
+        *,
+        follow_symlinks=False,
+        follow_binds=False,
     ):
+        # A collection holds no symlinks or bindings: the policies are
+        # checked and have nothing to decide.
+        _check_follow("follow_symlinks", follow_symlinks)
+        _check_follow("follow_binds", follow_binds)
         if not recursive:
             return super().rm(
-                recursive=recursive, missing_ok=missing_ok, ignore_error=ignore_error
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+                follow_symlinks=follow_symlinks,
+                follow_binds=follow_binds,
             )
         # WebDAV DELETE is recursive by spec (RFC 4918): one request here
         # replaces the base implementation's client-side stat+walk+unlink.

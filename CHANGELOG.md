@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `move()` compare two paths that both answer it across classes. `MemPath`
   and the archive paths override it; any other type keeps comparing two paths
   of one type with `==`, so nothing needs to change.
+- **`PathContract` calls `rm(recursive=True)` with `follow_symlinks=` and
+  `follow_binds=`** (`test_rm_recursive_accepts_the_follow_policies`, and
+  `test_rm_rejects_a_policy_that_is_not_one`). An implementation that
+  overrides `rm()` must accept both keywords, as `Path.rm()` does; its contract
+  subclass fails these two tests until it does. No fixture or capability
+  attribute changed.
 
 ### Changed
 - **The scheme extras now declare version ranges.** `uritools`, `requests`,
@@ -194,6 +200,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   A backend whose write replaces the file and which cannot delete had to make
   `unlink()` lie; it now implements `unlink()` so that `missing_ok=True`
   returns without removing.
+- **`rm(recursive=True, follow_symlinks=True)` works on POSIX.** It emptied
+  the directory behind a followed symlink and then called `rmdir()` on the
+  link itself, which fails with `NotADirectoryError` on Linux and macOS: the
+  files behind the link were gone, the link and the rest of the tree stayed.
+  The link is now unlinked once what is behind it has been removed.
+- **`rm()` applies `follow_symlinks=` and `follow_binds=` to the path it is
+  called on.** They decided only the entries found on the way down: a symlink
+  named directly was unlinked whatever `follow_symlinks` said, while a
+  junction named directly honoured `follow_binds`. A symlink named directly
+  now follows the same policy: `True` with `recursive=True` empties what is
+  behind it and then removes it, `None` leaves it, and without `recursive`
+  it is only unlinked. A call that passed `follow_symlinks=True` or `None` for
+  a link it names directly now does what the keyword documents.
+- **An invalid follow policy is raised, not ignored.** A callable that
+  answered anything but `True`, `False` or `None` had its `ValueError`
+  reported through `ignore_error`, so `ignore_error=True` left the tree half
+  removed with no error. The error now reaches the caller, and a keyword
+  value that is not a policy raises before anything is removed.
+- **A class that mixes a concrete `pathlib` path with `Path` but not
+  `LocalPath` has `LocalPath`'s local primitives.** The precedence guard
+  replaced stdlib's `is_junction()` and `is_mount()` with the generic
+  answers (always `False`), so `rm(recursive=True)` on such a class walked
+  into a junction and deleted the files of the directory it points at, even
+  with `follow_binds=None`. It also left `symlink_to()` raising
+  `NotImplementedError`, `chmod("0644")` raising `TypeError` on 3.10 and
+  later, `is_dir(follow_symlinks=False)` and `is_file(follow_symlinks=False)`
+  raising `TypeError` on 3.9, and `chown()` raising `NotImplementedError`.
+  Every function `LocalPath` defines is now installed on such a class
+  wherever stdlib or a generic default would answer, from the class itself
+  so the two cannot drift; a method of the class or of a mixin of its own
+  still wins.
+- **`rm()` on `sftp:`, `dav:`, `s3:`, `gs:` and `az:` accepts
+  `follow_symlinks=` and `follow_binds=`.** The five overrides stopped at
+  `ignore_error`, so naming either keyword raised `TypeError` before any I/O.
+  They take both with `Path.rm()`'s defaults, check them before sending
+  anything, and forward them wherever the generic removal runs. `dav:` and the
+  object stores have no symlinks or bindings, so the keywords decide nothing
+  there; `sftp:` runs its concurrent native walk only for the default
+  `follow_symlinks=False` and the generic walk for any other value.
 
 ## [0.9.11] - 2026-09-21
 

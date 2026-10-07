@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import stat
 import sys
+import types
 
 import pytest
 
@@ -302,3 +304,129 @@ def test_concrete_local_downstream_guarded_operations_run(tmp_path):
 def test_concrete_local_downstream_companions_resolve_to_pathlib_next(name):
     module = _impl_module(DownstreamConcreteLocal, name)
     assert module.startswith("pathlib_next"), (name, module)
+
+
+# --- a class mixing a concrete stdlib path gets LocalPath's primitives ------
+
+#: Everything `LocalPath` defines or has installed: the one list a class
+#: that mixes a concrete stdlib path with `Path` takes its local primitives
+#: from.
+LOCAL_PRIMITIVES = sorted(
+    name
+    for name, value in vars(pathlib_next.LocalPath).items()
+    if isinstance(value, types.FunctionType)
+    and not (name.startswith("__") and name.endswith("__"))
+)
+
+
+@pytest.mark.parametrize("name", LOCAL_PRIMITIVES)
+def test_concrete_local_downstream_has_the_local_primitive_of_localpath(name):
+    assert getattr(DownstreamConcreteLocal, name) is vars(pathlib_next.LocalPath)[name]
+
+
+def test_local_primitives_are_not_tied_to_the_localpath_class():
+    """A zero-argument `super()` binds a function to `LocalPath`, so it could
+    not run on another class."""
+    for name in LOCAL_PRIMITIVES:
+        code = vars(pathlib_next.LocalPath)[name].__code__
+        assert "__class__" not in code.co_freevars, name
+
+
+def test_concrete_local_downstream_keeps_a_mixin_defined_primitive():
+    class Mixin:
+        __slots__ = ()
+
+        def is_junction(self):
+            return "mixin"
+
+    class Composed(
+        Mixin,
+        pathlib.WindowsPath if os.name == "nt" else pathlib.PosixPath,
+        Path,
+        _BaseFSPathname,
+    ):
+        __slots__ = ()
+
+    assert Composed.is_junction is Mixin.is_junction
+    assert Composed.is_mount is vars(pathlib_next.LocalPath)["is_mount"]
+
+
+def test_concrete_local_downstream_creates_a_symlink(tmp_path):
+    (tmp_path / "f.txt").write_text("x")
+    link = DownstreamConcreteLocal(tmp_path / "link")
+    try:
+        link.symlink_to(tmp_path / "f.txt")
+    except OSError as error:
+        pytest.skip(f"symlink unavailable: {error}")
+    assert os.path.islink(tmp_path / "link")
+    with pytest.raises(FileExistsError):
+        link.symlink_to(tmp_path / "f.txt")
+    link.symlink_to(tmp_path / "f.txt", force=True)
+
+
+def test_concrete_local_downstream_chmod_takes_an_octal_string(tmp_path):
+    path = DownstreamConcreteLocal(tmp_path / "f.txt")
+    path.write_text("x")
+    path.chmod("0444")
+    assert not os.access(path, os.W_OK) or os.name == "posix" and os.getuid() == 0
+    path.chmod("0644")
+    assert os.access(path, os.W_OK)
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+
+
+def test_concrete_local_downstream_is_dir_and_is_file_take_follow_symlinks(tmp_path):
+    (tmp_path / "f.txt").write_text("x")
+    (tmp_path / "d").mkdir()
+    assert DownstreamConcreteLocal(tmp_path / "f.txt").is_file(follow_symlinks=False)
+    assert DownstreamConcreteLocal(tmp_path / "d").is_dir(follow_symlinks=False)
+    assert not DownstreamConcreteLocal(tmp_path / "d").is_file(follow_symlinks=False)
+
+
+def test_concrete_local_downstream_chown_is_localpaths(tmp_path):
+    path = DownstreamConcreteLocal(tmp_path / "f.txt")
+    path.write_text("x")
+    if not hasattr(os, "chown"):
+        with pytest.raises(NotImplementedError):
+            path.chown(1, 1)
+        return
+    path.chown(os.getuid(), os.getgid())
+
+
+def test_concrete_local_downstream_answers_is_mount_for_a_drive_root(tmp_path):
+    anchor = pathlib.Path(tmp_path).anchor
+    assert DownstreamConcreteLocal(anchor).is_mount() is True
+    assert DownstreamConcreteLocal(tmp_path).is_mount() is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_concrete_local_downstream_rm_does_not_follow_a_junction(tmp_path):
+    import _winapi
+
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "keep.txt").write_text("PRECIOUS")
+    (tmp_path / "tree").mkdir()
+    _winapi.CreateJunction(str(tmp_path / "target"), str(tmp_path / "tree" / "bind"))
+    assert DownstreamConcreteLocal(tmp_path / "tree" / "bind").is_junction() is True
+
+    DownstreamConcreteLocal(tmp_path / "tree").rm(recursive=True)
+
+    assert not (tmp_path / "tree").exists()
+    assert (tmp_path / "target" / "keep.txt").read_text() == "PRECIOUS"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+def test_concrete_local_downstream_rm_leaves_a_junction_when_told_to(tmp_path):
+    import _winapi
+
+    (tmp_path / "target").mkdir()
+    (tmp_path / "target" / "keep.txt").write_text("PRECIOUS")
+    (tmp_path / "tree").mkdir()
+    _winapi.CreateJunction(str(tmp_path / "target"), str(tmp_path / "tree" / "bind"))
+
+    DownstreamConcreteLocal(tmp_path / "tree").rm(
+        recursive=True, ignore_error=True, follow_symlinks=None, follow_binds=None
+    )
+
+    assert (tmp_path / "target" / "keep.txt").read_text() == "PRECIOUS"
+    assert (tmp_path / "tree" / "bind").exists()

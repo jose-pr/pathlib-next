@@ -715,8 +715,8 @@ def test_recursive_rm_does_not_descend_into_a_mount_point(tmp_path, monkeypatch)
 
 @pytest.fixture
 def tree_with_link_and_binding(tmp_path):
-    """A tree holding one symlink and one binding, both pointing at a
-    directory OUTSIDE the tree, plus a file of its own."""
+    """A tree holding one symlink, and on Windows one binding too, both
+    pointing at a directory OUTSIDE the tree, plus a file of its own."""
     (tmp_path / "target").mkdir()
     (tmp_path / "target" / "keep.txt").write_text("PRECIOUS")
     (tmp_path / "tree").mkdir()
@@ -727,14 +727,14 @@ def tree_with_link_and_binding(tmp_path):
         _winapi.CreateJunction(
             str(tmp_path / "target"), str(tmp_path / "tree" / "bind")
         )
-    else:
-        # A bind mount needs privileges; the binding half of these tests is
-        # Windows-only, and `is_mount()` covers the POSIX side elsewhere.
-        pytest.skip("no way to create a binding without privileges")
-    (tmp_path / "tree" / "link").symlink_to(
-        tmp_path / "target", target_is_directory=True
-    )
+    # A bind mount needs privileges, so the binding half is Windows-only;
+    # `is_mount()` covers the POSIX side elsewhere.
+    _symlink_or_skip(tmp_path / "tree" / "link", tmp_path / "target", directory=True)
     return tmp_path
+
+
+#: What `tree_with_link_and_binding` puts besides `own.txt` in `tree`.
+LINK_NAMES = ["bind", "link"] if os.name == "nt" else ["link"]
 
 
 def _tolerate(errors):
@@ -777,7 +777,7 @@ def test_rm_ignore_leaves_them_in_place(tree_with_link_and_binding):
         follow_binds=None,
     )
     left = sorted(p.name for p in (root / "tree").iterdir())
-    assert left == ["bind", "link"]
+    assert left == LINK_NAMES
     assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
     assert errors  # the tree's own rmdir reported the leftovers
     assert not (root / "tree" / "own.txt").exists()
@@ -793,7 +793,8 @@ def test_rm_policy_may_be_decided_per_entry(tree_with_link_and_binding):
         follow_symlinks=lambda path: False,
         follow_binds=lambda path: None if path.name == "bind" else False,
     )
-    assert (root / "tree" / "bind").exists()
+    if os.name == "nt":
+        assert (root / "tree" / "bind").exists()
     assert not (root / "tree" / "link").exists()
     assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
 
@@ -803,6 +804,92 @@ def test_rm_rejects_an_unknown_policy(tmp_path, keyword):
     (tmp_path / "d").mkdir()
     with pytest.raises(ValueError, match="True, False, None or a callable"):
         LocalPath(tmp_path / "d").rm(recursive=True, **{keyword: "delete-everything"})
+
+
+@pytest.mark.parametrize("keyword", ["follow_symlinks", "follow_binds"])
+def test_rm_rejects_an_unknown_policy_before_removing_anything(tmp_path, keyword):
+    """A policy that is not a policy is a caller error: `ignore_error` is
+    for removal failures and must not hide it."""
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "f.txt").write_text("x")
+    with pytest.raises(ValueError):
+        LocalPath(tmp_path / "d").rm(
+            recursive=True, ignore_error=True, **{keyword: "delete-everything"}
+        )
+    assert (tmp_path / "d" / "f.txt").read_text() == "x"
+
+
+def test_rm_policy_answer_that_is_not_a_policy_is_raised_not_ignored(
+    tree_with_link_and_binding,
+):
+    root = tree_with_link_and_binding
+    with pytest.raises(ValueError, match="True, False, None or a callable"):
+        LocalPath(root / "tree").rm(
+            recursive=True, ignore_error=True, follow_symlinks=lambda path: 1
+        )
+    assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
+    with pytest.raises(ValueError, match="True, False, None or a callable"):
+        LocalPath(root / "tree" / "link").rm(
+            recursive=True, ignore_error=True, follow_symlinks=lambda path: "yes"
+        )
+    assert (root / "target" / "keep.txt").read_text() == "PRECIOUS"
+
+
+def test_rm_follow_symlinks_removes_the_link_after_what_is_behind_it(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_text("P")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "keep.txt").write_text("k")
+    _symlink_or_skip(tree / "link", outside, directory=True)
+
+    LocalPath(tree).rm(recursive=True, follow_symlinks=True)
+
+    assert not tree.exists()
+    assert outside.is_dir()
+    assert os.listdir(outside) == []
+
+
+def _tree_with_one_link(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_text("P")
+    link = tmp_path / "link"
+    _symlink_or_skip(link, outside, directory=True)
+    return LocalPath(link), outside
+
+
+@pytest.mark.parametrize(
+    "policy, link_left, content_left",
+    [
+        (False, False, True),
+        (True, False, False),
+        (None, True, True),
+        (lambda path: True, False, False),
+        (lambda path: None, True, True),
+    ],
+    ids=["False", "True", "None", "callable-True", "callable-None"],
+)
+def test_rm_of_a_symlink_named_directly_applies_follow_symlinks(
+    tmp_path, policy, link_left, content_left
+):
+    """The entry the caller names is decided by the same policy as one met
+    on the way down."""
+    link, outside = _tree_with_one_link(tmp_path)
+
+    link.rm(recursive=True, follow_symlinks=policy)
+
+    assert os.path.lexists(link) is link_left
+    assert (outside / "precious.txt").exists() is content_left
+    assert outside.is_dir()
+
+
+def test_rm_of_a_symlink_without_recursion_removes_only_the_link(tmp_path):
+    link, outside = _tree_with_one_link(tmp_path)
+    link.rm(follow_symlinks=True)
+    assert not os.path.lexists(link)
+    assert (outside / "precious.txt").read_text() == "P"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")

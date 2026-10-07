@@ -14,6 +14,7 @@ import pathlib as _pathlib
 import re as _re
 import stat as _stat
 import sys as _sys
+import types as _types
 import typing as _ty
 
 from . import utils as _utils
@@ -464,10 +465,10 @@ PurePathLike = _ty.Union[str, Pathname]
 #     without this guard `LocalPath().symlink_to(t, force=True)` raises
 #     TypeError while every other backend honors it.
 #
-# `glob`/`walk`/`_scandir` are not in this list: `LocalPath` overrides them
-# itself (with local-specific behavior that must be kept). A class mixing a
-# concrete stdlib path with `Path` *without* `LocalPath` gets the same local
-# implementations from `_LOCAL_COMPANION_NAMES` instead.
+# A class mixing a concrete stdlib path with `Path` *without* `LocalPath`
+# gets more than these: every function `LocalPath` defines
+# (`_local_primitives`), because the operations above call `stat()`,
+# `glob()` and `_scandir()` with pathlib_next's signatures and contracts.
 _OPERATION_NAMES = (
     "copy",
     "move",
@@ -476,22 +477,7 @@ _OPERATION_NAMES = (
     "read_text",
     "write_text",
     "symlink_to",
-    # Both exist on `pathlib.Path` too, and stdlib's `is_mount()` raises
-    # `NotImplementedError` on Windows before 3.12 while ours answers there
-    # -- `rm(recursive=True)` consults it through `is_dir_binding()`, so a
-    # downstream class inheriting stdlib's would break on the floor.
-    "is_junction",
-    "is_mount",
 )
-
-# What the operations above call on `self` with pathlib_next's signature
-# and contract: `stat(follow_symlinks=)` (3.10+ in stdlib), `glob()` with
-# `include_hidden=`/`recursive=`/`dironly=`, and `_scandir()` yielding
-# `(name, FileStat)` tuples (stdlib 3.11-3.13's yields `os.DirEntry`, which
-# stdlib 3.12+'s `walk()` also expects). Guarding `exists`/`rglob`/`copy`
-# without these made them raise TypeError on a downstream concrete-local
-# class. Replaced only where stdlib `pathlib` would supply them.
-_LOCAL_COMPANION_NAMES = ("stat", "chmod", "glob", "walk", "_scandir")
 
 
 #: `fnmatch.translate()` wraps its output in "(?s:...)\\Z"; 3.12 strips that
@@ -545,50 +531,43 @@ def _match_lines_312(
     return regex.search(path_lines) is not None
 
 
-def _stdlib_stat(self, *, follow_symlinks=True):
-    """`LocalPath.stat()`'s pre-3.10 shim, for a class without LocalPath."""
-    import pathlib as _pathlib
-
-    if follow_symlinks:
-        return _pathlib.Path.stat(self)
-    return _pathlib.Path.lstat(self)
-
-
-def _stdlib_chmod(self, mode, *, follow_symlinks=True):
-    """`LocalPath.chmod()`'s pre-3.10 shim, for a class without LocalPath."""
-    import pathlib as _pathlib
-
-    mode = _utils.as_mode(mode)
-    if follow_symlinks:
-        return _pathlib.Path.chmod(self, mode)
-    return _pathlib.Path.lchmod(self, mode)
-
-
-def _local_companion(cls: type, name: str):
-    if name in ("stat", "chmod"):
-        if _sys.version_info >= (3, 10):
-            return None
-        return _stdlib_stat if name == "stat" else _stdlib_chmod
-    # Imported lazily: fspath imports this module. LocalPath defines all of
-    # these in its own body, so this never runs while fspath is loading.
-    from .fspath import LocalPath, _BaseFSPathname
-
-    if name == "glob" and not issubclass(cls, _BaseFSPathname):
-        # LocalPath.glob needs the flavour helpers of _BaseFSPathname.
-        return Path.glob
-    return vars(LocalPath)[name]
+def _local_primitives() -> "dict[str, _ty.Callable]":
+    """The functions `LocalPath` defines, by name: what a class that mixes a
+    concrete stdlib path with `Path` but not `LocalPath` is given for its
+    local primitives (`stat`, `chmod`, `is_junction`, `is_mount`, `glob`,
+    `walk`, `_scandir`, `_symlink_to`, `_chown`, ...). Taken from the class
+    itself so the list cannot fall behind it. Empty while `LocalPath` is
+    still being created."""
+    module = _sys.modules.get(__name__.rpartition(".")[0] + ".fspath")
+    local = getattr(module, "LocalPath", None)
+    if local is None:
+        return {}
+    return {
+        name: value
+        for name, value in vars(local).items()
+        if isinstance(value, _types.FunctionType)
+        and not (name.startswith("__") and name.endswith("__"))
+    }
 
 
-def _is_stdlib_owner(cls: type, name: str) -> bool:
-    """Whether `cls` inherits `name` from stdlib `pathlib` (and does not
-    define it in its own body)."""
+def _inherits_foreign_default(cls: type, name: str) -> bool:
+    """Whether `cls` gets `name` from stdlib `pathlib` or from this
+    library's own generic defaults (`Path`, `Pathname`, the protocols)
+    rather than from its own body or a mixin of its own."""
     if name in vars(cls):
         return False
     owner = next((base for base in cls.__mro__[1:] if name in vars(base)), None)
     if owner is None:
-        return False
-    owner_module = getattr(owner, "__module__", "") or ""
-    return owner_module == "pathlib" or owner_module.startswith("pathlib.")
+        return True
+    module = getattr(owner, "__module__", "") or ""
+    package = __name__.rpartition(".")[0]
+    return (
+        module == "pathlib"
+        or module.startswith("pathlib.")
+        or module == __name__
+        or module == package + ".protocols"
+        or module.startswith(package + ".protocols.")
+    )
 
 
 class Path(Pathname, Chmod, Stat, BinaryOpen):
@@ -614,8 +593,27 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         one. A subclass (or an intermediate mixin) that defines the method
         *itself* is always left alone -- this only displaces implementations
         coming from outside this library.
+
+        A class that mixes a concrete stdlib path with `Path` but not
+        `LocalPath` is a local class too, and gets what `LocalPath` has for
+        each name it defines (`_local_primitives`) wherever stdlib or a
+        generic default would otherwise answer: stdlib's `is_junction()`
+        and `is_mount()` are what `rm(recursive=True)` consults to stay out
+        of a junction, and its `stat()`, `chmod()` and `_scandir()` do not
+        take pathlib_next's arguments.
         """
         super().__init_subclass__(**kwargs)
+        primitives = _local_primitives() if issubclass(cls, _pathlib.Path) else {}
+        if primitives:
+            from .fspath import _BaseFSPathname
+
+            for name, ours in primitives.items():
+                if name == "glob" and not issubclass(cls, _BaseFSPathname):
+                    # LocalPath.glob needs the flavour helpers of
+                    # _BaseFSPathname.
+                    ours = Path.glob
+                if _inherits_foreign_default(cls, name):
+                    setattr(cls, name, ours)
         for name in _OPERATION_NAMES:
             # A class that defines the operation in its OWN body is always
             # authoritative -- never displace a deliberate override (this
@@ -641,12 +639,6 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             if ours is None:
                 continue
             setattr(cls, name, ours)
-        for name in _LOCAL_COMPANION_NAMES:
-            if not _is_stdlib_owner(cls, name):
-                continue
-            ours = _local_companion(cls, name)
-            if ours is not None:
-                setattr(cls, name, ours)
 
     def __new__(cls, *args, **kwargs):
         if cls is Path:
@@ -1064,11 +1056,17 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
           another.
 
         Path components BEFORE the final one are followed as usual; these
-        decide what happens to the entry itself. The name matches
+        decide what happens to the entry itself, so they apply to the path
+        `rm()` is called on as to one met on the way down: a symlink named
+        directly is removed, emptied first (`True`) or left (`None`), and
+        without `recursive` it is only ever unlinked. The name matches
         `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
         inventing a second vocabulary for the same idea.
 
-        A listed name that is not one path component (`""`, `.`, `..`, or one
+        A policy that is not `True`, `False`, `None` or a callable raises
+        `ValueError` before anything is removed; so does a callable's answer
+        that is not one of the three, whatever `ignore_error` says. A listed
+        name that is not one path component (`""`, `.`, `..`, or one
         containing `/` or NUL; see `utils.is_safe_child_name()`) is never
         joined onto the directory: it raises `ValueError`, offered to
         `ignore_error` as `(error, directory)` once per entry, and nothing is
@@ -1087,6 +1085,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         declined = []
 
         def _handle(error, path):
+            if isinstance(error, _InvalidPolicy):
+                # A mistake of the caller, not a removal that failed.
+                raise error
             if any(error is seen for seen in declined):
                 raise error
             if not _onerror(error, path):
@@ -1104,7 +1105,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     stat = None
                 yield entry.name, stat
 
-        def _remove_tree(path):
+        def _remove_tree(path, *, link=False):
             try:
                 entries = list(_scan_entries(path))
             except Exception as error:
@@ -1133,7 +1134,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         if policy == "ignore":
                             continue
                         if policy == "follow" and child.is_dir():
-                            _remove_tree(child)
+                            _remove_tree(child, link=True)
                         else:
                             child.unlink()
                     elif child_stat is not None and child_stat.is_dir():
@@ -1158,7 +1159,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                     _handle(error, path if child is None else child)
 
             try:
-                path.rmdir()
+                # `rmdir()` on a symlink is ENOTDIR on POSIX: the link is
+                # unlinked once what is behind it has been removed.
+                path.unlink() if link else path.rmdir()
             except Exception as error:
                 _handle(error, path)
 
@@ -1170,6 +1173,17 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if stat is None:
             if not missing_ok:
                 _handle(_os_error(FileNotFoundError, _errno.ENOENT, self), self)
+        elif stat.is_symlink():
+            policy = _follow_policy(follow_symlinks, self)
+            if policy == "ignore":
+                return
+            try:
+                if policy == "follow" and recursive and self.is_dir():
+                    _remove_tree(self, link=True)
+                else:
+                    self.unlink()
+            except Exception as error:
+                _handle(error, self)
         elif stat.is_dir():
             binding = self._is_junction_link()
             policy = _follow_policy(follow_binds, self) if binding else "follow"
@@ -1659,7 +1673,9 @@ def _follow_policy(policy, path: "Path") -> str:
     entry (`policy(path)`) and returns one of those three, so one tree can
     keep one mount and follow another.
 
-    Returns the internal name: "rm", "follow" or "ignore".
+    Returns the internal name: "rm", "follow" or "ignore". An answer that is
+    none of the three raises `_InvalidPolicy`, which `rm()` never hands to
+    its `ignore_error`.
     """
     if callable(policy):
         policy = policy(path)
@@ -1669,7 +1685,11 @@ def _follow_policy(policy, path: "Path") -> str:
         return "follow"
     if policy is False:
         return "rm"
-    raise ValueError(f"expected True, False, None or a callable, got {policy!r}")
+    raise _InvalidPolicy(f"expected True, False, None or a callable, got {policy!r}")
+
+
+class _InvalidPolicy(ValueError):
+    """A follow policy that is not `True`, `False` or `None`."""
 
 
 def _check_follow(name: str, policy) -> None:

@@ -58,9 +58,13 @@ silently absent and `from pathlib_next.uri import UriPath` raises
   - Operation precedence: `Path.__init_subclass__` re-asserts pathlib_next's
     `copy`, `move`, `exists`, `rglob`, `read_text`, `write_text` and
     `symlink_to` on any subclass that would otherwise inherit stdlib
-    `pathlib`'s (and `stat`/`chmod`/`glob`/`walk`/`_scandir` for a class mixing
-    a concrete stdlib path without `LocalPath`). A method defined in the
-    subclass itself always wins.
+    `pathlib`'s. A class mixing a concrete stdlib path with `Path` but not
+    `LocalPath` is a local class too: it gets every function `LocalPath`
+    defines (`stat`, `chmod`, `is_junction`, `is_mount`, `glob`, `walk`,
+    `_scandir`, `_symlink_to`, `_chown`, `is_dir`/`is_file` before 3.13, ...)
+    wherever stdlib or a generic default would answer, so `rm(recursive=True)`
+    stays out of a junction there as on `LocalPath`. A method defined in the
+    subclass itself, or in a mixin of your own, always wins.
   - `is_hidden()` — name starts with `"."`. `__iter__()` is `iterdir()`.
   - **A binding is not a symlink.** `is_junction()` (pathlib 3.12 parity:
     a Windows junction) and `is_mount()` (a mount point, bind mounts
@@ -167,12 +171,22 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     removed, never what is behind it, which is what `rm -r` does.
     `follow_symlinks=` (symlinks) and `follow_binds=` (bindings) choose per
     call: `False` (default, remove the entry), `True` (remove the contents
-    behind it too), `None` (leave it in place — the enclosing directory is
-    then not empty and says so), or a callable `policy(path) -> bool | None`
-    asked per entry, so one tree can keep one mount and follow another. The
-    name matches `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than
-    a second vocabulary for the same idea. Path components before the final
-    one are followed as usual. A listed name that is not one path component
+    behind it too, then the entry: a followed symlink is unlinked), `None`
+    (leave it in place — the enclosing directory is then not empty and says
+    so), or a callable `policy(path) -> bool | None` asked per entry, so one
+    tree can keep one mount and follow another. The name matches
+    `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than a second
+    vocabulary for the same idea. Path components before the final one are
+    followed as usual; the path `rm()` is called on is decided by the same
+    policy as one met on the way down (without `recursive` a symlink is only
+    unlinked). A policy that is not `True`/`False`/`None`/a callable, or a
+    callable's answer that is not one of the three, raises `ValueError`
+    before anything is removed and is never offered to `ignore_error`. Every
+    scheme that overrides `rm()` (`sftp:`, `dav:`, `s3:`, `gs:`, `az:`)
+    takes and checks both keywords. `dav:` and the object stores hold no
+    symlinks or bindings, so the keywords decide nothing there; `sftp:`
+    uses its concurrent native walk (asyncssh backend) only for the default
+    `follow_symlinks=False` and runs this walk otherwise. A listed name that is not one path component
     (`utils.is_safe_child_name()` with `windows=False`: the names come from
     the directory's own listing) is never joined onto it: it raises
     `ValueError`, offered to `ignore_error` as `(error, directory)` once per
@@ -711,7 +725,9 @@ stdout returns 141, Ctrl-C 130.
   exception types. Capability attributes: `supports_listing`,
   `supports_empty_directories`, `distinguishes_file_types`.
 - **`PathContract(ReadPathContract)`** — `mkdir()`, writes and write/append/
-  exclusive modes, `unlink()`, `rmdir()`, `rm()`, `copy()` (recursive),
+  exclusive modes, `unlink()`, `rmdir()`, `rm()` (also with
+  `follow_symlinks=`/`follow_binds=`: an implementation that overrides
+  `rm()` must accept both), `copy()` (recursive),
   `move()`, `rename()`, `touch()`, copying a file onto a separately built
   spelling of itself (`OSError`, content kept) and `_same_filesystem()`
   within one root. Capability attributes: `supports_rename`,

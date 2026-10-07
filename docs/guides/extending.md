@@ -54,6 +54,11 @@ deletes when `rename()` is missing) or raise `NotImplementedError`:
 | `_symlink_to(target, target_is_directory=False)`, `readlink()` | `symlink_to(..., force=)` is derived; `target` is already a path object. |
 | `_chown(uid, gid, *, follow_symlinks=True)` | receives a canonical pair (`None` = unchanged); `chown()` is derived. |
 
+`rm()` is derived from `stat()`, `_scandir()`, `unlink()` and `rmdir()`. An
+implementation that overrides it to remove a tree natively still accepts
+`follow_symlinks=` and `follow_binds=` (the shared contract calls both), and
+forwards them to `super().rm()` wherever it falls back to the generic walk.
+
 When a method accepts a `str` path, turn it into a path with
 `self.with_segments(value)`, never `type(self)(value)`, which drops
 per-instance state (for `MemPath`, the whole in-memory tree). `copy()` and

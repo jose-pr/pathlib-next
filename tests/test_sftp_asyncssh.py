@@ -833,6 +833,69 @@ def test_sftppath_rm_recursive_uses_concurrent_helper(monkeypatch):
     assert run_timeouts == [None]
 
 
+def _recursive_rm_with(monkeypatch, **policies):
+    """Call `SftpPath.rm(recursive=True, **policies)` on an asyncssh backend
+    whose native walker and generic removal are both recorded."""
+    import asyncio
+
+    from pathlib_next import Path
+
+    native = []
+    generic = []
+
+    async def _fake_concurrent_rm(path, **kwargs):
+        native.append(kwargs)
+
+    def _fake_generic_rm(self, *args, **kwargs):
+        generic.append(kwargs)
+
+    monkeypatch.setattr(backend_mod, "_concurrent_rm", _fake_concurrent_rm)
+    monkeypatch.setattr(
+        backend_mod, "_run", lambda coro, timeout="unset": asyncio.run(coro)
+    )
+    monkeypatch.setattr(
+        backend_mod.AsyncsshSftpBackend,
+        "client",
+        lambda self, source: SimpleNamespace(_aclient=object()),
+    )
+    monkeypatch.setattr(Path, "rm", _fake_generic_rm)
+    src = sftp_pkg.SftpPath(
+        "sftp://host/src", backend=backend_mod.AsyncsshSftpBackend(max_concurrency=2)
+    )
+    src.rm(recursive=True, **policies)
+    return native, generic
+
+
+@pytest.mark.parametrize(
+    "policies",
+    [
+        {},
+        {"follow_symlinks": False, "follow_binds": False},
+        {"follow_symlinks": False, "follow_binds": None},
+        {"follow_binds": lambda path: True},
+    ],
+)
+def test_sftppath_rm_takes_the_native_walk_for_the_default_symlink_policy(
+    monkeypatch, policies
+):
+    native, generic = _recursive_rm_with(monkeypatch, **policies)
+    assert len(native) == 1
+    assert generic == []
+
+
+@pytest.mark.parametrize("policy", [True, None, lambda path: False])
+def test_sftppath_rm_walks_generically_for_any_other_symlink_policy(
+    monkeypatch, policy
+):
+    native, generic = _recursive_rm_with(
+        monkeypatch, follow_symlinks=policy, follow_binds=None
+    )
+    assert native == []
+    assert len(generic) == 1
+    assert generic[0]["follow_symlinks"] is policy
+    assert generic[0]["follow_binds"] is None
+
+
 # --- default max_concurrency -------------------------------------------------
 
 

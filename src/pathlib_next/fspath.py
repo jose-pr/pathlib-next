@@ -212,7 +212,11 @@ class LocalPath(
     """The real local filesystem path: `pathlib.WindowsPath`/`PosixPath`
     with this library's `Path` mixed in via MRO. Behaves exactly like
     `pathlib.Path` for anything not explicitly overridden here (see
-    `docs/divergences.md`)."""
+    `docs/divergences.md`).
+
+    A class mixing a concrete stdlib path with `Path` but not this class is
+    given every function defined here (`Path.__init_subclass__`), so each one
+    names stdlib's implementation explicitly instead of calling `super()`."""
 
     __slots__ = ()
 
@@ -327,21 +331,21 @@ class LocalPath(
         # `symlink_to` is in _OPERATION_NAMES, so the generic
         # `Path.symlink_to()` (which owns `force=`) is what resolves on
         # LocalPath -- it delegates the actual link creation here, and
-        # stdlib's own implementation is reached explicitly via super().
+        # stdlib's own implementation is reached explicitly.
         # Unlike every remote scheme, target_is_directory is meaningful
         # here: it is the Windows-only flag pathlib forwards to
         # os.symlink(). stdlib accepts any os.PathLike, so the normalized
         # path object goes straight through -- and a relative target stays
         # relative, exactly as before.
-        return super().symlink_to(target, target_is_directory)
+        return _path.Path.symlink_to(self, target, target_is_directory)
 
     def stat(self, *, follow_symlinks=True):
         # pathlib.Path.stat() (next in MRO via WindowsPath/PosixPath) only
         # accepts follow_symlinks= on 3.10+; below that, lstat() is the
         # (pre-existing, non-kwarg) equivalent for follow_symlinks=False.
         if _HAS_FOLLOW_SYMLINKS:
-            return super().stat(follow_symlinks=follow_symlinks)
-        return super().stat() if follow_symlinks else super().lstat()
+            return _path.Path.stat(self, follow_symlinks=follow_symlinks)
+        return _path.Path.stat(self) if follow_symlinks else _path.Path.lstat(self)
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # Same follow_symlinks= 3.10+ gap as stat() above; lchmod() is the
@@ -349,8 +353,12 @@ class LocalPath(
         # platforms without os.lchmod, e.g. Windows).
         mode = _utils.as_mode(mode)
         if _HAS_FOLLOW_SYMLINKS:
-            return super().chmod(mode, follow_symlinks=follow_symlinks)
-        return super().chmod(mode) if follow_symlinks else super().lchmod(mode)
+            return _path.Path.chmod(self, mode, follow_symlinks=follow_symlinks)
+        return (
+            _path.Path.chmod(self, mode)
+            if follow_symlinks
+            else _path.Path.lchmod(self, mode)
+        )
 
     if _sys.version_info < (3, 13):
         # `is_dir()`/`is_file()` gained `follow_symlinks=` in 3.13, and the
@@ -360,7 +368,7 @@ class LocalPath(
 
         def is_dir(self, *, follow_symlinks=True):
             if follow_symlinks:
-                return super().is_dir()
+                return _path.Path.is_dir(self)
             try:
                 return _stat.S_ISDIR(self.stat(follow_symlinks=False).st_mode)
             except (OSError, ValueError):
@@ -368,7 +376,7 @@ class LocalPath(
 
         def is_file(self, *, follow_symlinks=True):
             if follow_symlinks:
-                return super().is_file()
+                return _path.Path.is_file(self)
             try:
                 return _stat.S_ISREG(self.stat(follow_symlinks=False).st_mode)
             except (OSError, ValueError):

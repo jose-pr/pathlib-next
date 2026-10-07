@@ -9,6 +9,7 @@ import typing as _ty
 import botocore.exceptions as _botoexc
 
 from ... import utils as _utils
+from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
 
@@ -480,12 +481,21 @@ class S3Path(UriPath):
         recursive=False,
         missing_ok=False,
         ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+        *,
+        follow_symlinks=False,
+        follow_binds=False,
     ):
+        # An object store holds no symlinks or bindings: the policies are
+        # checked and have nothing to decide.
+        _check_follow("follow_symlinks", follow_symlinks)
+        _check_follow("follow_binds", follow_binds)
         if not recursive:
             return super().rm(
                 recursive=recursive,
                 missing_ok=missing_ok,
                 ignore_error=ignore_error,
+                follow_symlinks=follow_symlinks,
+                follow_binds=follow_binds,
             )
 
         def on_error(error):

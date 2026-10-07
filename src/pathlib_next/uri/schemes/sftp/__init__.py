@@ -6,7 +6,7 @@ import typing as _ty
 import weakref as _weakref
 
 from .... import utils as _utils
-from ....path import _contains
+from ....path import _check_follow, _contains
 from ....utils.stat import FileStat
 from ... import _NOSOURCE, Source, Uri, UriPath
 
@@ -608,21 +608,32 @@ class SftpPath(UriPath):
         recursive=False,
         missing_ok=False,
         ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
+        *,
+        follow_symlinks=False,
+        follow_binds=False,
     ):
+        _check_follow("follow_symlinks", follow_symlinks)
+        _check_follow("follow_binds", follow_binds)
         try:
             from ._asyncssh import AsyncsshSftpBackend, _concurrent_rm, _run
         except ImportError:
-            return super().rm(
-                recursive=recursive,
-                missing_ok=missing_ok,
-                ignore_error=ignore_error,
-            )
+            AsyncsshSftpBackend = None
 
-        if not isinstance(self.backend, AsyncsshSftpBackend) or not recursive:
+        # The native walker unlinks a symlink and never follows one, which is
+        # the default policy; any other `follow_symlinks` takes the generic
+        # walk. A server has no bindings, so `follow_binds` decides nothing.
+        if (
+            AsyncsshSftpBackend is None
+            or not isinstance(self.backend, AsyncsshSftpBackend)
+            or not recursive
+            or follow_symlinks is not False
+        ):
             return super().rm(
                 recursive=recursive,
                 missing_ok=missing_ok,
                 ignore_error=ignore_error,
+                follow_symlinks=follow_symlinks,
+                follow_binds=follow_binds,
             )
 
         on_error = None
