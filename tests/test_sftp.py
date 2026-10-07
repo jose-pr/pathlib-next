@@ -145,6 +145,14 @@ def test_opts_merges_connect_opts():
 
 
 def test_opts_uses_ssh_config_defaults(monkeypatch):
+    class _RecordedProxyCommand:
+        commands = []
+
+        def __init__(self, command_line):
+            type(self).commands.append(command_line)
+
+    # The real class starts the command as a child process.
+    monkeypatch.setattr("paramiko.ProxyCommand", _RecordedProxyCommand)
     backend = SftpBackend({}, None)
     monkeypatch.setattr(
         "pathlib_next.uri.schemes.sftp._paramiko._lookup_ssh_config",
@@ -161,7 +169,8 @@ def test_opts_uses_ssh_config_defaults(monkeypatch):
     assert opts["port"] == 2200
     assert opts["username"] == "cfg-user"
     assert opts["key_filename"] == ["id_test"]
-    assert "sock" in opts
+    assert _RecordedProxyCommand.commands == ["ssh jump nc %h %p"]
+    assert isinstance(opts["sock"], _RecordedProxyCommand)
 
 
 def test_source_credentials_override_ssh_config(monkeypatch):
