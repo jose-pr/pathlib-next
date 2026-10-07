@@ -227,16 +227,36 @@ class _ZipBackend(_ArchiveBackend):
                 pass
             raise
 
-    def delete_member(self, name: str):
+    def delete_members(self, names, *, keep_dir: "str | None" = None):
+        """Drop every entry named in `names` in one rewrite. `keep_dir`
+        (`"a/b/"`) is written in the same rewrite as a directory entry: a
+        directory that exists only through its members must outlive them."""
         with self._lock:
-            self._rewrite(exclude={name})
+            self._rewrite(
+                exclude=set(names),
+                overwrite={keep_dir: b""} if keep_dir else None,
+            )
 
-    def rename_member(self, old: str, new: str, *, members=None):
+    def rename_member(
+        self,
+        old: str,
+        new: str,
+        *,
+        members=None,
+        replace=(),
+        keep_dir: "str | None" = None,
+    ):
         """Rename `old` to `new`. `members` is an explicit raw-name mapping
         for a directory rename, whose members may be spelled several ways
-        ("./dir/x") and so cannot be found by prefix on one name."""
+        ("./dir/x") and so cannot be found by prefix on one name. `replace`
+        names entries the rename overwrites, and `keep_dir` is a directory
+        entry written in the same rewrite (see `delete_members`)."""
         with self._lock:
-            self._rewrite(rename=dict(members) if members else {old: new})
+            self._rewrite(
+                exclude=set(replace),
+                rename=dict(members) if members else {old: new},
+                overwrite={keep_dir: b""} if keep_dir else None,
+            )
 
     def _rewrite(
         self,

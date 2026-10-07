@@ -710,14 +710,36 @@ chained (their text can carry credentials).
     backslash name only survives in a tar. When two spellings normalize to one name the
     later member wins, as in `zipfile`/`tarfile`. Exception types are POSIX on every
     platform.
+  - The archive root is the archive: `exists()`/`is_dir()`/`stat()` of it
+    open the archive, so a missing one does not exist (`FileNotFoundError`
+    from `stat()`) and a file that is not an archive raises
+    `zipfile.BadZipFile` / `tarfile.ReadError`, as a listing does.
+  - A file has no children: with a file `y` and a member `y/z`, `y/z` does
+    not exist for `exists()`, `stat()`, `open()`, `unlink()` and `rename()`
+    (`FileNotFoundError`; writing or `mkdir()` below `y` is
+    `NotADirectoryError`), and no listing shows it.
   - Writes: zip only, and only with a local `file:` outer (else
     `NotImplementedError`). `"w"`/`"x"`/`"r+"`, `mkdir()`, `unlink()`,
-    `rmdir()`, `rename()` (same archive; replaces like POSIX `rename`);
-    parents must exist; `"a"` unsupported. Every mutation replaces the archive
-    atomically (temp file + `os.replace`) and keeps other members' metadata,
-    the comment and any prefix bytes. A write uses the normalized name; a
-    name that escapes the root fails and creates nothing.
-    `tar:` (plain, gz, bz2, xz) is read-only.
+    `rmdir()`, `rename()` (same archive; replaces like POSIX `rename`;
+    a destination below a file or a missing directory is
+    `NotADirectoryError` / `FileNotFoundError`, a directory into itself
+    `OSError(EINVAL)`); parents must exist; `"a"` unsupported. Every mutation
+    replaces the archive atomically (temp file + `os.replace`) and keeps
+    other members' metadata, the comment and any prefix bytes. A write uses
+    the normalized name; a name that escapes the root fails and creates
+    nothing.
+  - Removing a file never removes its directory: when `unlink()`, `rename()`
+    or `rm()` takes the last member out of a directory that exists only
+    through its members, the directory's own entry (`name/`) is written in
+    the same rewrite. `rmdir()` of the root succeeds on an empty archive
+    (`OSError(ENOTEMPTY)` otherwise) and removes nothing.
+    `rm(recursive=True)` of a directory is ONE rewrite, and raises
+    `OSError(ENOTEMPTY)` removing nothing when the tree holds a member under
+    a file.
+  - A member the archive spells several ways (`norm` and `./norm`) is one
+    member: `unlink()`, `rename()`, `rmdir()` and `rm()` act on every entry
+    that names it, and renaming over it replaces them all.
+  - `tar:` (plain, gz, bz2, xz) is read-only.
 
 ## CLI (`uripath`, `pathlib_next.tools.uripath`)
 

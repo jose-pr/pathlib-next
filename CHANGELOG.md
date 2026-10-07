@@ -416,6 +416,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Host internal` set the user and `ProxyCommand` of every host. Each of the
   included file's blocks now applies only where the enclosing block does, as
   in OpenSSH. An `Include` outside any block is unchanged.
+- **Removing the last member of a zip directory no longer removes the
+  directory, and `rm(recursive=True)` of a zip directory finishes.** A
+  directory that exists only through its members (what `ZipFile.write()`
+  produces) vanished with its last member: `unlink()` left its parent
+  missing, the next write into it raised `FileNotFoundError`, and
+  `rm(recursive=True)` deleted every member and then failed on the `rmdir()`
+  of a directory that was gone (the archive root failed the same way).
+  `unlink()`, `rename()`, `rmdir()` and `rm()` now write the directory's own
+  entry (`name/`) in the rewrite that empties it, `rmdir()` of an emptied
+  directory or of an empty archive root succeeds, and `rm(recursive=True)` of
+  a directory is one rewrite of the archive instead of one per member. A tree
+  that holds a member under a file is refused with `OSError(ENOTEMPTY)` and
+  nothing is removed. A zip edited this way may now hold empty directory
+  entries.
+- **`ZipUri.rename()` checks where it renames to.** A destination below a
+  file or below a missing directory was accepted and made a member nothing
+  could list, and a directory could be renamed into its own subtree. It now
+  raises `NotADirectoryError`, `FileNotFoundError` and `OSError(EINVAL)`
+  respectively, as `pathlib` does; create the directory first.
+- **A zip member that the archive spells twice is removed and renamed as one.**
+  In an archive holding `norm` and `./norm`, `unlink()` and `rename()` acted
+  on the later entry only: the earlier one came back with its older content,
+  and `rm(recursive=True)` of the enclosing directory failed with "Directory
+  not empty". `unlink()`, `rename()`, `rmdir()` and `rm()` now act on every
+  entry that names the member, and renaming over a name that has two
+  spellings replaces them all.
+- **A member below a file does not exist.** An archive holding a file `y`
+  and a member `y/z` listed only `y`, yet `y/z` could still be statted, read
+  and removed, so `copy(recursive=True)` and `walk()` skipped data that
+  `read_bytes()` returned. `exists()`, `stat()`, `open()`, `unlink()` and
+  `rename()` of `y/z` now report it missing (`FileNotFoundError`; `pathlib`
+  says `NotADirectoryError` there), on `zip:` and `tar:` alike, and writing or
+  `mkdir()` below `y` raises `NotADirectoryError`. Remove or rename `y` to
+  reach `y/z`.
+- **The root of an archive that is missing, or is not an archive, no longer
+  exists.** `exists()`, `is_dir()` and `stat()` of `zip:file:///missing.zip!/`
+  (and of `tar:`, `archive:` and an HTTP outer answering 404) said it was a
+  directory while `iterdir()` raised. They now open the archive: `exists()`
+  is `False` for a missing one and `stat()` raises `FileNotFoundError`, and a
+  file that is not an archive raises `zipfile.BadZipFile` or
+  `tarfile.ReadError`, as a listing and a member's `exists()` do. `mkdir()` of
+  the root of a missing archive raises `FileNotFoundError`; an archive is
+  still created by writing its first member.
 
 ## [0.9.11] - 2026-09-21
 

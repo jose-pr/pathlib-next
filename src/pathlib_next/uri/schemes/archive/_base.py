@@ -5,11 +5,13 @@ import io as _io
 import os as _os
 import re as _re
 import threading as _threading
+import typing as _ty
 import weakref as _weakref
 
 import uritools as _uritools
 
-from ....utils import is_safe_child_name
+from ....path import _check_follow
+from ....utils import as_error_handler, is_safe_child_name
 from ....utils.stat import FileStat
 from ... import Uri, UriPath
 from ...source import _SAFE_PATH, Source
@@ -209,6 +211,7 @@ class _ArchiveBackend:
         "_signature",
         "_lock",
         "_index",
+        "_spellings",
         "__weakref__",
     )
 
@@ -217,6 +220,7 @@ class _ArchiveBackend:
         self._handle = None
         self._signature = None
         self._index = None
+        self._spellings = None
         self._lock = _threading.RLock()
 
     def __del__(self):
@@ -237,6 +241,7 @@ class _ArchiveBackend:
         handle = self._handle
         self._handle = None
         self._index = None
+        self._spellings = None
         if handle is not None:
             handle.close()
 
@@ -277,20 +282,38 @@ class _ArchiveBackend:
 
         A member whose name escapes the root is left out entirely, so it can
         be neither listed nor looked up. When two spellings normalize to one
-        name the later entry wins, as `zipfile`/`tarfile` resolve duplicates.
+        name the later entry wins, as `zipfile`/`tarfile` resolve duplicates;
+        `raw_names()` lists all of them.
         """
         with self._lock:
             self.handle  # revalidates, and clears the cache if it reopened
-            index = self._index
-            if index is None:
-                index = {}
+            if self._index is None:
+                index: "dict[str, str]" = {}
+                spellings: "dict[str, list[str]]" = {}
                 for raw in self.names():
                     normalized = _normalize_member_name(raw)
                     if not normalized:
                         continue
+                    previous = index.get(normalized)
+                    if previous is not None and previous != raw:
+                        others = spellings.setdefault(normalized, [previous])
+                        if raw not in others:
+                            others.append(raw)
                     index[normalized] = raw
                 self._index = index
-            return index
+                self._spellings = spellings
+            return self._index
+
+    def raw_names(self, normalized: str) -> "tuple[str, ...]":
+        """Every key this backend holds the member `normalized` under, in
+        archive order (empty when there is none): an archive can spell one
+        member `norm` and `./norm`, and removing or renaming it has to act on
+        all of them or the shadowed one comes back."""
+        with self._lock:
+            raw = self.member_index().get(normalized)
+            if raw is None:
+                return ()
+            return tuple(self._spellings.get(normalized) or (raw,))
 
     def names(self) -> "list[str]":
         raise NotImplementedError
@@ -508,13 +531,62 @@ class ArchiveUri(UriPath):
                 seen.add(child)
                 yield child
 
+    def _is_hidden(
+        self,
+        member: str,
+        index: "dict[str, str]",
+        files: "dict[str, bool] | None" = None,
+    ) -> bool:
+        """Whether a file member sits above `member`. A file has no children:
+        `y/z` next to a file `y` does not exist, as for a name that escapes
+        the root, so a lookup agrees with the listing that cannot show it.
+        `files` memoizes the answer per ancestor across calls."""
+        start = member.find("/")
+        while start > 0:
+            ancestor = member[:start]
+            if ancestor in index:
+                if files is None:
+                    files = {}
+                is_file = files.get(ancestor)
+                if is_file is None:
+                    stat = self.backend.member_stat(index[ancestor])
+                    is_file = files[ancestor] = not stat.is_dir()
+                if is_file:
+                    return True
+            start = member.find("/", start + 1)
+        return False
+
+    @staticmethod
+    def _emptied_parent(
+        member: str, index: "dict[str, str]", removed, added: "str | None" = None
+    ) -> "str | None":
+        """The directory marker (`"a/b/"`) to write when taking `member` out
+        of its directory would leave that directory with nothing in it. A zip
+        directory may exist only through its members, and `removed` (the
+        normalized names leaving) plus `added` (a name arriving) decide
+        whether any remain; removing a file never removes its parent."""
+        parent = member.rstrip("/").rpartition("/")[0]
+        if not parent:
+            return None
+        marker = f"{parent}/"
+        if added is not None and added.startswith(marker):
+            return None
+        for name in index:
+            if name.startswith(marker) and name not in removed:
+                return None
+        return marker
+
     def stat(self, *, follow_symlinks=True):
         path = self._member
         if path is None:
             raise FileNotFoundError(self)
+        # The root too: a missing or unreadable archive is not a directory
+        # that exists, and a listing of it fails the same way.
+        index = self._member_index()
         if path == "":
             return FileStat(is_dir=True)
-        index = self._member_index()
+        if self._is_hidden(path, index):
+            raise FileNotFoundError(self)
         if path in index:
             return self.backend.member_stat(index[path])
         dirmarker = f"{path}/"
@@ -566,6 +638,8 @@ class ArchiveUri(UriPath):
         if member is None:
             raise FileNotFoundError(self)
         try:
+            if self._is_hidden(member, self._member_index()):
+                raise KeyError(member)
             return self.backend.read_member(self._raw_name(member))
         except KeyError as error:
             if self._is_dir_member():
@@ -601,6 +675,11 @@ class ArchiveUri(UriPath):
 
     def _mkdir(self, mode):
         self._require_writable()
+        if not self._member_for_write():
+            # The archive root is the archive itself: it exists, or there is
+            # nothing to create it in.
+            self.stat()
+            raise FileExistsError(self)
         if self.exists():
             raise FileExistsError(self)
         self._check_parent()
@@ -611,26 +690,103 @@ class ArchiveUri(UriPath):
         self._require_writable()
         path = self._member_for_write()
         index = self._member_index()
-        if path not in index:
+        if path not in index or self._is_hidden(path, index):
             if self._is_dir_member():
                 raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
             if missing_ok:
                 return
             raise FileNotFoundError(self)
-        self.backend.delete_member(index[path])
+        self.backend.delete_members(
+            self.backend.raw_names(path),
+            keep_dir=self._emptied_parent(path, index, {path}),
+        )
 
     def rmdir(self):
         self._require_writable()
         path = self._member_for_write()
-        marker = f"{path}/"
         index = self._member_index()
+        if not path:
+            # The archive root cannot be removed: an empty one is a no-op.
+            if index:
+                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
+            return
+        marker = f"{path}/"
+        if self._is_hidden(path, index):
+            raise FileNotFoundError(self)
         if any(n != marker and n.startswith(marker) for n in index):
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         if marker not in index:
             if path in index:
                 raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
             raise FileNotFoundError(self)
-        self.backend.delete_member(index[marker])
+        self.backend.delete_members(
+            self.backend.raw_names(marker),
+            keep_dir=self._emptied_parent(marker, index, {marker}),
+        )
+
+    def rm(
+        self,
+        /,
+        recursive=False,
+        missing_ok=False,
+        ignore_error: "bool | _ty.Callable[[Exception, _ty.Self], bool]" = False,
+        *,
+        follow_symlinks=False,
+        follow_binds=False,
+    ):
+        # An archive holds no symlinks or bindings: the policies are checked
+        # and have nothing to decide.
+        _check_follow("follow_symlinks", follow_symlinks)
+        _check_follow("follow_binds", follow_binds)
+        if not (recursive and self._rm_tree(as_error_handler(ignore_error))):
+            return super().rm(
+                recursive=recursive,
+                missing_ok=missing_ok,
+                ignore_error=ignore_error,
+                follow_symlinks=follow_symlinks,
+                follow_binds=follow_binds,
+            )
+
+    def _rm_tree(self, on_error) -> bool:
+        """`rm(recursive=True)` of a directory of a writable archive: every
+        member under it leaves in ONE rewrite of the archive. False when this
+        is not that case, and the generic removal handles (and reports) it."""
+        member = self._member
+        if member is None or not getattr(self.backend, "writable", False):
+            return False
+        try:
+            if not self.stat().is_dir():
+                return False
+            index = self._member_index()
+        except Exception:
+            return False
+        marker = f"{member}/" if member else ""
+        under = [name for name in index if name.startswith(marker)]
+        try:
+            # A member under a file is not listed, so a removal that walked
+            # the listing would leave it behind and the directory would
+            # come back.
+            files: "dict[str, bool]" = {}
+            hidden = [name for name in under if self._is_hidden(name, index, files)]
+            if hidden:
+                raise OSError(
+                    _errno.ENOTEMPTY,
+                    f"Directory not empty: {hidden[0]!r} lies under a file",
+                    str(self),
+                )
+            if under:
+                self.backend.delete_members(
+                    [raw for name in under for raw in self.backend.raw_names(name)],
+                    keep_dir=(
+                        self._emptied_parent(member, index, set(under))
+                        if member
+                        else None
+                    ),
+                )
+        except Exception as error:
+            if not on_error(error, self):
+                raise
+        return True
 
     def _node_key(self):
         # One member per archive handle, whichever scheme alias (`zip:`,
@@ -667,13 +823,36 @@ class ArchiveUri(UriPath):
         marker = f"{old_path}/"
         new_marker = f"{new_path}/"
         renamed = self._from_parsed_parts(self.source, new_path, "", "")
-        if old_path in index:
+        backend = self.backend
+        is_file = old_path in index and not self._is_hidden(old_path, index)
+        is_dir = (
+            not is_file
+            and not self._is_hidden(old_path, index)
+            and any(n.startswith(marker) for n in names)
+        )
+        if not (is_file or is_dir):
+            raise FileNotFoundError(self)
+        if is_dir and new_path.startswith(marker):
+            raise OSError(
+                _errno.EINVAL, "Cannot move a directory into itself", str(target)
+            )
+        renamed._check_parent()
+        if is_file:
             if new_path == old_path:
                 return renamed
             if any(n.startswith(new_marker) for n in names):
                 raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
-            self.backend.rename_member(index[old_path], new_path)
-        elif any(n.startswith(marker) for n in names):
+            # Every spelling of the source moves, and every spelling of an
+            # existing target goes: one left behind would shadow, or come
+            # back as, the member this call just placed.
+            backend.rename_member(
+                index[old_path],
+                new_path,
+                members={raw: new_path for raw in backend.raw_names(old_path)},
+                replace=backend.raw_names(new_path),
+                keep_dir=self._emptied_parent(old_path, index, {old_path}, new_path),
+            )
+        else:
             if new_marker == marker:
                 return renamed
             if new_path in index:
@@ -685,14 +864,17 @@ class ArchiveUri(UriPath):
             # which silently renamed nothing, or split the directory in two
             # when only some members carried the prefix. Hand it the exact
             # raw-name mapping instead.
+            moving = [name for name in names if name.startswith(marker)]
             members = {
-                raw: new_marker + normalized[len(marker) :]
-                for normalized, raw in index.items()
-                if normalized.startswith(marker)
+                raw: new_marker + name[len(marker) :]
+                for name in moving
+                for raw in backend.raw_names(name)
             }
-            self.backend.rename_member(
-                index.get(marker, marker), new_marker, members=members
+            backend.rename_member(
+                index.get(marker, marker),
+                new_marker,
+                members=members,
+                replace=backend.raw_names(new_marker),
+                keep_dir=self._emptied_parent(old_path, index, set(moving), new_path),
             )
-        else:
-            raise FileNotFoundError(self)
         return renamed
