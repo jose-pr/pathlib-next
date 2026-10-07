@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The scheme extras now declare version ranges.** `uritools`, `requests`,
+  `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
+  `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the
+  Python 3.9 cap) and no upper bound. The ranges are now `uritools>=5.0,<7`,
+  `requests>=2.22.0,<3`, `paramiko>=5.0,<6`, `asyncssh>=2.20.0,<3` (below 2.22
+  on Python 3.9), `boto3>=1.36.0,<2`, `google-cloud-storage>=3.0,<4`,
+  `azure-storage-blob>=12.4.0,<13` and `azure-identity>=1.0,<2`. An
+  environment that pins one of them below its floor must raise the pin; one
+  that needs a new major version must wait for a release that admits it.
+
 ## [0.9.11] - 2026-09-21
 
 ### Added

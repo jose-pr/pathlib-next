@@ -41,13 +41,42 @@ dependencies = []
 uripath = "pathlib_next.tools.uripath:main"
 
 [project.optional-dependencies]
-uri = ["uritools", "netimps>=0.3.1"]
-http = ["requests", "pathlib_next[uri]"]
-sftp = ["paramiko", "pathlib_next[uri]"]
-sftp-async = ["asyncssh<2.22; python_version<'3.10'", "asyncssh; python_version>='3.10'", "pathlib_next[uri]"]
-s3 = ["boto3", "pathlib_next[uri]"]
-gs = ["google-cloud-storage", "pathlib_next[uri]"]
-az = ["azure-storage-blob", "azure-identity", "pathlib_next[uri]"]
+# Each floor is the oldest release the test suite passes against on Python 3.9;
+# the `floors` job of the test workflow installs exactly these lower bounds.
+uri = [
+    # uritools 6 needs Python 3.10; 5.0 is the newest release for 3.9.
+    "uritools>=5.0,<7",
+    "netimps>=0.3.1",
+]
+http = [
+    # Before 2.18 the bundled urllib3 imports the ABCs from `collections`
+    # (a DeprecationWarning on 3.9); 2.21 caps urllib3 below 1.25, which
+    # botocore 1.36 cannot share.
+    "requests>=2.22.0,<3",
+    "pathlib_next[uri]",
+]
+sftp = ["paramiko>=5.0,<6", "pathlib_next[uri]"]
+sftp-async = [
+    # The connection cache calls SSHClientConnection.is_closed(), absent in
+    # 2.14; the loopback server the tests use answers readlink of an absolute
+    # target only from 2.20. asyncssh 2.22 needs Python 3.10.
+    "asyncssh>=2.20.0,<2.22; python_version<'3.10'",
+    "asyncssh>=2.20.0,<3; python_version>='3.10'",
+    "pathlib_next[uri]",
+]
+s3 = [
+    # PutObject(IfNoneMatch=) is rejected by 1.34; the tests build a client with
+    # Config(response_checksum_validation=), which botocore has from 1.36.
+    "boto3>=1.36.0,<2",
+    "pathlib_next[uri]",
+]
+gs = ["google-cloud-storage>=3.0,<4", "pathlib_next[uri]"]
+az = [
+    # BlobPrefix is not exported from azure.storage.blob in 12.3.
+    "azure-storage-blob>=12.4.0,<13",
+    "azure-identity>=1.0,<2",
+    "pathlib_next[uri]",
+]
 dev = ['build', 'twine', 'hatchling', 'pytest', 'pytest-cov', 'pyftpdlib', 'wsgidav', 'cheroot', 'moto[s3]', 'hypothesis', 'black']
 docs = ['mkdocs', 'mkdocs-material', 'mkdocstrings[python]']
 
