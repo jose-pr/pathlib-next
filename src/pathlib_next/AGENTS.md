@@ -415,7 +415,12 @@ chained (their text can carry credentials).
 - **`FileUri`** (`file:`; `schemes.file`) — `file:///abs`, `file:rel`,
   `file://localhost/C:/x`. `filepath -> LocalPath`; all I/O delegates to it
   (listing reuses `LocalPath`'s scandir). `rename()` accepts local targets
-  only and returns a `FileUri`. No `symlink_to()`/`readlink()`.
+  only and returns a `FileUri`. No `symlink_to()`/`readlink()`. On Windows a
+  drive is the anchor: `parents` ends at the drive root (`file:/C:/`) and
+  equals the repeated `parent`, dot segments never climb above it, and a
+  `str` join key or `copy()`/`move()`/`rename()` destination reads `\` as a
+  separator (`C:\Temp\x` is an absolute path). Elsewhere a backslash is a
+  filename character, and every other scheme splits on `/` only.
 - **`DataUri`** (`data:`; `schemes.data`) — RFC 2397
   `data:[<mediatype>][;base64],<data>`. `mediatype` property (default
   `text/plain;charset=US-ASCII`). Read-only single file: `open("r")` only,

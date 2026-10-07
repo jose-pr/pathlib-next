@@ -22,6 +22,9 @@ class FileUri(UriPath):
 
     @property
     def parent(self):
+        if _os.name == "nt" and _is_drive(self.path.removeprefix("/")):
+            # A bare drive is its own parent, as in `PureWindowsPath("C:")`.
+            return self
         parent = super().parent
         path = parent.path
         if _os.name == "nt" and _is_drive(path.removeprefix("/")):
@@ -29,6 +32,24 @@ class FileUri(UriPath):
             # parent of a top-level "C:/Windows" is the drive root "C:/".
             return parent.with_path(path + "/")
         return parent
+
+    def _anchor_segments(self):
+        # The drive is the anchor of "C:/a/b" (and "/C:/a/b" under a host),
+        # so `parents` ends at the drive root "C:/" like `parent` does.
+        segments = self.segments
+        if _os.name == "nt":
+            if segments[:1] and _is_drive(segments[0]):
+                return segments[:1]
+            if segments[:1] == ("",) and len(segments) > 1 and _is_drive(segments[1]):
+                return segments[:2]
+        return super()._anchor_segments()
+
+    def _join_decoded(self, key: str):
+        # A Windows path string separates its names with backslashes;
+        # elsewhere a backslash is an ordinary character of a file name.
+        if _os.name == "nt" and "\\" in key:
+            key = key.replace("\\", "/")
+        return super()._join_decoded(key)
 
     def _is_absolute_decoded(self, path: str) -> bool:
         """A drive path restarts a join, as `PureWindowsPath` does: joining

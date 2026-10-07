@@ -138,6 +138,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `UriPath("file:///D:/data/../../x")` was `\x` on the current drive, and a
   join such as `UriPath("file:///C:/d/") / "../../../x"` lost the drive the
   same way. On Windows they now stay on `C:/`, as `PureWindowsPath` does.
+- **`FileUri.parents` on a Windows drive path ends at the drive root.**
+  `UriPath(LocalPath("C:/Windows/System32")).parents` ended in `file:/C:` and
+  `file:`, two paths relative to the working directory, so an upward search
+  (`for p in path.parents: (p / "marker").exists()`) looked in the current
+  directory. It is now `[file:/C:/Windows, file:/C:/]`, what repeated
+  `.parent` and `LocalPath.parents` give. The `parent` of a bare drive
+  (`file:///C:`) is the drive itself; it was the empty path.
+- **A Windows path string works as a `file:` join key and as a
+  `copy()`/`move()`/`rename()` destination on Windows.** A destination such
+  as `str(pathlib.Path)` gives (`C:\Temp\x`) was joined as one file name and
+  failed with `OSError` (`WinError 123`) in `FileUri.copy()`, `move()` and
+  `rename()`, and `base / r"sub\x"` named a file `sub\x`. On Windows a
+  `file:` path now reads `\` in such a string as a separator, so
+  `C:\Temp\x` is an absolute path and `sub\x` is two names. Elsewhere a
+  backslash is still an ordinary filename character, and every other scheme
+  splits on `/` only.
 
 ## [0.9.11] - 2026-09-21
 

@@ -91,18 +91,17 @@ class _PathnameParents(_ty.Sequence[PN]):
     """This object provides sequence-like access to the logical ancestors
     of a path.  Don't try to construct it yourself."""
 
-    __slots__ = ("_path", "_anchored", "_segments")
+    __slots__ = ("_path", "_anchor", "_segments")
 
     def __init__(self, path: PN):
         self._path = path
         segments = tuple(path.segments)
-        # A leading "" marks the root of an absolute path. It is the anchor,
-        # not an ancestor of its own: counting it made MemPath("/a/b").parents
+        # The anchor (a leading "" for the root of an absolute path) is not
+        # an ancestor of its own: counting it made MemPath("/a/b").parents
         # ['/a', '', ''] -- one entry too many, and the root spelled as the
         # relative empty path (pathlib: ['/a', '/']).
-        self._anchored = bool(segments) and segments[0] == ""
-        if self._anchored:
-            segments = segments[1:]
+        self._anchor = path._anchor_segments()
+        segments = segments[len(self._anchor) :]
         while segments and not segments[-1]:
             segments = segments[:-1]
         self._segments = segments
@@ -123,10 +122,10 @@ class _PathnameParents(_ty.Sequence[PN]):
         if idx < 0:
             idx += len(self)
         kept = self._segments[: -idx - 1]
-        if not self._anchored:
+        if not self._anchor:
             return self._path.with_segments(*kept)
         # ("", "") is the root in with_segments' "/"-joined spelling.
-        return self._path.with_segments("", *(kept or ("",)))
+        return self._path.with_segments(*self._anchor, *(kept or ("",)))
 
     def __repr__(self):
         return "<{}.parents>".format(type(self._path).__name__)
@@ -320,6 +319,13 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def parents(self) -> _ty.Sequence[_ty.Self]:
         """An immutable sequence providing access to the logical ancestors of the path."""
         return _PathnameParents(self)
+
+    def _anchor_segments(self) -> tuple[str, ...]:
+        """The leading entries of `segments` that anchor the path rather than
+        name a directory, for `parents`: `("",)` for a rooted path, else
+        `()`. A subclass that spells its root differently overrides it."""
+        segments = self.segments
+        return ("",) if segments and segments[0] == "" else ()
 
     @_utils.notimplemented
     def is_absolute(self) -> bool:
