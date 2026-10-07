@@ -11,6 +11,7 @@ from ...utils.stat import FileStat
 from .. import Uri
 from ..source import _compose_uri
 from .http import (
+    _EXCLUSIVE_CREATE,
     _IDENTITY_ENCODING,
     HttpPath,
     _UploadStream,
@@ -120,13 +121,20 @@ def _raise_for_multistatus(resp, path) -> None:
 
 
 class _DavWriteStream(_UploadStream):
-    def __init__(self, path: "DavPath"):
+    def __init__(self, path: "DavPath", exclusive: bool = False):
         super().__init__(path)
+        # `exclusive` (mode "x"): see `HttpWriteStream`.
+        self._exclusive = exclusive
         self._ready = True
 
     def _upload(self, data):
         # 409: an intermediate collection is missing (RFC 4918 9.7.1).
-        self._path._dav_request("PUT", data=data, statuses={409: FileNotFoundError})
+        statuses = {409: FileNotFoundError}
+        extra = {}
+        if self._exclusive:
+            statuses[412] = FileExistsError
+            extra = _EXCLUSIVE_CREATE
+        self._path._dav_request("PUT", data=data, statuses=statuses, **extra)
 
 
 class DavPath(HttpPath):
@@ -284,9 +292,9 @@ class DavPath(HttpPath):
             return _response_reader(self, req, buffering)
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
-        if mode == "x" and self.exists():
-            raise FileExistsError(self)
-        return _DavWriteStream(self)
+        if mode == "x":
+            self._ensure_missing()
+        return _DavWriteStream(self, exclusive=mode == "x")
 
     def _mkdir(self, mode):
         self._dav_request(

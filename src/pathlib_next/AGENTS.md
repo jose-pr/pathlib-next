@@ -429,12 +429,17 @@ chained (their text can carry credentials).
     children; a non-HTML response → `NotADirectoryError` (an HTML file lists
     as empty). Cannot always tell a file from an index page.
   - `open("r")` streams `GET` with `Accept-Encoding: identity`. `"w"`/`"x"`
-    buffer and send `write_method` on close (`"x"` checks then writes, not
-    atomic). `"a"`: `append_mode="rewrite"` (GET + full re-upload, not atomic)
-    or `"patch"` (`PATCH` with `Content-Range` from `stat()`; a refusal raises
-    `PermissionError` for 401/403/405/501, `OSError(EIO)` for other statuses).
-    An `open("a")` that raises (the read of the current content, or the
-    `HEAD` of patch mode, failed) has uploaded nothing.
+    buffer and send `write_method` on close. `"x"` first calls `stat()`: found
+    → `FileExistsError`, a failure other than not-found raises with nothing
+    sent; the upload then carries `If-None-Match: *`, and a 412 reply →
+    `FileExistsError` (a server that ignores the header leaves the window
+    between probe and upload open). `"a"`: `append_mode="rewrite"` (GET + full
+    re-upload, not atomic) or `"patch"` (`PATCH` with `Content-Range` from the
+    `HEAD` size; a `HEAD` reply without `Content-Length` → `OSError(EIO)`
+    naming the path, nothing sent; a refusal raises `PermissionError` for
+    401/403/405/501, `OSError(EIO)` for other statuses). An `open("a")` that
+    raises (the read of the current content, or the `HEAD` of patch mode,
+    failed) has uploaded nothing.
   - `unlink()` sends `DELETE` and refuses a directory (`IsADirectoryError`,
     judged by `stat()`); `rmdir()` requires an empty directory. No `mkdir()`,
     `rename()`, `chmod()`.
@@ -444,7 +449,8 @@ chained (their text can carry credentials).
 - **`DavPath(HttpPath)`** (`dav:`/`davs:`, sent as `http:`/`https:`; `http`
   extra; `schemes.dav`) — same backend and `with_session()`. `stat()`/
   listing via `PROPFIND`. `open("r")` on a collection → `IsADirectoryError`;
-  `"w"`/`"x"` `PUT` on close; `"a"` unsupported. `mkdir()` = `MKCOL`
+  `"w"`/`"x"` `PUT` on close (`"x"` as for `HttpPath`, probing with
+  `PROPFIND`); `"a"` unsupported. `mkdir()` = `MKCOL`
   (missing parent → `FileNotFoundError`). `unlink()` refuses a collection;
   `rmdir()` checks emptiness first; `rm(recursive=True)` is one recursive
   `DELETE` (failed members of a 207 raise). `rename()` = `MOVE` with

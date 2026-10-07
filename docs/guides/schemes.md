@@ -81,11 +81,15 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
   `path.with_session(session, write_method="PUT", append_mode="rewrite",
   **requests_args)`: `requests_args` (`headers=`, `auth=`, `verify=`,
   `timeout=`, ...) go to every request.
-  - Writes send `write_method` with the whole body on close; `open("x")`
-    checks and then writes (not atomic).
+  - Writes send `write_method` with the whole body on close. `open("x")`
+    calls `stat()` first: a file that exists raises `FileExistsError`, and so
+    does any failure of that check other than not-found (nothing is sent).
+    The upload carries `If-None-Match: *`, so a server that honours it
+    answers 412 (`FileExistsError`) if the file appeared meanwhile.
   - `open("a")`: `append_mode="rewrite"` downloads, appends and re-uploads
     (works on any server, not atomic); `append_mode="patch"` sends `PATCH`
-    with a `Content-Range` starting at the current size and never falls back.
+    with a `Content-Range` starting at the size the `HEAD` reply states
+    (`OSError` if it has no `Content-Length`) and never falls back.
     A refused `PATCH` raises `PermissionError` (401, 403, 405, 501) or
     `OSError` with the HTTP status (other codes, such as 400). An `open("a")`
     that raises, because reading the current content or the `HEAD` failed,

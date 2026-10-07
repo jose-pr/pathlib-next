@@ -597,6 +597,11 @@ def _response_reader(path, response: _req.Response, buffering: int):
     return raw if buffer_size == 0 else _io.BufferedReader(raw, buffer_size)
 
 
+_EXCLUSIVE_CREATE = {"headers": {"If-None-Match": "*"}}
+"""Request keywords that make a `PUT` create the file only if it is absent
+(RFC 9110 13.1.2)."""
+
+
 class _UploadStream(_io.BytesIO):
     """A write buffer whose `close()` uploads its content through `_upload()`.
 
@@ -627,14 +632,22 @@ class _UploadStream(_io.BytesIO):
 
 
 class HttpWriteStream(_UploadStream):
-    def __init__(self, path: "HttpPath"):
+    def __init__(self, path: "HttpPath", exclusive: bool = False):
         super().__init__(path)
+        # `exclusive` (mode "x"): the upload carries `If-None-Match: *`, and a
+        # 412 reply means the file appeared since the caller looked.
+        self._exclusive = exclusive
         self._ready = True
 
     def _upload(self, data):
         backend = self._path.backend
+        extra = _EXCLUSIVE_CREATE if self._exclusive else {}
         with _translate_http_errors(self._path, conflict=FileNotFoundError):
-            resp = backend.request(backend.write_method, self._path.as_uri(), data=data)
+            resp = backend.request(
+                backend.write_method, self._path.as_uri(), data=data, **extra
+            )
+            if self._exclusive and resp.status_code == 412:
+                raise _path_error(FileExistsError, self._path)
             resp.raise_for_status()
 
 
@@ -653,12 +666,19 @@ class HttpAppendStream(_UploadStream):
             # would overwrite the file wherever the listing was wrong.
             path._pop_stat_hint()
             try:
-                stat = path.stat()
-                self._start_offset = stat.st_size
-                self._existed = True
+                stat, size_stated = path._head_stat()
             except FileNotFoundError:
                 self._start_offset = 0
                 self._existed = False
+            else:
+                if not size_stated:
+                    raise OSError(
+                        _errno.EIO,
+                        f"Cannot append to {path} in patch mode: the HEAD reply "
+                        "has no Content-Length, so the end of the file is unknown",
+                    )
+                self._start_offset = stat.st_size
+                self._existed = True
         self._ready = True
 
     def _upload(self, data):
@@ -918,7 +938,12 @@ class HttpPath(UriPath):
         hint = self._pop_stat_hint()
         if hint is not None:
             return hint
+        return self._head_stat(walk_up_last_modified)[0]
 
+    def _head_stat(self, walk_up_last_modified=False) -> "tuple[FileStat, bool]":
+        """`stat()` without the listing hint, and whether the server stated
+        the size: a file whose HEAD reply has no `Content-Length` reports
+        `st_size` 0, which is not its length."""
         with _translate_http_errors(self):
             # The caller's own spelling first: a trailing-slash path the
             # server answers is a directory, even when the slash-less URL
@@ -979,7 +1004,19 @@ class HttpPath(UriPath):
                 except (StopIteration, OSError):
                     pass
 
-        return FileStat(st_size=st_size, st_mtime=_utils.parsedate(lm), is_dir=is_dir)
+        size_stated = is_dir or "Content-Length" in resp.headers
+        stat = FileStat(st_size=st_size, st_mtime=_utils.parsedate(lm), is_dir=is_dir)
+        return stat, size_stated
+
+    def _ensure_missing(self) -> None:
+        """Raise `FileExistsError` unless `stat()` says the path is not
+        found. Any other failure of the probe (a 5xx, a 403, a timeout)
+        propagates: it must not read as permission to create."""
+        try:
+            self.stat()
+        except FileNotFoundError:
+            return
+        raise _path_error(FileExistsError, self)
 
     def _open(
         self,
@@ -1001,9 +1038,9 @@ class HttpPath(UriPath):
             return HttpAppendStream(self)
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
-        if mode == "x" and self.exists():
-            raise FileExistsError(self)
-        return HttpWriteStream(self)
+        if mode == "x":
+            self._ensure_missing()
+        return HttpWriteStream(self, exclusive=mode == "x")
 
     def unlink(self, missing_ok=False):
         # A server that honours DELETE on a collection (WebDAV, RFC 4918)

@@ -71,6 +71,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   redirect and a body that cannot be sent twice raise `OSError` (`EIO`)
   naming the status and the `Location`, without its userinfo. A server that
   redirects writes must be addressed by its final URL.
+- **`open("x")` on `http:` and `dav:` no longer replaces a file whose
+  existence check failed, and patch-mode append no longer overwrites the start
+  of a file whose size is unknown.** `open("x")` read any error of its
+  existence check (a 5xx, a 403, a 429, a timeout) as "missing" and sent the
+  `PUT`, replacing the file. It now raises that error and sends nothing, and
+  the upload carries `If-None-Match: *`, which a server that honours it
+  answers with 412, now `FileExistsError`. With `append_mode="patch"`, a
+  `HEAD` reply without `Content-Length` was read as size 0 and the appended
+  bytes were written at offset 0 (`Content-Range: bytes 0-2/*`); `open("a")`
+  now raises `OSError` naming the path and sends no `PATCH`. `stat()` still
+  reports `st_size` 0 for such a reply. A server whose existence check fails
+  for a missing file needs `open("w")` instead of `open("x")`; one that does
+  not state the size of its files needs `append_mode="rewrite"`.
 
 ## [0.9.11] - 2026-09-21
 

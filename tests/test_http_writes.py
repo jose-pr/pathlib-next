@@ -127,7 +127,8 @@ def _handler_class(wire):
                     return
             status, extra, payload = reply
             self.send_response(status)
-            extra = {"Content-Length": str(len(payload)), **extra}
+            if "Transfer-Encoding" not in extra:
+                extra = {"Content-Length": str(len(payload)), **extra}
             for key, value in extra.items():
                 self.send_header(key, value)
             self.end_headers()
@@ -525,3 +526,109 @@ def test_reads_still_follow_redirects(wire):
     assert _path(wire, "http", "/r302/f.bin").read_bytes() == b"CONTENT"
     assert _path(wire, "dav", "/r307/f.bin").stat().st_size == 7
     assert [r.method for r in wire.log] == ["GET", "GET", "PROPFIND", "PROPFIND"]
+
+
+# --- exclusive create ("x") and the size patch-mode append starts from ---
+
+_PROBE_FAILURES = {
+    "500": ((500, {}, b""), OSError),
+    "403": ((403, {}, b""), PermissionError),
+    "429": ((429, {}, b""), OSError),
+    "503": ((503, {}, b""), OSError),
+    "timeout": (_stall, TimeoutError),
+}
+_PROBE = {"http": "HEAD", "dav": "PROPFIND"}
+
+
+@pytest.mark.parametrize("scheme", _SCHEMES)
+@pytest.mark.parametrize("failure", _PROBE_FAILURES)
+def test_exclusive_create_whose_existence_probe_fails_raises_and_sends_no_put(
+    wire, scheme, failure
+):
+    reply, error = _PROBE_FAILURES[failure]
+    wire.files["/f.bin"] = b"PRECIOUS"
+    wire.on(_PROBE[scheme], "/f.bin", reply)
+    with pytest.raises(error):
+        _path(wire, scheme, "/f.bin").open("xb")
+    assert [r.method for r in wire.log] == [_PROBE[scheme]]
+    assert wire.files == {"/f.bin": b"PRECIOUS"}
+
+
+@pytest.mark.parametrize("scheme", _SCHEMES)
+def test_exclusive_create_of_an_existing_file_raises_and_sends_no_put(wire, scheme):
+    wire.files["/f.bin"] = b"PRECIOUS"
+    with pytest.raises(FileExistsError) as excinfo:
+        _path(wire, scheme, "/f.bin").open("xb")
+    assert excinfo.value.errno == errno.EEXIST
+    assert [r.method for r in wire.log] == [_PROBE[scheme]]
+    assert wire.files == {"/f.bin": b"PRECIOUS"}
+
+
+@pytest.mark.parametrize("scheme", _SCHEMES)
+def test_exclusive_create_sends_if_none_match_and_the_session_headers(wire, scheme):
+    path = _path(wire, scheme, "/new.bin", headers={"X-Token": "t"})
+    with path.open("xb") as stream:
+        stream.write(b"CREATED")
+    (put,) = wire.sent("PUT")
+    assert put.headers["If-None-Match"] == "*"
+    assert put.headers["X-Token"] == "t"
+    assert wire.files == {"/new.bin": b"CREATED"}
+
+
+@pytest.mark.parametrize("scheme", _SCHEMES)
+def test_exclusive_create_is_refused_by_the_server_when_the_file_appeared(wire, scheme):
+    # The probe is told the file is missing, as if it was created since.
+    wire.files["/f.bin"] = b"PRECIOUS"
+    wire.on(_PROBE[scheme], "/f.bin", (404, {}, b""))
+    with pytest.raises(FileExistsError) as excinfo:
+        with _path(wire, scheme, "/f.bin").open("xb") as stream:
+            stream.write(b"CLOBBER")
+    assert excinfo.value.errno == errno.EEXIST
+    assert wire.files == {"/f.bin": b"PRECIOUS"}
+
+
+@pytest.mark.parametrize("scheme", _SCHEMES)
+def test_plain_write_sends_no_if_none_match(wire, scheme):
+    _path(wire, scheme, "/w.bin").write_bytes(b"data")
+    assert all("If-None-Match" not in r.headers for r in wire.log)
+    assert wire.files == {"/w.bin": b"data"}
+
+
+def test_rewrite_append_sends_no_if_none_match(wire):
+    wire.files["/log.txt"] = b"one\n"
+    with _path(wire, "http", "/log.txt").open("ab") as stream:
+        stream.write(b"two\n")
+    assert all("If-None-Match" not in r.headers for r in wire.log)
+    assert wire.files == {"/log.txt": b"one\ntwo\n"}
+
+
+_NO_LENGTH = (200, {"Transfer-Encoding": "chunked"}, b"")
+
+
+def test_patch_append_refuses_a_head_reply_without_content_length(wire):
+    wire.files["/log.txt"] = b"0123456789"
+    wire.on("HEAD", "/log.txt", _NO_LENGTH)
+    path = _path(wire, "http", "/log.txt", append_mode="patch")
+    with pytest.raises(OSError) as excinfo:
+        path.open("ab")
+    assert excinfo.value.errno == errno.EIO
+    assert str(path) in str(excinfo.value) and "Content-Length" in str(excinfo.value)
+    gc.collect()
+    assert [r.method for r in wire.log] == ["HEAD"]
+    assert wire.files == {"/log.txt": b"0123456789"}
+
+
+def test_patch_append_to_an_empty_file_starts_at_offset_zero(wire):
+    wire.files["/empty.txt"] = b""
+    path = _path(wire, "http", "/empty.txt", append_mode="patch")
+    with path.open("ab") as stream:
+        stream.write(b"abc")
+    (patch,) = wire.sent("PATCH")
+    assert patch.headers["Content-Range"] == "bytes 0-2/*"
+    assert wire.files == {"/empty.txt": b"abc"}
+
+
+def test_stat_still_reports_size_zero_for_a_head_reply_without_content_length(wire):
+    wire.files["/log.txt"] = b"0123456789"
+    wire.on("HEAD", "/log.txt", _NO_LENGTH)
+    assert _path(wire, "http", "/log.txt").stat().st_size == 0
