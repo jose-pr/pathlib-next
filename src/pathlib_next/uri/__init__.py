@@ -1174,6 +1174,12 @@ class UriPath(Uri, Path):
         mine, theirs = self._supplied_backend(), other._supplied_backend()
         return mine is None or theirs is None or mine is theirs
 
+    def _rename_compatible(self, target) -> bool:
+        # Every scheme's `rename()` reads its target through
+        # `_rename_target()`, which raises NotImplementedError for one it
+        # cannot reach, so `move()` falls back to copy + delete by itself.
+        return True
+
     def _coerce_target(self, target: str) -> "UriPath":
         """A `str` destination for `copy()`/`move()`, read by its shape.
 

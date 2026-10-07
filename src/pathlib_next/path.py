@@ -1213,11 +1213,15 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
     def _rename_compatible(self, target: "Path") -> bool:
         """Whether `rename()` may be attempted onto `target` at all. `move()`
-        skips straight to copy + delete when it is not. Default True: URI
-        schemes decide per target in `rename()` (raising NotImplementedError);
-        `LocalPath` requires a local target, since `os.rename()` would
-        otherwise take a remote path's `__fspath__()` as a local name."""
-        return True
+        skips straight to copy + delete when it is not. Default: only onto a
+        path of this very class, since `rename()` runs inside this class's
+        own store and would otherwise be handed a path of another store (a
+        `MemPath` subclass given a `LocalPath` renamed within memory).
+        `UriPath` decides per target in `rename()` (raising
+        NotImplementedError); `LocalPath` requires a local target, since
+        `os.rename()` would otherwise take a remote path's `__fspath__()` as
+        a local name."""
+        return type(target) is type(self)
 
     def _same_filesystem(self, other: "Path") -> bool:
         """Whether `other`'s segments are resolved in the same namespace as
@@ -1492,6 +1496,10 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         ignore_error(e)
                     elif not ignore_error:
                         raise
+            if preserve_metadata:
+                # After the children: a read-only directory could not take
+                # them, and its mode is only settled once they are in.
+                _copy_mode(src, target, follow_symlinks)
             return
 
         if _same_file(src, target):
@@ -1543,19 +1551,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 raise
 
         if preserve_metadata:
-            try:
-                stat = src.stat(follow_symlinks=follow_symlinks)
-                # Only a mode the source backend actually reported is
-                # metadata. FileStat's placeholder (0o444 for a file) is not:
-                # applying it made every copy from MemPath/HTTP/S3/... a
-                # read-only file that a re-copy or re-sync could not replace.
-                if getattr(stat, "mode_known", True) and stat.st_mode:
-                    # Permission bits only: the file-type bits of st_mode
-                    # (0o100000 for a regular file) are not a mode, and a
-                    # backend such as FTP's SITE CHMOD sends them verbatim.
-                    target.chmod(_stat.S_IMODE(stat.st_mode))
-            except NotImplementedError:
-                pass
+            _copy_mode(src, target, follow_symlinks)
 
     def _copy_symlink(self, target: "Path", *, overwrite=False):
         """`copy(follow_symlinks=False)` of a symlink: create a link at
@@ -1656,8 +1652,17 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 if error.errno != _errno.EXDEV:
                     raise
 
-        if src.is_dir():
-            src.copy(target, overwrite=overwrite, recursive=True)
+        # A link is recreated, not read through, wherever the target can
+        # hold one: what a move produces must not depend on whether
+        # rename() was available.
+        links = _holds_links(src, target)
+        if src_stat.is_symlink() and links:
+            src.copy(target, overwrite=overwrite, follow_symlinks=False)
+            src.unlink()
+        elif src.is_dir():
+            src.copy(
+                target, overwrite=overwrite, recursive=True, follow_symlinks=not links
+            )
             src.rm(recursive=True)
         else:
             src.copy(target, overwrite=overwrite)
@@ -1690,6 +1695,28 @@ def _follow_policy(policy, path: "Path") -> str:
 
 class _InvalidPolicy(ValueError):
     """A follow policy that is not `True`, `False` or `None`."""
+
+
+def _copy_mode(src: Path, target: Path, follow_symlinks: bool) -> None:
+    """Give `target` the permission bits `src` reports, when it reports any.
+
+    Only a mode the source backend actually reported is metadata:
+    `FileStat`'s placeholder (0o444 for a file) is not, and applying it made
+    every copy from MemPath/HTTP/S3/... a read-only file that a re-copy or
+    re-sync could not replace. Permission bits only: the file-type bits of
+    `st_mode` are not a mode, and a backend such as FTP's SITE CHMOD sends
+    them verbatim. Between two classes the setuid, setgid and sticky bits are
+    dropped: a mode read from another backend (a tar member, a remote
+    server) must not make a privileged file here."""
+    try:
+        stat = src.stat(follow_symlinks=follow_symlinks)
+        if getattr(stat, "mode_known", True) and stat.st_mode:
+            mode = _stat.S_IMODE(stat.st_mode)
+            if type(src) is not type(target):
+                mode &= ~(_stat.S_ISUID | _stat.S_ISGID | _stat.S_ISVTX)
+            target.chmod(mode)
+    except NotImplementedError:
+        pass
 
 
 def _check_follow(name: str, policy) -> None:
@@ -1856,6 +1883,15 @@ def _same_file(src: Path, target: Path) -> bool:
         except (OSError, ValueError):
             return False
     return _relation(src, target, follow=True) in (_SAME, _OTHER)
+
+
+def _holds_links(src: Path, target: Path) -> bool:
+    """Whether a symlink of `src` can be recreated at `target`: `src` reads
+    links and the class of `target` implements `_symlink_to()`."""
+    return (
+        callable(getattr(src, "readlink", None))
+        and getattr(type(target), "_symlink_to", None) is not Path._symlink_to
+    )
 
 
 def _drop_second_name(src: Path, src_stat, target: Path, target_stat) -> Path:

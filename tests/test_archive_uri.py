@@ -5,11 +5,14 @@
 
 import base64
 import io
+import os
+import stat
 import tarfile
 import zipfile
 
 import pytest
 
+from pathlib_next import LocalPath
 from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes.archive import (
     ArchiveUri,
@@ -370,6 +373,20 @@ def test_tar_has_no_mutation_support(tar_archive):
         p.rmdir()
     with pytest.raises(NotImplementedError):
         p.rename("x.txt")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_copy_of_a_tar_member_drops_the_setuid_bit(tmp_path):
+    archive = tmp_path / "suid.tar"
+    with tarfile.open(archive, "w") as tf:
+        info = tarfile.TarInfo("run.sh")
+        info.size = 1
+        info.mode = 0o4755
+        tf.addfile(info, io.BytesIO(b"x"))
+
+    UriPath(_tar_uri(archive, "run.sh")).copy(LocalPath(tmp_path / "run.sh"))
+
+    assert stat.S_IMODE(os.stat(tmp_path / "run.sh").st_mode) == 0o755
 
 
 # --- archive: catch-all scheme: detection + explicit archive+<fmt>: forms ---

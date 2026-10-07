@@ -112,6 +112,12 @@ def _node_key(self):
     return self._connection, tuple(self._normalized_names())
 ```
 
+`move()` calls `rename()` only onto a path of the very same class, and copies and deletes
+otherwise: `rename()` runs inside your class's own store, so it is not handed a path
+of another one. Override `_rename_compatible(target) -> bool` to widen that (a
+`UriPath` already does: its `rename()` raises `NotImplementedError` for a target it
+cannot reach, and `move()` then copies).
+
 `MemPath` implements this surface over nested dicts (`MemPathBackend`: a
 `dict` value is a directory, a `bytearray` a file); see
 [Memory Path API](../api/mempath.md).

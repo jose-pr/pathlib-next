@@ -227,9 +227,15 @@ silently absent and `from pathlib_next.uri import UriPath` raises
       Raised as `ValueError` through `ignore_error`, per child, like any other
       child failure.
     - `follow_symlinks=False` on a symlink recreates the link
-      (`NotImplementedError` if either side cannot).
+      (`NotImplementedError` if either side cannot); only the target text is
+      copied, not the link's own mode, times or owner. A dangling symlink at
+      the target is written through, as `shutil.copyfile` does.
     - `preserve_metadata=True` copies permission bits only, and only a mode the
-      source backend really reported (`FileStat.mode_known`).
+      source backend really reported (`FileStat.mode_known`): a file's, and a
+      directory's after its children are copied, so a read-only directory
+      still receives them. Between two different classes the setuid, setgid
+      and sticky bits are dropped, so a mode read from a tar member or a
+      remote server never makes a privileged file here.
     - `ignore_error`: `True` suppresses child errors of a recursive copy,
       `False`/`None` raise; a callable is called as `ignore_error(error)` and
       the error is **always** suppressed (its return value is ignored — not
@@ -248,9 +254,15 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     Sameness is decided as for `copy()`. Two hard links of one file are two
     names: an existing target needs `overwrite=True`, and the source name is
     then removed, so the target name keeps the content. Tries `rename()`
-    when `_rename_compatible(target)`, falling back to
-    `copy(recursive=True)` + `rm`/`unlink` on `NotImplementedError` or
-    `OSError(EXDEV)`. `overwrite=True` replaces a
+    when `_rename_compatible(target)` (default: only onto a path of the very
+    same class; `UriPath` leaves it to `rename()`, which raises
+    `NotImplementedError` for a target it cannot reach; `LocalPath` requires a
+    local target), falling back to `copy(recursive=True)` + `rm`/`unlink` on
+    `NotImplementedError` or `OSError(EXDEV)`. The fallback recreates a
+    symlink, and the links inside a moved tree, at a target whose class
+    implements `_symlink_to()`, so the result does not depend on whether
+    `rename()` was available; any other target receives what the links point
+    at. `overwrite=True` replaces a
     local file atomically (`replace()`); elsewhere the target is unlinked just
     before the rename. Returns `rename()`'s result (`None` on the fallback).
 - **`FsPathLike`** — `Protocol` with `__fspath__() -> str`.

@@ -31,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `azure-storage-blob>=12.4.0,<13` and `azure-identity>=1.0,<2`. An
   environment that pins one of them below its floor must raise the pin; one
   that needs a new major version must wait for a release that admits it.
+- **`copy(preserve_metadata=True)` drops the setuid, setgid and sticky bits
+  between two different classes.** A mode read from a tar member, a zip entry
+  or a remote server was applied verbatim, so `04755` in an archive made a
+  setuid file on the local disk. A copy between two classes now applies the
+  permission bits without those three; a copy within one class keeps them.
+  Run `chmod()` afterwards where the bit is wanted.
+- **`move()` calls `rename()` only onto a path of the same class.** The default
+  of `Path._rename_compatible()` was True, so a `Path` subclass with a
+  `rename()` of its own was handed a path of another store and ran the rename
+  inside its own (a `MemPath` subclass moved onto a `LocalPath` looked for the
+  local path in memory). The target of another class now gets copy + delete.
+  A subclass whose `rename()` handles other classes overrides
+  `_rename_compatible()`; `UriPath` and `LocalPath` decide for themselves as
+  before.
 
 ### Fixed
 - **A `..` or `.` name in a remote listing no longer escapes the tree.** The
@@ -239,6 +253,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   object stores have no symlinks or bindings, so the keywords decide nothing
   there; `sftp:` runs its concurrent native walk only for the default
   `follow_symlinks=False` and the generic walk for any other value.
+- **`move()` keeps a symlink a symlink when it has to copy.** Where `rename()`
+  was unavailable (another device, a backend without `rename()`) the fallback
+  followed the link: the destination became a full copy of the linked tree or
+  file, and so did every link inside a moved tree. The fallback now recreates
+  the links wherever the target's class can hold them, so the result no
+  longer depends on whether the two paths share a filesystem. A target that
+  cannot hold links (`MemPath`, an object store) still receives the content.
+- **`copy(recursive=True, preserve_metadata=True)` keeps directory
+  permissions.** Files kept their mode but directories were created with the
+  default one, so a `0o700` directory copied as `0o755` and the files that
+  were private through their parent became reachable; a move of a tree across
+  devices did the same. Each directory now takes the source's reported mode
+  after its children are copied (so a read-only directory still receives
+  them), as `shutil.copytree` and pathlib 3.14 do.
 
 ## [0.9.11] - 2026-09-21
 
