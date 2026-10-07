@@ -597,9 +597,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         A class that mixes a concrete stdlib path with `Path` but not
         `LocalPath` is a local class too, and gets what `LocalPath` has for
         each name it defines (`_local_primitives`) wherever stdlib or a
-        generic default would otherwise answer: stdlib's `is_junction()`
-        and `is_mount()` are what `rm(recursive=True)` consults to stay out
-        of a junction, and its `stat()`, `chmod()` and `_scandir()` do not
+        generic default would otherwise answer: the generic `is_junction()`
+        and `is_mount()` say False, so `rm(recursive=True)` would walk into a
+        junction, and stdlib's `stat()`, `chmod()` and `_scandir()` do not
         take pathlib_next's arguments.
         """
         super().__init_subclass__(**kwargs)
