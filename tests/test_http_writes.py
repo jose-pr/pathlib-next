@@ -18,9 +18,10 @@ from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes.dav import DavPath, _DavWriteStream
 from pathlib_next.uri.schemes.http import HttpAppendStream, HttpPath, HttpWriteStream
 
-# Short enough for a stalled reply to time out quickly, long enough for a
-# loopback connect.
-TIMEOUT = (5, 0.3)
+# (connect, read) seconds: a reply is waited for generously, except when a
+# test makes the server stall, which needs a read timeout short enough to hit.
+TIMEOUT = (5, 30)
+STALL_TIMEOUT = (5, 0.3)
 
 
 class _Request(typing.NamedTuple):
@@ -151,17 +152,18 @@ def wire(serve_http):
 
 
 def _path(wire, scheme, name, **session_args):
-    """`name` on the wire server as an `http:` or `dav:` path whose requests
-    time out after `TIMEOUT`."""
+    """`name` on the wire server as an `http:` or `dav:` path. Requests time
+    out after `STALL_TIMEOUT` when a rule stalls the server, else `TIMEOUT`."""
     url = f"{scheme}{wire.base[len('http'):]}{name}"
+    timeout = STALL_TIMEOUT if _stall in wire.rules.values() else TIMEOUT
     return UriPath(url).with_session(
-        requests.Session(), **{"timeout": TIMEOUT, **session_args}
+        requests.Session(), **{"timeout": timeout, **session_args}
     )
 
 
 def _stall(handler):
     """Answer nothing until the client has given up."""
-    time.sleep(TIMEOUT[1] * 3)
+    time.sleep(STALL_TIMEOUT[1] * 3)
 
 
 def _cut_short(handler):
