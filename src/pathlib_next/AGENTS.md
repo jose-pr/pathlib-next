@@ -335,19 +335,29 @@ silently absent and `from pathlib_next.uri import UriPath` raises
     redeclare per class; the class name must not start with `_`). Defining or
     importing the subclass is enough, including after the first dispatch.
   - `backend` — per-instance connection state from `_initbackend()` (base:
-    `None`), created on first use and inherited by derived paths.
+    `None`), built on first use. A derived path (`/`, `joinpath()`,
+    `parent`, `parents`, `with_name()`, `with_suffix()`, `with_query()`,
+    `relative_to()`, `UriPath(base, x)`, a `Uri`/`PurePath` join) never
+    builds one -- so it never imports an I/O library either -- and takes the
+    backend its source path already holds, or none.
     `with_backend(backend)` returns a copy using `backend`. A backend is only
     shared within one endpoint (scheme, userinfo, host, port): a join,
-    `with_source()` or `UriPath(base, url)` onto another endpoint builds a
-    fresh one, so credentials and sessions never follow.
+    `with_source()` or `UriPath(base, url)` onto another endpoint takes none
+    and builds a fresh one on first use, so credentials and sessions never
+    follow. When several joined paths hold one, the rightmost whose endpoint
+    is the result's is taken; the sourceless result of `relative_to()` holds
+    none, so `dst_root / src.relative_to(src_root)` uses `dst_root`'s.
     `_same_filesystem()`: two URIs are on different filesystems only when
     BOTH carry a backend the caller supplied (`backend=`, `with_backend()`,
     or inherited from such a path) and those are different objects -- two
-    connections, or fakes standing in for two hosts. A backend a path
-    derived for itself counts as none, so two separately built paths to one
-    URL are the same file. A derived backend is recognised by being weakly
-    referenceable (every built-in `Base*Backend` is; give a slotted custom
-    one `"__weakref__"`); one that is not reads as supplied.
+    connections, or fakes standing in for two hosts. A backend a path built
+    for itself counts as none, so two separately built paths to one URL are
+    the same file. The path records that it built the backend and passes the
+    record on, so this holds for any backend object, a `dict` or a slotted
+    class without `__weakref__` included. A scheme that hands its own backend
+    on through `backend=` (as a `with_source()` override does) is recognised
+    as derived when the object is weakly referenceable (every built-in
+    `Base*Backend` is) and `_initbackend()` built it.
   - Listing: implement `_listdir() -> Iterator[str]` or override
     `_scandir()`; `iterdir()` wraps each name with the entry's stat as a
     single-use hint (the child's first `stat()` returns it, later calls

@@ -55,7 +55,9 @@ def _same_authority(a: Source, b: Source) -> bool:
 
 #: Backends a path built for itself through `_initbackend()`, keyed by `id()`
 #: (a backend may be unhashable or compare by value; the `is` test on lookup
-#: makes a reused id harmless). Everything else was supplied by the caller.
+#: makes a reused id harmless). A path also records this on itself
+#: (`UriPath._backend_derived`); the registry covers a derived backend that a
+#: scheme hands on through `backend=`, which reads as supplied otherwise.
 _DERIVED_BACKENDS: "_weakref.WeakValueDictionary[int, object]" = (
     _weakref.WeakValueDictionary()
 )
@@ -387,9 +389,6 @@ class Uri(Pathname):
         result = self
         if self._is_absolute_decoded(key):
             result = self.with_path("/")
-            backend = getattr(self, "_backend", None)
-            if backend is not None:
-                result = result.with_backend(backend)
         for segment in key.split("/"):
             if segment in ("", "."):
                 continue
@@ -401,10 +400,7 @@ class Uri(Pathname):
             # A trailing "/" is load-bearing: for http/dav it is how a
             # directory URL is spelled, and `name`/`parent` are documented
             # to keep it (see docs/divergences.md).
-            backend = getattr(result, "_backend", None)
             result = result.with_path(result.path + "/")
-            if backend is not None:
-                result = result.with_backend(backend)
         return result
 
     def _join_arg(self, arg):
@@ -864,7 +860,11 @@ class UriPath(Uri, Path):
     `listdir_attr`, an S3 list page, ...) -- `walk()`/`glob()` then answer
     `is_dir()` on the results for free, without a stat request per entry."""
 
-    __slots__ = ("_backend", "_stat_hint", "_backend_origin")
+    #: `_backend` is the backend object, or None until one is built or
+    #: inherited; `_backend_derived` says the path built it (or inherited one
+    #: that was); `_backend_candidates` holds the join segments' backends
+    #: until the path knows its own endpoint.
+    __slots__ = ("_backend", "_backend_derived", "_backend_candidates", "_stat_hint")
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
 
@@ -992,31 +992,71 @@ class UriPath(Uri, Path):
         else:
             inst = Uri.__new__(cls, *args, **kwargs)
             backend = kwargs.get("backend", None)
-            if backend is None:
-                for segment in reversed(args):
-                    if isinstance(segment, cls):
-                        backend = segment.backend
-                        # Checked against the finished path on first use:
-                        # `base / "http://other/x"` must not carry `base`'s
-                        # session (auth, token) to another host.
-                        inst._backend_origin = segment.source
-                        break
-            inst._backend = backend
+            if backend is not None:
+                inst._backend = backend
+            else:
+                # Which of these a path inherits depends on the endpoint it
+                # ends up with, known once it is parsed (`_inherit_backend`).
+                for segment in args:
+                    if isinstance(segment, cls) and (
+                        segment._backend is not None
+                        or segment._backend_candidates is not None
+                    ):
+                        # Parsing the segment settles its own inheritance.
+                        origin = segment.source
+                        if segment._backend is not None:
+                            if inst._backend_candidates is None:
+                                inst._backend_candidates = []
+                            inst._backend_candidates.append(
+                                (origin, segment._backend, segment._backend_derived)
+                            )
         return inst
 
     def _initbackend(self):
         return None
 
+    def _inherit_backend(self, source: Source) -> None:
+        """Settle which join segment's backend this path takes now that its
+        endpoint is `source`: the rightmost one that belongs to that same
+        endpoint (scheme, userinfo, host, port), else none. A backend never
+        crosses to another endpoint, so credentials and sessions stay put."""
+        candidates = self._backend_candidates
+        if candidates is None:
+            return
+        for origin, backend, derived in reversed(candidates):
+            if _same_authority(origin, source):
+                self._backend, self._backend_derived = backend, derived
+                break
+        self._backend_candidates = None
+
+    def _backend_for(self, source: Source):
+        """`(backend, derived)` a path at `source` inherits from this one:
+        what this path already holds, if `source` is its own endpoint, else
+        `(None, None)`. Never builds a backend."""
+        if not self._initiated:
+            self._load_parts()
+        backend = self._backend
+        if backend is not None:
+            mine = self._source
+            if source is mine or _same_authority(source, mine):
+                return backend, self._backend_derived
+        return None, None
+
     def _from_parsed_parts(
         self, source: Source, path: str, query: str, fragment: str, /, **kwargs
     ):
-        if "backend" not in kwargs:
-            kwargs["backend"] = (
-                self.backend
-                if not source or _same_authority(source, self.source)
-                else None
-            )
-        return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+        if "backend" in kwargs or (
+            self._backend is None and self._backend_candidates is None
+        ):
+            # Given, or nothing to carry: the usual case before any I/O.
+            return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+        backend, derived = self._backend_for(source)
+        if backend is not None:
+            kwargs["backend"] = backend
+        inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+        if backend is not None and inst._backend is backend:
+            inst._backend_derived = derived
+        return inst
 
     def _init(
         self,
@@ -1028,24 +1068,28 @@ class UriPath(Uri, Path):
         backend=None,
         **kwargs,
     ):
+        self._inherit_backend(source)
         if backend is not None:
             self._backend = backend
+            self._backend_derived = None
         super()._init(source, path, query, fragment, **kwargs)
 
     @property
     def backend(self):
         """The connection or session state backend instance."""
-        self._check_inherited_backend()
-        if self._backend is None:
+        if not self._initiated:
+            # Settles a backend inherited from a join segment first.
+            self._load_parts()
+        backend = self._backend
+        if backend is None:
             backend = self._backend = self._initbackend()
             if backend is not None:
+                self._backend_derived = True
                 try:
                     _DERIVED_BACKENDS[id(backend)] = backend
                 except TypeError:
-                    # Not weak-referenceable: it reads as a supplied backend
-                    # unless its class is a `_DerivedBackend`.
                     pass
-        return self._backend
+        return backend
 
     def _supplied_backend(self):
         """The backend the caller gave this path (`backend=`,
@@ -1054,6 +1098,7 @@ class UriPath(Uri, Path):
         backend = self._backend
         if (
             backend is None
+            or self._backend_derived
             or isinstance(backend, _DerivedBackend)
             or _DERIVED_BACKENDS.get(id(backend)) is backend
         ):
@@ -1083,23 +1128,14 @@ class UriPath(Uri, Path):
         """
         if _looks_like_uri(target):
             destination = type(self)(target, findclass=True)
-            backend = getattr(self, "_backend", None)
-            if backend is not None and _same_authority(self.source, destination.source):
-                # Same endpoint: reuse the connection (and whatever auth was
-                # configured on it) rather than opening a second, bare one.
-                destination = destination.with_backend(backend)
+            # Same endpoint: reuse the connection (and whatever auth was
+            # configured on it) rather than opening a second, bare one.
+            backend, derived = self._backend_for(destination.source)
+            if backend is not None:
+                destination._backend, destination._backend_derived = backend, derived
             return destination
         # `/` joins a decoded path on this endpoint and carries the backend.
         return self.parent / target
-
-    def _check_inherited_backend(self):
-        # A backend copied from a join segment is only valid for the same
-        # endpoint; for any other it is dropped and rebuilt from this path.
-        origin = self._backend_origin
-        if origin is not None:
-            self._backend_origin = None
-            if self._backend is not None and not _same_authority(origin, self.source):
-                self._backend = None
 
     def with_backend(self, backend):
         """Return a new path instance sharing the same backend state."""
@@ -1151,9 +1187,10 @@ class UriPath(Uri, Path):
         elif source.scheme not in cls._schemes():
             inst = cls.__new__(cls, source.scheme + ":", findclass=True)
         else:
-            self._check_inherited_backend()
-            same = _same_authority(source, self.source)
-            inst = cls.__new__(cls, backend=self._backend if same else None)
+            inst = cls.__new__(cls)
+            backend, derived = self._backend_for(source)
+            if backend is not None:
+                inst._backend, inst._backend_derived = backend, derived
         inst._init(source, self.path, self.query, self.fragment)
         return inst
 
@@ -1201,13 +1238,10 @@ class UriPath(Uri, Path):
     def _make_child_relpath(
         self, name: str, stat_hint: "FileStat" = None, **kwargs
     ) -> _ty.Self:
-        # The backend ALREADY BUILT, never `self.backend` -- that property
-        # creates one, and naming a child is a pure-path operation: since
-        # `/` walks segments through here, reading the property made
-        # `UriPath("sftp://h/x") / "y"` import paramiko (and `http:` import
-        # requests) just to spell a path. A listing has one by the time it
-        # gets here, so its children still share the instance.
-        inst = super()._make_child_relpath(name, backend=self._backend, **kwargs)
+        # The child takes the backend this path already holds and builds none
+        # (`_from_parsed_parts`): naming a child is a pure-path operation. A
+        # listing has one by the time it gets here, so its children share it.
+        inst = super()._make_child_relpath(name, **kwargs)
         inst._stat_hint = stat_hint
         return inst
 

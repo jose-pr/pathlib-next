@@ -84,6 +84,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reports `st_size` 0 for such a reply. A server whose existence check fails
   for a missing file needs `open("w")` instead of `open("x")`; one that does
   not state the size of its files needs `append_mode="rewrite"`.
+- **A session or token no longer follows a path to another endpoint, and the
+  mirroring idiom keeps the destination's backend.** Since 0.9.7, a path that
+  crossed endpoints (`UriPath(base, "http://other/d/")`, `base.joinpath(Uri(...),
+  "x")`, `base / Uri(...)`) kept `base`'s backend for the next `str` join,
+  `with_name()` or `copy()`/`move()` destination written as a URL, until its
+  first read, so an `HttpPath.with_session(auth=...)` session or a
+  `github://TOKEN@...` token was sent to the other host. And
+  `dst_root / src.relative_to(src_root)` dropped the backend given to
+  `dst_root` and built the default one, so the copy ran on the ambient S3
+  client, or on an HTTP session without its headers. A derived path now takes
+  the backend its source holds only when it is on the same scheme, userinfo,
+  host and port, the rightmost joined path on the result's endpoint
+  supplies it, and the sourceless result of `relative_to()` holds none. A
+  path that crosses endpoints needs its own `with_session()` or
+  `with_backend()`.
+- **Deriving a path no longer builds a backend.** `parent`, `parents`,
+  `with_name()`, `with_suffix()`, `with_query()`, `relative_to()`,
+  `UriPath(base, x)` and a join with a `Uri` or `PurePath` built the source's
+  backend: the first `parent` of an `sftp:` path imported asyncssh, and
+  raised `ImportError` where neither SSH library is installed. They now copy the backend the source already holds, or leave the new path
+  without one until its first I/O. Paths derived before any I/O therefore
+  build their own backend instead of sharing one made for the source; read
+  `path.backend` first, or pass `backend=`, to share a connection.
+- **A backend that cannot be weakly referenced no longer turns off the
+  same-file guard.** When `_initbackend()` returned a `dict`, an `object()` or
+  an instance of a `__slots__` class without `"__weakref__"`, two separately
+  built paths to one URL were judged to be on different filesystems and
+  `a.copy(b, overwrite=True)` onto itself was not refused. A path now records
+  that it built its backend and passes the record on, so such a backend reads
+  as derived and the copy is refused. A backend given through `backend=` or
+  `with_backend()` still reads as supplied.
 
 ## [0.9.11] - 2026-09-21
 

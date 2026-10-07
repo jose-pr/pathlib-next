@@ -389,7 +389,16 @@ class ArchiveUri(UriPath):
     __slots__ = ()
     _backend_cls: type = None
 
+    def _backend_for(self, source):
+        backend, derived = super()._backend_for(source)
+        if backend is None and not source:
+            # The sourceless `relative_to()` result is still a member path of
+            # this archive: its handle is what `_init` reads as "derived".
+            backend, derived = self._backend, self._backend_derived
+        return backend, derived
+
     def _init(self, source, path, query, fragment, /, **kwargs):
+        self._inherit_backend(source)
         backend = kwargs.get("backend", None) or self._backend
         if backend is None:
             # Fresh top-level construction (e.g. UriPath("zip:...!/...")).

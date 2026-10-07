@@ -191,15 +191,28 @@ def test_a_shared_supplied_backend_is_one_host():
 
 
 def test_a_derived_backend_that_cannot_be_weakly_referenced(monkeypatch):
-    # It cannot be recorded as derived, so it reads as supplied: two such
-    # paths are "different", which is what every path was before. No crash.
+    # The path records that it built the backend, so an object that cannot be
+    # tracked by identity is still derived: two paths to one URL are the same
+    # file and a copy onto itself is refused.
     monkeypatch.setattr(ProbePath, "_initbackend", lambda self: SlottedStore())
     a, b = UriPath(URL), UriPath(URL)
     a.backend["/dir/f.txt"] = b"A"
     b.backend["/dir/f.txt"] = b"B"
-    assert a._supplied_backend() is a.backend
-    assert not a._same_filesystem(b)
+    assert a._supplied_backend() is None
+    assert a._same_filesystem(b)
     assert a._same_filesystem(a.parent / "f.txt")
+    with pytest.raises(OSError, match="same file"):
+        a.copy(b, overwrite=True)
+    assert a.backend["/dir/f.txt"] == b"A"
+    assert b.backend["/dir/f.txt"] == b"B"
+
+
+def test_a_supplied_backend_that_cannot_be_weakly_referenced_stays_supplied():
+    one, two = SlottedStore(), SlottedStore()
+    a, b = UriPath(URL, backend=one), UriPath(URL, backend=two)
+    assert a._supplied_backend() is one
+    assert not a._same_filesystem(b)
+    assert (a / "x")._supplied_backend() is one
 
 
 def test_supplied_backend_is_never_built_by_asking():

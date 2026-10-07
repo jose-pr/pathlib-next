@@ -8,7 +8,7 @@ import typing as _ty
 import requests as _req
 
 from ... import utils as _utils
-from .. import Source, UriPath, _same_authority
+from .. import Source, UriPath
 from ..source import _compose_host
 
 DEFAULT_TIMEOUT = (10, 60)
@@ -233,13 +233,10 @@ class _RepoApiPath(UriPath):
             from .git._base import GitPath
 
             provider_cls = GitPath._provider_cls(source)
-            self._check_inherited_backend()
-            same = isinstance(self, provider_cls) and _same_authority(
-                source, self.source
-            )
-            inst = UriPath.__new__(
-                provider_cls, backend=self._backend if same else None
-            )
+            inst = UriPath.__new__(provider_cls)
+            backend, derived = self._backend_for(source)
+            if backend is not None and isinstance(self, provider_cls):
+                inst._backend, inst._backend_derived = backend, derived
             inst._init(source, self.path, self.query, self.fragment)
             return inst
         return super().with_source(source)

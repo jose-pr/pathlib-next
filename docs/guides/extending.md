@@ -88,9 +88,8 @@ def _same_filesystem(self, other):
 `st_ino`. `MemPath` compares its `MemPathBackend` by identity. A `UriPath`
 needs nothing: two URIs are told apart only when both were given a backend
 (`backend=`, `with_backend()`) and those differ; a backend the path built for
-itself through `_initbackend()` adds nothing to what the URI already says. If
-your backend class uses `__slots__`, include `"__weakref__"` so such a
-backend can be recognised.
+itself through `_initbackend()` adds nothing to what the URI already says --
+the path records that it built the backend, whatever the backend's class is.
 
 `MemPath` implements this surface over nested dicts (`MemPathBackend`: a
 `dict` value is a directory, a `bytearray` a file); see
@@ -166,8 +165,10 @@ Conventions for a scheme implementation:
   raises `NotImplementedError` for another endpoint, which makes `move()`
   copy instead. Override `_same_location()` when your namespace is narrower
   than the authority (an archive, a container).
-- A backend is inherited by derived paths only for the same scheme, userinfo,
-  host and port; paths elsewhere call `_initbackend()` again.
+- A derived path (`/`, `parent`, `with_name()`, `relative_to()`, ...) never
+  calls `_initbackend()`: it takes the backend its source already holds, and
+  only for the same scheme, userinfo, host and port. A path with none builds
+  its own on first use.
 - Set `_host_filesystem_path = True` only when `self.path` is a real
   filesystem path on the remote host (as for `sftp:`); `os.fspath()` and
   `host_fspath()` then return it.
