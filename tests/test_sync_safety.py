@@ -1139,46 +1139,57 @@ def mount_named_mounted(monkeypatch):
     monkeypatch.setattr(pathlib_next.LocalPath, "is_mount", fake_is_mount)
 
 
-def test_mount_point_in_target_is_not_synced_into(tmp_path, mount_named_mounted):
-    # rmdir() of a live mount point fails, so the replacement is refused and
-    # reported; nothing is written into or removed from the mounted tree.
+def test_mount_point_in_target_is_part_of_the_tree(tmp_path, mount_named_mounted):
+    # A mounted volume below the target is a filesystem boundary, not a link:
+    # the sync writes into it and keeps what the source does not name.
     src = tmp_path / "src"
     _write(src / "mounted" / "new.txt", "new")
     _write(src / "own.txt", "own")
     dst = tmp_path / "dst"
-    _write(dst / "mounted" / "theirs.txt", "NOT MINE")
-    _write(dst / "mounted" / "deep" / "more.txt", "NOT MINE EITHER")
-    calls, ignore = _collect()
+    _write(dst / "mounted" / "theirs.txt", "theirs")
+    events, hook = _events()
 
-    PathSyncer(_size, remove_missing=True, ignore_error=ignore).sync(
+    PathSyncer(_size, hook=hook).sync(
         pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
     )
 
-    assert sorted(p.name for p in (dst / "mounted").iterdir()) == ["deep", "theirs.txt"]
-    assert (dst / "mounted" / "theirs.txt").read_text() == "NOT MINE"
-    assert (dst / "mounted" / "deep" / "more.txt").read_text() == "NOT MINE EITHER"
+    assert (dst / "mounted" / "new.txt").read_text() == "new"
+    assert (dst / "mounted" / "theirs.txt").read_text() == "theirs"
     assert (dst / "own.txt").read_text() == "own"
-    assert len(calls) == 1
-    error, source_entry, target_entry, event = calls[0]
-    assert isinstance(error, OSError)
-    assert event is SyncEvent.TypeMismatch
-    assert target_entry.path == pathlib_next.LocalPath(dst / "mounted")
+    assert not [e for e, _, _, _ in events if e is SyncEvent.TypeMismatch]
 
 
-def test_mount_point_in_target_raises_by_default_and_keeps_its_content(
+def test_mount_point_in_target_follows_remove_missing_like_a_directory(
     tmp_path, mount_named_mounted
 ):
     src = tmp_path / "src"
     _write(src / "mounted" / "new.txt", "new")
     dst = tmp_path / "dst"
-    _write(dst / "mounted" / "theirs.txt", "NOT MINE")
+    _write(dst / "mounted" / "stale.txt", "stale")
 
-    with pytest.raises(OSError):
-        PathSyncer(_size, remove_missing=True).sync(
-            pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
-        )
+    PathSyncer(_size, remove_missing=True).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
 
-    assert sorted(p.name for p in (dst / "mounted").iterdir()) == ["theirs.txt"]
+    assert sorted(p.name for p in (dst / "mounted").iterdir()) == ["new.txt"]
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+def test_junction_that_is_a_mount_point_is_synced_into(tmp_path, mount_named_mounted):
+    # A mounted volume is built from the same reparse point as a junction.
+    outside = tmp_path / "volume"
+    _write(outside / "theirs.txt", "theirs")
+    src = tmp_path / "src"
+    _write(src / "mounted" / "new.txt", "new")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    _junction(outside, dst / "mounted")
+
+    PathSyncer(_size).sync(pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst))
+
+    assert pathlib_next.LocalPath(dst / "mounted").is_junction()
+    assert (outside / "new.txt").read_text() == "new"
+    assert (outside / "theirs.txt").read_text() == "theirs"
 
 
 def test_root_target_that_is_a_mount_point_is_used_as_given(

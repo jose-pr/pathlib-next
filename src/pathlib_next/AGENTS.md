@@ -804,11 +804,11 @@ class TestMyPath(PathContract):
     name that would leave `target` (`..`, or on a Windows target `\`, `:`, a
     trailing dot or space, a device name) → `ValueError`, decided on the name
     as listed, in the source's listing and the target's alike; a symlink
-    inside `target` is replaced, never followed, and so is a directory
-    binding below its root (`is_dir_binding()`: a junction, a mount point;
-    `rmdir()` fails on a live mount, reported as `OSError`, event
-    `TypeMismatch`, nothing touched behind it); the root `target` is used as
-    given. Listing entries with unknown
+    inside `target` is replaced, never followed, and so is a Windows
+    junction below its root (event `TypeMismatch`; `rmdir()` removes the
+    junction and nothing behind it). A mount point inside `target` is part
+    of the tree and is synced into; the root `target` is used as given.
+    Listing entries with unknown
     stats are re-stat'd. A name the source lists is never "missing": a listed
     link that cannot be resolved (dangling, a loop, an unmounted volume) is an
     error for that entry (`FileNotFoundError` or the stat's `OSError`, event
