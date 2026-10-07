@@ -267,6 +267,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   devices did the same. Each directory now takes the source's reported mode
   after its children are copied (so a read-only directory still receives
   them), as `shutil.copytree` and pathlib 3.14 do.
+- **`PathSyncer` no longer deletes the target entry behind a source link that
+  cannot be resolved.** With the default `follow_symlinks=True`, a source
+  child that is a symlink to nothing (an unmounted volume, a removed
+  directory) was read as "vanished", and `remove_missing=True` removed the
+  same-named target entry recursively: a target directory holding the only
+  copy of its files was emptied and the run reported success. (A link in a
+  loop failed the listing of the whole directory instead.) A name the source
+  directory lists is now never missing.
+  Such a link is an error for that entry, offered to `ignore_error` with
+  event `SyncEvent.SyncStart`; the target entry stays as it is, with or
+  without `remove_missing`, and the rest of the directory is still synced
+  once the policy tolerates it. **A sync that met such a link and finished
+  silently now raises** (`FileNotFoundError` for a dangling link, the stat's
+  `OSError` for a loop) under the default policy: pass `ignore_error=True`
+  (or a callable) to carry on past it, or `follow_symlinks=False` to mirror
+  the link itself.
+- **`ignore_error` receives `PathAndStat` entries when the root stat fails.**
+  A failing `stat()` of the root `source` or `target` offered the caller's raw
+  path objects to the policy while the hook got `PathAndStat`, so a policy
+  reading `source.path` or `source.stat` raised `AttributeError` and hid the
+  real error. Both arguments are now always `PathAndStat` (with an unknown
+  `stat` when the stat is what failed).
 
 ## [0.9.11] - 2026-09-21
 

@@ -790,8 +790,9 @@ class TestMyPath(PathContract):
   - `hook(source: PathAndStat, target: PathAndStat, event: SyncEvent,
     dry_run: bool)` is called for every event (structural ones included) with
     the call's `dry_run`.
-  - `ignore_error`: bool or `callable(error, source, target, event) -> bool`,
-    offered once per error; a tolerated error is logged at WARNING on logger
+  - `ignore_error`: bool or `callable(error, source, target, event) -> bool`
+    (`source` and `target` are `PathAndStat`), offered once per error; a
+    tolerated error is logged at WARNING on logger
     `pathlib_next.sync` and reported to `hook` as `SyncEvent.Error`.
     `.log(msg, *args)` (INFO on the same logger) is overridable.
   - Safety, all through `ignore_error`: a missing root `source` →
@@ -801,7 +802,11 @@ class TestMyPath(PathContract):
     trailing dot or space, a device name) → `ValueError`, decided on the name
     as listed, in the source's listing and the target's alike; a symlink
     inside `target` is replaced, never followed. Listing entries with unknown
-    stats are re-stat'd.
+    stats are re-stat'd. A name the source lists is never "missing": a listed
+    link that cannot be resolved (dangling, a loop, an unmounted volume) is an
+    error for that entry (`FileNotFoundError` or the stat's `OSError`, event
+    `SyncStart`) and the same-named target entry is left alone, whatever
+    `remove_missing` is; only a name the listing no longer holds is removed.
   - `remove_missing=True` deletes target entries absent from the source. With
     `False`, a non-empty target directory whose source became a file or link
     is kept (`IsADirectoryError`, event `TypeMismatch`).

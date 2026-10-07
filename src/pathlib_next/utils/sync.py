@@ -225,11 +225,33 @@ def _same_link(source: Path, target: Path) -> bool:
 
 
 def _as_entry(entry) -> "PathAndStat":
-    # Hooks are declared to receive PathAndStat; a raw path that never got
-    # stat'd (its stat() is what failed) is reported with an unknown stat.
+    # Hooks and error policies are declared to receive PathAndStat; a raw
+    # path that never got stat'd (its stat() is what failed) is reported with
+    # an unknown stat.
     if isinstance(entry, PathAndStat):
         return entry
     return PathAndStat.from_stat(entry, None)
+
+
+def _unresolved_link(entry: "PathAndStat") -> "tuple[Exception, PathAndStat] | None":
+    """For a source entry whose followed stat found nothing: the error to
+    offer and the entry as the link itself, when the directory still lists
+    something there that cannot be resolved (a dangling link, a loop, an
+    unmounted volume). None when nothing is left at that name, so it
+    vanished after the listing. Never an instruction to delete anything."""
+    link = FileStat.from_path(entry.path, follow_symlink=False)
+    if link is None:
+        return None
+    error = None
+    try:
+        entry.path.stat()
+    except OSError as caught:
+        error = caught
+    if error is None or isinstance(error, FileNotFoundError):
+        error = FileNotFoundError(
+            _errno.ENOENT, "the link's target does not exist", str(entry.path)
+        )
+    return error, PathAndStat.from_stat(entry.path, link)
 
 
 def _temp_sibling(path: Path) -> Path:
@@ -460,9 +482,13 @@ class PathSyncer(object):
     file, directory or symlink (FIFO, socket, device) is skipped with a
     `SyncEvent.Skipped` event and its target left untouched.
 
-    Errors: `ignore_error` is consulted once per error, with the paths of
-    the entry that failed and the event that failed (`SyncEvent.Compare`
-    for a failing quick check or checksum). An error it declines propagates
+    Errors: `ignore_error` is consulted once per error, with the
+    `PathAndStat` entries that failed and the event that failed
+    (`SyncEvent.Compare` for a failing quick check or checksum). A name the
+    source directory lists is never "missing": a link whose target cannot be
+    resolved (dangling, a loop, an unmounted volume) is an error for that
+    entry (event `SyncEvent.SyncStart`), and the same-named target entry is
+    left as it is, whatever `remove_missing` is. An error it declines propagates
     without being offered again by enclosing directories. A dry run takes
     the same decisions as a real run (a directory that would be created is
     treated as empty) without changing anything. Every error the policy
@@ -566,6 +592,7 @@ class PathSyncer(object):
         """Offer `error` to `policy` once (see `_offer_error`). A tolerated
         error is logged at WARNING and reported to the hook as
         `SyncEvent.Error`, so `ignore_error=True` never loses it silently."""
+        source, target = _as_entry(source), _as_entry(target)
         if not _offer_error(policy, error, source, target, event):
             return False
         _logger.warning(
@@ -578,7 +605,7 @@ class PathSyncer(object):
             exc_info=(type(error), error, error.__traceback__),
         )
         if self._hook:
-            self._hook(_as_entry(source), _as_entry(target), SyncEvent.Error, dry_run)
+            self._hook(source, target, SyncEvent.Error, dry_run)
         self.log(self.EVENT_LOG_FORMAT, SyncEvent.Error, source, target, dry_run)
         return True
 
@@ -622,30 +649,37 @@ class PathSyncer(object):
             child = _glob._child(entry.path, name)
             if not _utils.is_safe_child_name(name, windows=windows):
                 children.append((name, PathAndStat.from_stat(child, None)))
-            elif pair:
-                if self.follow_symlinks:
-                    children.append(
-                        (name, PathAndStat(child, follow_symlink=self.follow_symlinks))
-                    )
-                else:
-                    # `None` means "stat unknown" (GitLab blobs, FTP's NLST
-                    # fallback), not "missing": ask the path itself before
-                    # remove_missing can treat the entry as gone.
-                    stat = scan_entry[1]
-                    if stat is None:
-                        stat = FileStat.from_path(
-                            child, follow_symlink=self.follow_symlinks
-                        )
-                    children.append((name, PathAndStat.from_stat(child, stat)))
-            else:
-                try:
-                    stat = FileStat.from_stat(
-                        scan_entry.stat(follow_symlinks=self.follow_symlinks)
-                    )
-                except FileNotFoundError:
-                    stat = None
+            elif pair and not self.follow_symlinks:
+                # `None` means "stat unknown" (GitLab blobs, FTP's NLST
+                # fallback), not "missing": ask the path itself before
+                # remove_missing can treat the entry as gone.
+                stat = scan_entry[1]
+                if stat is None:
+                    stat = FileStat.from_path(child, follow_symlink=False)
                 children.append((name, PathAndStat.from_stat(child, stat)))
+            else:
+                children.append((name, self._followed(scan_entry, child, pair)))
         return children
+
+    def _followed(self, scan_entry, child: Path, pair: bool) -> PathAndStat:
+        """`child` described by the stat `follow_symlinks` asks for. A listed
+        link that cannot be followed (a loop, an offline volume) gets no
+        stat, like a dangling one, so that `_sync` reports that entry alone
+        instead of the whole listing failing."""
+        try:
+            if pair:
+                return PathAndStat(child, follow_symlink=True)
+            stat = scan_entry.stat(follow_symlinks=self.follow_symlinks)
+            return PathAndStat.from_stat(child, FileStat.from_stat(stat))
+        except FileNotFoundError:
+            return PathAndStat.from_stat(child, None)
+        except OSError:
+            if (
+                not self.follow_symlinks
+                or FileStat.from_path(child, follow_symlink=False) is None
+            ):
+                raise
+            return PathAndStat.from_stat(child, None)
 
     def sync(
         self,
@@ -668,11 +702,13 @@ class PathSyncer(object):
         callable explicitly behaves exactly as before.
 
         The root call is checked before anything is touched: a `source`
-        that does not exist raises `FileNotFoundError` (only a child that
-        vanishes mid-sync takes the `remove_missing` path), and a `source`
-        and `target` of the same implementation where one contains the
-        other raise `ValueError`. Both go through `ignore_error`; a
-        tolerated error ends the call without changes. Child names that
+        that does not exist raises `FileNotFoundError`, and a `source` and
+        `target` of the same implementation where one contains the other
+        raise `ValueError`. Below the root, only a name the source listing
+        no longer holds takes the `remove_missing` path; a listed link that
+        cannot be resolved is an error for its entry. All go through
+        `ignore_error`; a tolerated root error ends the call without
+        changes, a tolerated entry error skips that entry. Child names that
         would not stay a single component inside `target` (`..`, a
         separator, drive, trailing dot or device name on a Windows target)
         raise `ValueError` the same way, decided on the name as the source
@@ -750,6 +786,17 @@ class PathSyncer(object):
                 return
 
         if not source.exists():
+            # A name the directory lists is never "missing": a link that
+            # cannot be resolved is an error for this entry, and the target
+            # entry of that name stays as it is.
+            unresolved = _unresolved_link(source)
+            if unresolved is not None:
+                error, link = unresolved
+                if not self._tolerate(
+                    _ignore_error, error, link, target, SyncEvent.SyncStart, dry_run
+                ):
+                    raise error
+                return
             if self.remove_missing:
                 if self.hook(
                     source,

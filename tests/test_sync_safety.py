@@ -894,3 +894,153 @@ def test_real_fifo_is_skipped(tmp_path):
 
     assert (target / "pipe").read_text() == "keep me"
     assert (target / "z.txt").read_text() == "z"
+
+
+# --- a listed entry is never "missing" ---------------------------------------
+
+from pathlib_next.utils.sync import PathAndStat
+
+
+def _dangling_layout(tmp_path):
+    """A source whose `data` and `file.txt` are links to nothing (an
+    unmounted volume), over a target that holds the real thing."""
+    src = tmp_path / "src"
+    _write(src / "keep.txt", "keep")
+    _symlink(tmp_path / "not-mounted", src / "data", directory=True)
+    _symlink(tmp_path / "gone.txt", src / "file.txt")
+    dst = tmp_path / "dst"
+    _write(dst / "data" / "precious.txt", "precious")
+    _write(dst / "file.txt", "precious too")
+    return src, dst
+
+
+@pytest.mark.parametrize("remove_missing", [True, False])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_dangling_source_link_is_an_error_not_a_removal(
+    tmp_path, remove_missing, dry_run
+):
+    src, dst = _dangling_layout(tmp_path)
+    calls, ignore = _collect()
+
+    PathSyncer(_size, remove_missing=remove_missing, ignore_error=ignore).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst), dry_run=dry_run
+    )
+
+    assert (dst / "data" / "precious.txt").read_text() == "precious"
+    assert (dst / "file.txt").read_text() == "precious too"
+    assert (dst / "keep.txt").exists() is not dry_run
+    reported = {c[1].path.name: c for c in calls}
+    assert sorted(reported) == ["data", "file.txt"]
+    for error, source, target, event in reported.values():
+        assert isinstance(error, FileNotFoundError)
+        assert isinstance(source, PathAndStat) and source.is_symlink()
+        assert isinstance(target, PathAndStat)
+        assert target.path.name == source.path.name
+        assert event is SyncEvent.SyncStart
+
+
+@pytest.mark.parametrize("remove_missing", [True, False])
+def test_dangling_source_link_raises_by_default_and_keeps_target(
+    tmp_path, remove_missing
+):
+    src, dst = _dangling_layout(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        PathSyncer(_size, remove_missing=remove_missing).sync(
+            pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+        )
+
+    assert (dst / "data" / "precious.txt").read_text() == "precious"
+    assert (dst / "file.txt").read_text() == "precious too"
+
+
+def test_source_link_loop_is_an_error_for_that_entry_only(tmp_path):
+    src = tmp_path / "src"
+    _write(src / "keep.txt", "keep")
+    _symlink(src / "b", src / "a")
+    _symlink(src / "a", src / "b")
+    dst = tmp_path / "dst"
+    _write(dst / "a", "precious a")
+    _write(dst / "b", "precious b")
+    calls, ignore = _collect()
+
+    PathSyncer(_size, remove_missing=True, ignore_error=ignore).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
+
+    assert (dst / "a").read_text() == "precious a"
+    assert (dst / "b").read_text() == "precious b"
+    assert (dst / "keep.txt").read_text() == "keep"
+    assert sorted(c[1].path.name for c in calls) == ["a", "b"]
+    assert all(isinstance(c[0], OSError) for c in calls)
+
+
+def test_dangling_link_is_synced_as_a_link_when_links_are_not_followed(tmp_path):
+    src, dst = _dangling_layout(tmp_path)
+
+    PathSyncer(_size, follow_symlinks=False, remove_missing=True).sync(
+        pathlib_next.LocalPath(src), pathlib_next.LocalPath(dst)
+    )
+
+    assert (dst / "data").is_symlink() and (dst / "file.txt").is_symlink()
+
+
+class _ScanMemPath(MemPath):
+    """Lists like a stdlib scandir: entries with a `stat()` method."""
+
+    def _scandir(self):
+        class Entry:
+            def __init__(self, name, path):
+                self.name, self._path = name, path
+
+            def stat(self, *, follow_symlinks=True):
+                return self._path.stat(follow_symlinks=follow_symlinks)
+
+        for name, _ in super()._scandir():
+            yield Entry(name, self / name)
+
+
+def test_listing_entries_with_a_stat_method_are_synced():
+    source = _ScanMemPath("/src")
+    source.mkdir()
+    (source / "a.txt").write_text("aaa")
+    (source / "sub").mkdir()
+    (source / "sub" / "b.txt").write_text("bb")
+    target = MemPath("/dst")
+
+    PathSyncer(_size).sync(source, target)
+
+    assert (target / "a.txt").read_text() == "aaa"
+    assert (target / "sub" / "b.txt").read_text() == "bb"
+
+
+# --- the error policy receives the public entry type ------------------------
+
+
+class _StatDenied(MemPath):
+    def stat(self, *, follow_symlinks=True):
+        raise PermissionError(errno.EACCES, "denied", str(self))
+
+
+@pytest.mark.parametrize("denied", ["source", "target"])
+def test_policy_receives_entries_when_the_root_stat_fails(denied):
+    seen = []
+
+    def policy(error, source, target, event):
+        seen.append((error, source, target, event))
+        return True
+
+    backend = MemPath("/").backend
+    healthy = MemPath("/ok", backend=backend)
+    broken = _StatDenied("/denied", backend=backend)
+    pair = (broken, healthy) if denied == "source" else (healthy, broken)
+
+    PathSyncer(_size, ignore_error=policy).sync(*pair)
+
+    assert len(seen) == 1
+    error, source, target, event = seen[0]
+    assert isinstance(error, PermissionError)
+    assert event is SyncEvent.SyncStart
+    assert isinstance(source, PathAndStat) and isinstance(target, PathAndStat)
+    assert (source if denied == "source" else target).path == broken
+    assert (source if denied == "source" else target).stat is None
