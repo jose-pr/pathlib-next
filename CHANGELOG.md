@@ -303,6 +303,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   directory now fails, or needs `ignore_error`, instead of syncing into the
   mounted filesystem. The `target` passed to `sync()` is the caller's choice
   and is used as given, binding or not.
+- **A failed rename fallback in `PathSyncer` no longer deletes the only copy of
+  a file.** Onto a backend whose `rename()` refuses an existing target (plain
+  SFTP without `posix-rename`), the old file is removed and the temporary file
+  renamed in its place; when that second rename failed, the clean-up deleted
+  the temporary file too and the directory held neither version. Once the old
+  entry is gone the temporary file (and, replacing a link, the temporary link)
+  is kept and the `OSError` names it; `ignore_error` receives that error. The
+  fallback is now exercised by the tests.
+- **A changed file whose name is near the length limit can be updated.** The
+  temporary sibling is `.NAME.<12 hex digits>.pathlib-next-tmp`, 31 characters
+  longer than `NAME`, so a file with a 225-character name was created by the
+  first sync and failed (`ENAMETOOLONG`, `WinError 123`) on every later one that
+  found it changed. `NAME` is now cut so that the temporary name fits in 255
+  UTF-8 bytes, keeping the random part and the suffix.
+- **The temporary files of a killed `PathSyncer` run are no longer copied
+  onward, and a stale one is removed.** The leftover `.NAME.<hex>.pathlib-next-tmp`
+  of an interrupted transfer stayed beside the intact target for good under
+  the default `remove_missing=False`, and a sync from that directory copied it
+  to the next destination. A name of exactly that form is now the library's
+  own: it is never a sync source, and `remove_missing=True` no longer removes
+  one as "missing" (a transfer running in another process writes one). It is
+  removed from a target directory when it is stale -- not being written by
+  this process, with a known modification time over 24 hours old -- when a
+  changed file or link in that directory is next written, and by
+  `remove_missing=True`; a younger one, or one whose store reports no
+  modification time, stays, and so does anything that does not match the
+  full pattern. A file you named `.x.<12 hex digits>.pathlib-next-tmp` by
+  hand is skipped as a source; rename it to have it synced. The removal is a
+  `SyncEvent.RemovedMissing`.
 
 ## [0.9.11] - 2026-09-21
 

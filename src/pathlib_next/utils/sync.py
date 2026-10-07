@@ -5,7 +5,9 @@ import errno as _errno
 import logging as _logging
 import os as _os
 import pathlib as _pathlib
+import re as _re
 import stat as _stat
+import time as _time
 import typing as _ty
 import uuid as _uuid
 
@@ -254,20 +256,76 @@ def _unresolved_link(entry: "PathAndStat") -> "tuple[Exception, PathAndStat] | N
     return error, PathAndStat.from_stat(entry.path, link)
 
 
+#: The longest name of one directory entry, in UTF-8 bytes, that NTFS and the
+#: usual POSIX filesystems accept (NTFS counts UTF-16 units, never more).
+_NAME_MAX = 255
+
+#: A temporary sibling is `.NAME.<12 hex digits>.pathlib-next-tmp`, with NAME
+#: cut short when the whole would not fit in `_NAME_MAX`. Only a name matching
+#: all of this is the library's own.
+_LEFTOVER = _re.compile(r"\..+\.[0-9a-f]{12}\.pathlib-next-tmp")
+
+#: A leftover is stale once it has not been modified for this long (seconds).
+#: A transfer that is running writes to its file continuously, so a younger
+#: one may belong to a sync running now, in this process or in another.
+_STALE_AFTER = 24 * 60 * 60
+
+#: Temporary files (`str(path)`) this process is writing now: never stale,
+#: whatever the store reports as their modification time.
+_LIVE_TEMPS: "set[str]" = set()
+
+#: Set on an exception raised while the previous version of a file is gone
+#: and the new one exists only under its temporary name.
+_ONLY_COPY_ATTR = "_pathlib_next_sync_only_copy"
+
+
+def _is_leftover(name: str) -> bool:
+    return _LEFTOVER.fullmatch(name) is not None
+
+
+def _encoded_length(name: str) -> int:
+    return len(name.encode("utf-8", "surrogatepass"))
+
+
 def _temp_sibling(path: Path) -> Path:
     # Hidden and unique, in the same directory so a rename stays on one
-    # filesystem/connection. A leftover from a crash is not in the source,
-    # so the next remove_missing run deletes it.
-    return path.with_name(
-        f".{_child_name(path)}.{_uuid.uuid4().hex[:12]}.pathlib-next-tmp"
-    )
+    # filesystem/connection. The embedded name is cut (never the random part
+    # or the suffix) so that a name the target accepts still gets a sibling.
+    tail = f".{_uuid.uuid4().hex[:12]}.pathlib-next-tmp"
+    room = _NAME_MAX - 1 - len(tail)
+    name = _child_name(path)[:room]
+    while _encoded_length(name) > room:
+        name = name[:-1]
+    return path.with_name(f".{name}{tail}")
+
+
+def _only_copy(error: BaseException, temp: Path, target: Path) -> BaseException:
+    """`error`, marked so that the clean-up keeps `temp`, and, for an
+    `Exception`, replaced by an `OSError` naming `temp` (the kind follows the
+    errno, as `OSError()` maps it). Used once the previous `target` is gone,
+    when `temp` is the only copy of the new version."""
+    kept = error
+    if isinstance(error, Exception):
+        detail = (
+            f"{target} was removed to make room for the new version, which is "
+            f"kept at {temp}: {error}"
+        )
+        errno = getattr(error, "errno", None)
+        kept = OSError(errno, detail) if errno else OSError(detail)
+    try:
+        setattr(kept, _ONLY_COPY_ATTR, True)
+    except Exception:
+        pass
+    return kept
 
 
 def _replace(source: Path, target: Path) -> None:
     """Rename `source` over the existing `target`. `os.replace` locally
     (atomic on POSIX and Windows); elsewhere `rename()`, which replaces on
     backends with POSIX rename semantics, and otherwise refuses -- then the
-    old target is removed first, after the new content is complete."""
+    old target is removed first, after the new content is complete. If the
+    second rename then fails `source` is the only copy: it is kept, and the
+    error names it."""
     if isinstance(source, _pathlib.Path):
         source.replace(target)
         return
@@ -277,7 +335,13 @@ def _replace(source: Path, target: Path) -> None:
         if FileStat.from_path(target, follow_symlink=False) is None:
             raise
         target.unlink()
-        source.rename(target)
+        try:
+            source.rename(target)
+        except BaseException as error:
+            kept = _only_copy(error, source, target)
+            if kept is error:
+                raise
+            raise kept from error
 
 
 def _child_name(path: Path) -> str:
@@ -485,6 +549,17 @@ class PathSyncer(object):
     file, directory or symlink (FIFO, socket, device) is skipped with a
     `SyncEvent.Skipped` event and its target left untouched.
 
+    The temporary sibling is `.NAME.<12 hex digits>.pathlib-next-tmp`, NAME
+    cut so that the whole stays within 255 bytes. A backend whose `rename()`
+    refuses an existing target has the old file removed first; if the second
+    rename then fails, the new version stays under its temporary name and
+    the error names it. A name of exactly that form is the library's own: it
+    is never a sync source and never removed as "missing". A stale one is
+    removed from a target directory when a changed file or link in it is
+    next written (and by `remove_missing=True`): stale means no sync of this
+    process is writing it and its modification time is known and over a day
+    old. A younger one, or one whose age the store does not report, stays.
+
     Errors: `ignore_error` is consulted once per error, with the
     `PathAndStat` entries that failed and the event that failed
     (`SyncEvent.Compare` for a failing quick check or checksum). A name the
@@ -652,6 +727,11 @@ class PathSyncer(object):
             child = _glob._child(entry.path, name)
             if not _utils.is_safe_child_name(name, windows=windows):
                 children.append((name, PathAndStat.from_stat(child, None)))
+            elif _is_leftover(name):
+                # The library's own temporary file, not an entry of the
+                # tree: never copied, never a reason to remove anything.
+                # `_sweep()` removes the stale ones.
+                continue
             elif pair and not self.follow_symlinks:
                 # `None` means "stat unknown" (GitLab blobs, FTP's NLST
                 # fallback), not "missing": ask the path itself before
@@ -663,6 +743,70 @@ class PathSyncer(object):
             else:
                 children.append((name, self._followed(scan_entry, child, pair)))
         return children
+
+    def _sweep(
+        self,
+        source_dir: Path,
+        target_dir: Path,
+        dry_run: bool,
+        policy: _OnPathSyncerError,
+        swept: "set[str]",
+    ) -> None:
+        """Remove the stale temporary files of earlier syncs from
+        `target_dir`, once per call of `sync()`. Only a file whose name is
+        the library's own pattern, that no sync of this process is writing
+        and that has not been modified for `_STALE_AFTER` seconds goes: a
+        younger one may belong to a transfer running now, in another
+        process, and a store that reports no modification time never
+        qualifies. Best effort: a listing or removal that fails is logged,
+        not raised."""
+        if str(target_dir) in swept:
+            return
+        swept.add(str(target_dir))
+        try:
+            listing = list(target_dir._scandir())
+        except Exception as error:
+            _logger.warning(
+                "could not list %s for stale temporary files: %s", target_dir, error
+            )
+            return
+        for scan_entry in listing:
+            pair = isinstance(scan_entry, tuple) and len(scan_entry) == 2
+            name = scan_entry[0] if pair else scan_entry.name
+            if not (_is_leftover(name) and _utils.is_safe_child_name(name)):
+                continue
+            child = _glob._child(target_dir, name)
+            try:
+                if pair:
+                    stat = scan_entry[1] or FileStat.from_path(
+                        child, follow_symlink=False
+                    )
+                else:
+                    stat = FileStat.from_stat(scan_entry.stat(follow_symlinks=False))
+            except OSError:
+                continue
+            if (
+                stat is None
+                or stat.is_dir()
+                or str(child) in _LIVE_TEMPS
+                or not stat.st_mtime
+                or _time.time() - stat.st_mtime <= _STALE_AFTER
+            ):
+                continue
+            if not dry_run:
+                try:
+                    child.unlink()
+                except Exception as error:
+                    _logger.warning("could not remove stale %s: %s", child, error)
+                    continue
+            self.hook(
+                PathAndStat.from_stat(_glob._child(source_dir, name), None),
+                PathAndStat.from_stat(child, stat),
+                SyncEvent.RemovedMissing,
+                dry_run,
+                None,
+                policy,
+            )
 
     def _followed(self, scan_entry, child: Path, pair: bool) -> PathAndStat:
         """`child` described by the stat `follow_symlinks` asks for. A listed
@@ -728,7 +872,7 @@ class PathSyncer(object):
             if ignore_error is None
             else _utils.as_error_handler(ignore_error)
         )
-        return self._sync(source, target, dry_run, _ignore_error, True)
+        return self._sync(source, target, dry_run, _ignore_error, True, set())
 
     def _sync(
         self,
@@ -737,6 +881,7 @@ class PathSyncer(object):
         dry_run: bool,
         _ignore_error: _OnPathSyncerError,
         root: bool,
+        swept: "set[str]",
     ):
         checksum = self.checksum
 
@@ -848,18 +993,31 @@ class PathSyncer(object):
                 # before the existing entry is removed.
                 temp = _temp_sibling(target.path)
                 temp.symlink_to(raw_target, is_directory)
+                # Once the old entry is removed the temporary link is the
+                # only one: a failure after that keeps it.
+                removed = keep = False
                 try:
                     if target.is_file() or target.is_symlink():
                         target.path.unlink()
                     else:
                         target.path.rm(recursive=target.is_dir())
+                    removed = True
                     try:
                         temp.rename(target.path)
                     except NotImplementedError:
                         target.path.symlink_to(raw_target, is_directory)
+                    removed = False
+                except BaseException as error:
+                    if not removed:
+                        raise
+                    keep = True
+                    kept = _only_copy(error, temp, target.path)
+                    if kept is error:
+                        raise
+                    raise kept from error
                 finally:
                     try:
-                        if FileStat.from_path(temp, follow_symlink=False):
+                        if not keep and FileStat.from_path(temp, follow_symlink=False):
                             temp.unlink()
                     except Exception:
                         pass
@@ -875,6 +1033,14 @@ class PathSyncer(object):
                     source, target, dry_run, _ignore_error
                 ):
                     return
+                if target.exists() or target.is_symlink():
+                    self._sweep(
+                        source.path.parent,
+                        target.path.parent,
+                        dry_run,
+                        _ignore_error,
+                        swept,
+                    )
                 if self.hook(
                     source,
                     target,
@@ -929,15 +1095,21 @@ class PathSyncer(object):
                         # it over: a failed or interrupted transfer leaves
                         # the previous version in place.
                         temp = _temp_sibling(target.path)
+                        _LIVE_TEMPS.add(str(temp))
                         try:
                             source.path.copy(temp)
                             _replace(temp, target.path)
-                        except BaseException:
-                            try:
-                                temp.unlink(missing_ok=True)
-                            except Exception:
-                                pass
+                        except BaseException as error:
+                            # Once the previous version is gone the temp
+                            # file is the only copy: it stays.
+                            if not getattr(error, _ONLY_COPY_ATTR, False):
+                                try:
+                                    temp.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
                             raise
+                        finally:
+                            _LIVE_TEMPS.discard(str(temp))
                     elif target.is_file():
                         # No rename: Path.copy() opens the source before it
                         # truncates the target, so a missing or unreadable
@@ -950,6 +1122,14 @@ class PathSyncer(object):
                             target.path.rm(recursive=target.is_dir())
                         source.path.copy(target.path)
 
+                if target.is_file() and _implements(target.path, "rename"):
+                    self._sweep(
+                        source.path.parent,
+                        target.path.parent,
+                        dry_run,
+                        _ignore_error,
+                        swept,
+                    )
                 if self.hook(
                     source, target, SyncEvent.Copy, dry_run, copy, _ignore_error
                 ):
@@ -1030,6 +1210,7 @@ class PathSyncer(object):
             if self.remove_missing and not target_absent:
 
                 def checkchildren():
+                    self._sweep(source.path, target.path, dry_run, _ignore_error, swept)
                     source_names = {name for name, _ in get_source_children()}
                     for name, child in self._children(target, windows_target):
 
@@ -1099,6 +1280,7 @@ class PathSyncer(object):
                             dry_run,
                             _ignore_error,
                             False,
+                            swept,
                         ),
                         _ignore_error,
                         always_run=True,

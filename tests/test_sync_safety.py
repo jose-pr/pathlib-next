@@ -1193,3 +1193,431 @@ def test_root_target_that_is_a_mount_point_is_used_as_given(
 
     assert (dst / "new.txt").read_text() == "new"
     assert (dst / "theirs.txt").read_text() == "theirs"
+
+
+# --- the temporary sibling: replace fallback, name length, leftovers -------
+
+import re
+import time
+
+from pathlib_next.mempath import MemPathBackend
+from pathlib_next.utils.sync import _is_leftover, _temp_sibling
+
+DAY = 24 * 60 * 60
+
+
+class _RenamingMemPath(MemPath):
+    """A MemPath with `rename()`, replacing an existing target."""
+
+    def rename(self, target):
+        target = target if isinstance(target, MemPath) else self.with_segments(target)
+        parent, name = self._parent_container()
+        target_parent, target_name = target._parent_container()
+        target_parent[target_name] = parent.pop(name)
+        return target
+
+
+class _RefusingMemPath(_RenamingMemPath):
+    """Refuses to rename onto an existing target, as SFTP without POSIX
+    rename does."""
+
+    def rename(self, target):
+        target = target if isinstance(target, MemPath) else self.with_segments(target)
+        if target.exists():
+            raise FileExistsError(errno.EEXIST, "exists", str(target))
+        return super().rename(target)
+
+
+class _DroppingMemPath(_RefusingMemPath):
+    """Refuses an existing target, and then the connection drops during the
+    rename of a temporary file."""
+
+    def rename(self, target):
+        if _is_leftover(self.name) and not self.with_segments(target).exists():
+            raise ConnectionResetError(errno.ECONNRESET, "connection reset")
+        return super().rename(target)
+
+
+def _mem_pair(target_cls, old="OLD VERSION", new="NEW VERSION!"):
+    backend = MemPathBackend()
+    target = target_cls("/dst", backend=backend)
+    target.mkdir()
+    (target / "f.txt").write_text(old)
+    source = MemPath("/src")
+    source.mkdir()
+    (source / "f.txt").write_text(new)
+    return source, target, backend
+
+
+def _leftovers(directory):
+    return sorted(name for name in directory if _is_leftover(name))
+
+
+def test_rename_that_refuses_an_existing_target_still_replaces_it():
+    source, target, backend = _mem_pair(_RefusingMemPath)
+
+    PathSyncer(_size).sync(source, target)
+
+    assert (target / "f.txt").read_text() == "NEW VERSION!"
+    assert sorted(backend["dst"]) == ["f.txt"]
+
+
+def test_failed_second_rename_keeps_the_new_version_under_its_temp_name():
+    source, target, backend = _mem_pair(_DroppingMemPath)
+
+    with pytest.raises(ConnectionResetError) as caught:
+        PathSyncer(_size).sync(source, target)
+
+    kept = _leftovers(backend["dst"])
+    assert len(kept) == 1
+    assert bytes(backend["dst"][kept[0]]) == b"NEW VERSION!"
+    assert "f.txt" not in backend["dst"]
+    assert kept[0] in str(caught.value)
+
+
+def test_failed_second_rename_is_offered_to_the_policy_once_and_siblings_go_on():
+    source, target, backend = _mem_pair(_DroppingMemPath)
+    (source / "z.txt").write_text("later sibling")
+    calls, ignore = _collect()
+
+    PathSyncer(_size, ignore_error=ignore).sync(source, target)
+
+    assert [(type(c[0]), c[3]) for c in calls] == [
+        (ConnectionResetError, SyncEvent.Copy)
+    ]
+    assert len(_leftovers(backend["dst"])) == 1
+    assert (target / "z.txt").read_text() == "later sibling"
+
+
+def test_unlink_refused_during_the_fallback_keeps_the_old_version():
+    class Stubborn(_RefusingMemPath):
+        def unlink(self, missing_ok=False):
+            if self.name == "f.txt":
+                raise PermissionError(errno.EACCES, "denied", str(self))
+            return super().unlink(missing_ok)
+
+    source, target, backend = _mem_pair(Stubborn)
+
+    with pytest.raises(PermissionError):
+        PathSyncer(_size).sync(source, target)
+
+    assert bytes(backend["dst"]["f.txt"]) == b"OLD VERSION"
+    assert sorted(backend["dst"]) == ["f.txt"]
+
+
+class _FailingRenameLocal(pathlib_next.LocalPath):
+    """A local path whose rename of a temporary file fails."""
+
+    def rename(self, target):
+        if _is_leftover(self.name):
+            raise ConnectionResetError(errno.ECONNRESET, "connection reset")
+        return super().rename(target)
+
+
+def test_failed_rename_of_a_replacing_link_keeps_the_temporary_link(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    _symlink("real.txt", source / "lnk")
+    target = tmp_path / "dst"
+    _write(target / "lnk", "previous regular file")
+
+    with pytest.raises(ConnectionResetError) as caught:
+        PathSyncer(_size, follow_symlinks=False).sync(
+            pathlib_next.LocalPath(source), _FailingRenameLocal(target)
+        )
+
+    kept = _leftovers(os.listdir(target))
+    assert len(kept) == 1
+    assert os.readlink(target / kept[0]) == "real.txt"
+    assert not os.path.lexists(target / "lnk")
+    assert kept[0] in str(caught.value)
+
+
+def test_failed_creation_of_a_replacing_link_keeps_the_previous_entry(tmp_path):
+    class NoLinks(pathlib_next.LocalPath):
+        def _symlink_to(self, target, target_is_directory=False):
+            raise PermissionError(errno.EPERM, "denied", str(self))
+
+    source = tmp_path / "src"
+    source.mkdir()
+    _symlink("real.txt", source / "lnk")
+    target = tmp_path / "dst"
+    _write(target / "lnk", "previous regular file")
+
+    with pytest.raises(PermissionError):
+        PathSyncer(_size, follow_symlinks=False).sync(
+            pathlib_next.LocalPath(source), NoLinks(target)
+        )
+
+    assert (target / "lnk").read_text() == "previous regular file"
+    assert os.listdir(target) == ["lnk"]
+
+
+# the temporary name fits where the name does
+
+
+def _limited(max_bytes=255):
+    """A renaming MemPath that refuses to create a name longer than a
+    filesystem accepts, recording every name it was asked to create."""
+
+    class Limited(_RenamingMemPath):
+        created = []
+
+        def _open(self, mode="r", buffering=-1):
+            if mode != "r":
+                type(self).created.append(self.name)
+                if len(self.name.encode("utf-8")) > max_bytes:
+                    raise OSError(errno.ENAMETOOLONG, "name too long", str(self))
+            return super()._open(mode, buffering)
+
+    return Limited
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "n" * 246 + ".txt",
+        "n" * 251 + ".txt",
+        "é" * 125 + ".txt",
+        "€" * 83 + ".txt",
+    ],
+    ids=["250-ascii", "255-ascii", "254-bytes-2byte", "253-bytes-3byte"],
+)
+def test_changed_file_with_a_long_name_is_updated_through_a_sibling(name):
+    limited = _limited()
+    source = MemPath("/src")
+    source.mkdir()
+    (source / name).write_text("first")
+    target = limited("/dst")
+
+    PathSyncer(_size).sync(source, target)
+    (source / name).write_text("second, longer")
+    limited.created.clear()
+    PathSyncer(_size).sync(source, target)
+
+    assert (target / name).read_text() == "second, longer"
+    assert sorted(target.backend["dst"]) == [name]
+    temps = [n for n in limited.created if n != name]
+    assert len(temps) == 1 and _is_leftover(temps[0])
+    assert len(temps[0].encode("utf-8")) <= 255
+
+
+@pytest.mark.parametrize(
+    "name", ["a", "n" * 255, "é" * 127, "€" * 85, "n" * 300, ".hidden"]
+)
+def test_temp_sibling_fits_the_name_limit_and_keeps_its_suffix(name):
+    path = MemPath("/d") / name
+
+    first, second = _temp_sibling(path), _temp_sibling(path)
+
+    for temp in (first, second):
+        assert temp.parent == path.parent
+        assert len(temp.name.encode("utf-8")) <= 255
+        assert _is_leftover(temp.name)
+        assert temp.name.endswith(".pathlib-next-tmp")
+    assert first != second
+    if len(name.encode("utf-8")) <= 200:
+        assert first.name.startswith("." + name + ".")
+
+
+def test_changed_local_file_with_a_250_character_name_is_updated(tmp_path):
+    prefix = "\\\\?\\" if IS_WINDOWS else ""
+    name = "n" * 246 + ".txt"
+    source = pathlib_next.LocalPath(prefix + str(tmp_path / "src"))
+    target = pathlib_next.LocalPath(prefix + str(tmp_path / "dst"))
+    source.mkdir()
+    (source / name).write_text("first")
+    try:
+        PathSyncer(_size).sync(source, target)
+    except OSError as error:
+        pytest.skip(f"the filesystem does not accept the name: {error}")
+    (source / name).write_text("second, longer")
+
+    PathSyncer(_size).sync(source, target)
+
+    assert (target / name).read_text() == "second, longer"
+    assert [p.name for p in target.iterdir()] == [name]
+
+
+# leftovers of a killed run
+
+
+def _put(directory, name, text="partial", age=0.0):
+    """A file in a MemPath directory, last modified `age` seconds ago (0 for
+    an unknown time)."""
+    path = directory / name
+    path.write_text(text)
+    parent, key = path._parent_container()
+    parent[key].mtime = time.time() - age if age else 0.0
+    return path
+
+
+STALE = ".big.bin.aaaaaaaaaaaa.pathlib-next-tmp"
+FRESH = ".big.bin.bbbbbbbbbbbb.pathlib-next-tmp"
+
+
+def test_only_the_full_temp_pattern_is_a_leftover():
+    assert _is_leftover(STALE)
+    assert _is_leftover("..dot.0123456789ab.pathlib-next-tmp")
+    for name in (
+        "x-tmp",
+        "x.pathlib-next-tmp",
+        ".x.pathlib-next-tmp",
+        ".x.0123456789AB.pathlib-next-tmp",
+        ".x.0123456789a.pathlib-next-tmp",
+        "..0123456789ab.pathlib-next-tmp",
+        ".x.0123456789ab.pathlib-next-tmp.bak",
+        "a.0123456789ab.pathlib-next-tmp",
+    ):
+        assert not _is_leftover(name), name
+
+
+@pytest.mark.parametrize("remove_missing", [False, True])
+def test_a_leftover_is_never_a_sync_source(remove_missing):
+    source = MemPath("/src")
+    source.mkdir()
+    for name in ("big.bin", STALE, "report-tmp", ".x.pathlib-next-tmp"):
+        (source / name).write_text("content")
+    target = MemPath("/dst")
+    events, hook = _events()
+
+    PathSyncer(_size, remove_missing=remove_missing, hook=hook).sync(source, target)
+
+    assert sorted(target.backend["dst"]) == [
+        ".x.pathlib-next-tmp",
+        "big.bin",
+        "report-tmp",
+    ]
+    assert not any(STALE in s or STALE in t for _, s, t, _ in events)
+
+
+def test_a_leftover_in_the_source_is_not_a_reason_to_remove_anything_else():
+    source = MemPath("/src")
+    source.mkdir()
+    (source / "big.bin").write_text("content")
+    (source / STALE).write_text("a leftover in the source")
+    target = MemPath("/dst")
+    target.mkdir()
+    (target / "big.bin").write_text("content")
+    (target / "keep.txt").write_text("target only")
+
+    PathSyncer(_size, remove_missing=True).sync(source, target)
+
+    assert sorted(target.backend["dst"]) == ["big.bin"]
+
+
+@pytest.fixture
+def leftover_layout():
+    backend = MemPathBackend()
+    target = _RenamingMemPath("/dst", backend=backend)
+    target.mkdir()
+    _put(target, "big.bin", "old")
+    _put(target, STALE, age=2 * DAY)
+    _put(target, FRESH, age=3600)
+    _put(target, "x-tmp", age=2 * DAY)
+    _put(target, ".big.bin.nothex.pathlib-next-tmp", age=2 * DAY)
+    (target / ".dir.cccccccccccc.pathlib-next-tmp").mkdir()
+    source = MemPath("/src")
+    source.mkdir()
+    (source / "big.bin").write_text("new content, longer")
+    return source, target, backend
+
+
+def test_stale_leftover_is_removed_where_a_file_is_rewritten(leftover_layout):
+    source, target, backend = leftover_layout
+    events, hook = _events()
+
+    PathSyncer(_size, hook=hook).sync(source, target)
+
+    assert bytes(backend["dst"]["big.bin"]) == b"new content, longer"
+    assert STALE not in backend["dst"]
+    # Younger, not the full pattern, or a directory: kept.
+    assert sorted(backend["dst"]) == sorted(
+        [
+            "big.bin",
+            FRESH,
+            "x-tmp",
+            ".big.bin.nothex.pathlib-next-tmp",
+            ".dir.cccccccccccc.pathlib-next-tmp",
+        ]
+    )
+    removed = [t for e, _, t, _ in events if e is SyncEvent.RemovedMissing]
+    assert removed == ["/dst/" + STALE]
+
+
+def test_dry_run_reports_the_stale_leftover_it_would_remove(leftover_layout):
+    source, target, backend = leftover_layout
+    before = sorted(backend["dst"])
+    dry_events, dry_hook = _events()
+    real_events, real_hook = _events()
+
+    PathSyncer(_size, hook=dry_hook).sync(source, target, dry_run=True)
+
+    assert sorted(backend["dst"]) == before
+    PathSyncer(_size, hook=real_hook).sync(source, target)
+    assert STALE not in backend["dst"]
+    assert _mutations(dry_events) == _mutations(real_events)
+    assert (SyncEvent.RemovedMissing, "/src/" + STALE, "/dst/" + STALE) in _mutations(
+        dry_events
+    )
+
+
+def test_remove_missing_removes_a_stale_leftover_and_keeps_a_fresh_one(
+    leftover_layout,
+):
+    source, target, backend = leftover_layout
+
+    PathSyncer(_size, remove_missing=True).sync(source, target)
+
+    assert sorted(backend["dst"]) == sorted(
+        ["big.bin", FRESH, ".dir.cccccccccccc.pathlib-next-tmp"]
+    )
+
+
+def test_leftover_whose_age_is_unknown_is_kept():
+    source, target, backend = _mem_pair(_RenamingMemPath)
+    _put(target, STALE, age=0)
+
+    PathSyncer(_size, remove_missing=True).sync(source, target)
+
+    assert STALE in backend["dst"]
+    assert (target / "f.txt").read_text() == "NEW VERSION!"
+
+
+def test_temp_file_of_a_transfer_running_in_this_process_is_kept():
+    # While a.bin is being written, a second sync into the same directory
+    # looks at its temporary file, whose modification time reads as ancient.
+    class Watched(_RenamingMemPath):
+        during = None
+
+        def _open(self, mode="r", buffering=-1):
+            handle = super()._open(mode, buffering)
+            callback, type(self).during = type(self).during, None
+            if mode == "w" and _is_leftover(self.name) and callback:
+                callback(self)
+            return handle
+
+    backend = MemPathBackend()
+    target = Watched("/dst", backend=backend)
+    target.mkdir()
+    for name in ("a.bin", "c.bin"):
+        _put(target, name, "old")
+    first, second = MemPath("/one"), MemPath("/two")
+    for tree, name in ((first, "a.bin"), (second, "c.bin")):
+        tree.mkdir()
+        (tree / name).write_text("new content")
+    survived = []
+
+    def meanwhile(temp):
+        parent, key = temp._parent_container()
+        parent[key].mtime = time.time() - 30 * DAY
+        PathSyncer(_size).sync(second, target)
+        survived.append(temp.exists())
+
+    Watched.during = meanwhile
+    PathSyncer(_size).sync(first, target)
+
+    assert survived == [True]
+    assert bytes(backend["dst"]["a.bin"]) == b"new content"
+    assert bytes(backend["dst"]["c.bin"]) == b"new content"
+    assert _leftovers(backend["dst"]) == []

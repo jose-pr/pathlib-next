@@ -818,9 +818,18 @@ class TestMyPath(PathContract):
     with the raw `readlink()` text (target must implement `symlink_to()`, else
     `NotImplementedError` through `ignore_error`); `"reject"` raises
     `NotImplementedError`.
-  - Changed files are written to a hidden temporary sibling and renamed over
-    the target where the target supports `rename()`. FIFOs, sockets and
-    devices are skipped. A dry run makes the same decisions without changes.
+  - Changed files are written to a hidden temporary sibling
+    (`.NAME.<12 hex>.pathlib-next-tmp`, NAME cut to keep the whole within 255
+    bytes) and renamed over the target where the target supports `rename()`;
+    where `rename()` refuses an existing target the old file is removed first,
+    and if the second rename fails the new version is kept under its
+    temporary name and the error (an `OSError`) names it. A name of exactly
+    that form is the library's own: never a source, never removed as
+    "missing"; a stale one (not being written by this process, modification
+    time known and over a day old) is removed from a target directory when a
+    changed file or link in it is next written, and by `remove_missing=True`.
+    FIFOs, sockets and devices are skipped. A dry run makes the same
+    decisions without changes.
   - **`SyncEvent`** members: `Copy`, `RemovedMissing`, `Synced`,
     `CreatedDirectory`, `SyncStart`, `TypeMismatch`, `CheckTargetChild`,
     `CheckTargetChildren`, `SyncChild`, `SyncChildren`, `Symlink`, `Compare`
