@@ -381,7 +381,7 @@ def test_s3_throttled_read_is_not_file_not_found(moto_s3):
     with pytest.raises(OSError) as info:
         p.read_bytes()
     assert type(info.value) is OSError
-    assert isinstance(info.value.__cause__, ClientError)
+    assert info.value.__cause__ is None
 
 
 def test_s3_missing_bucket_is_file_not_found(moto_s3):

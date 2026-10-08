@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib as _contextlib
 import errno as _errno
 import io as _io
+import sys as _sys
 import typing as _ty
 
 from ... import utils as _utils
@@ -25,6 +26,14 @@ class BaseGsBackend(object):
     @_utils.notimplemented
     def client(self): ...
 
+    def call_options(self) -> dict:
+        """Keyword arguments (`timeout=`, `retry=`) added to every SDK call
+        a path makes; none by default, which leaves the SDK's own."""
+        return {}
+
+
+_UNSET = object()
+
 
 class GsBackend(BaseGsBackend):
     """Lazily creates+caches a `google.cloud.storage` Client. A single client
@@ -34,13 +43,26 @@ class GsBackend(BaseGsBackend):
     (dict or `ClientOptions`, `api_endpoint` included) among them. A custom
     endpoint still authenticates; for an emulator or fake server pass
     `use_auth_w_custom_endpoint=False` (anonymous credentials), or set
-    `STORAGE_EMULATOR_HOST` yourself -- the SDK reads it."""
+    `STORAGE_EMULATOR_HOST` yourself -- the SDK reads it.
 
-    __slots__ = ("client_kwargs", "_client")
+    `timeout` (seconds, or a `(connect, read)` pair) and `retry` (a
+    `google.api_core.retry.Retry`, or None for no retry) are passed to every
+    call a path makes; left out, the SDK's own defaults apply, which keep an
+    unreachable endpoint waiting for about two minutes."""
 
-    def __init__(self, **client_kwargs):
+    __slots__ = ("client_kwargs", "_client", "_options")
+
+    def __init__(self, *, timeout=_UNSET, retry=_UNSET, **client_kwargs):
         self.client_kwargs = client_kwargs
         self._client = None
+        self._options = {
+            name: value
+            for name, value in (("timeout", timeout), ("retry", retry))
+            if value is not _UNSET
+        }
+
+    def call_options(self) -> dict:
+        return dict(self._options)
 
     def client(self):
         if self._client is None:
@@ -78,13 +100,54 @@ def _http_status(error: BaseException) -> "int | None":
     return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
+def _is_http_client_error(error: BaseException) -> bool:
+    """Whether `error` comes from the HTTP client under the SDK (`requests`
+    or `urllib3`), whose exceptions are what a refused connection, a timeout
+    or a body cut short look like."""
+    return any(
+        cls.__module__.split(".")[0] in ("requests", "urllib3")
+        for cls in type(error).__mro__
+    )
+
+
+def _transport_kind(error: BaseException) -> str:
+    """Which `_store.transport_error()` kind a `requests`/`urllib3` failure is."""
+    if _store.mentions_timeout(error):
+        return _store.TIMEOUT
+    names = {cls.__name__ for cls in type(error).__mro__}
+    if names & {"ConnectionError", "NewConnectionError", "ProxyError", "SSLError"}:
+        return _store.UNREACHABLE
+    if names & {
+        "ChunkedEncodingError",
+        "ContentDecodingError",
+        "ProtocolError",
+        "IncompleteRead",
+    }:
+        return _store.INTERRUPTED
+    return _store.FAILED
+
+
 def _oserror(error: BaseException, path, *, create=False) -> "OSError | None":
-    """The OSError an API error reply means for `path`, or None for any
-    other exception (a missing SDK, bad credentials, a bug), which must
-    propagate as itself rather than read as "no such file". `create`: the
-    reply answers a conditional create, where 412 means the object exists."""
+    """The OSError an API error reply or a transport failure means for
+    `path`, or None for any other exception (a missing SDK, bad credentials,
+    a bug), which must propagate as itself rather than read as "no such
+    file". `create`: the reply answers a conditional create, where 412 means
+    the object exists. A request that ran out of time is TimeoutError, an
+    endpoint that cannot be reached ConnectionError. Raise it `from None`."""
+    # An error of this type exists only once the module that defines it is
+    # loaded, so there is nothing to import here.
+    api_exceptions = _sys.modules.get("google.api_core.exceptions")
+    if isinstance(error, getattr(api_exceptions, "RetryError", ())):
+        # The retry deadline passed: what the last attempt failed with is the
+        # reason, and with nothing to say the deadline itself is a timeout.
+        translated = (
+            None if error.cause is None else _oserror(error.cause, path, create=create)
+        )
+        return translated or _store.transport_error(_store.TIMEOUT, "GCS", path, error)
     status = _http_status(error)
     if status is None:
+        if _is_http_client_error(error):
+            return _store.transport_error(_transport_kind(error), "GCS", path, error)
         return None
     if status == 404:
         return FileNotFoundError(
@@ -94,6 +157,8 @@ def _oserror(error: BaseException, path, *, create=False) -> "OSError | None":
         return PermissionError(_errno.EACCES, str(error), str(path))
     if create and status == 412:
         return FileExistsError(_errno.EEXIST, f"File exists ({error})", str(path))
+    if status in (408, 504):
+        return _store.transport_error(_store.TIMEOUT, "GCS", path, error)
     return OSError(_errno.EIO, f"GCS request failed: {error}", str(path))
 
 
@@ -105,7 +170,7 @@ def _translate_errors(path, *, create=False):
         translated = _oserror(error, path, create=create)
         if translated is None:
             raise
-        raise translated from error
+        raise translated from None
 
 
 class _GsWriteStream(_io.BytesIO):
@@ -178,7 +243,21 @@ class GsPath(UriPath):
 
     @property
     def _bucket(self):
+        if not self.bucket_name:
+            raise FileNotFoundError(
+                _errno.ENOENT, "a gs: path needs a bucket", str(self)
+            )
         return self._client.bucket(self.bucket_name)
+
+    @property
+    def _options(self) -> dict:
+        """The backend's `timeout=`/`retry=` for an SDK call."""
+        options = getattr(self.backend, "call_options", None)
+        return options() if callable(options) else {}
+
+    def _key_path(self, key: str) -> "GsPath":
+        """The path of the object `key` in this path's bucket."""
+        return self.with_path(f"/{key}")
 
     def _reload(self, key: str):
         """The reloaded blob at `key`, or None if there is no such object.
@@ -186,7 +265,7 @@ class GsPath(UriPath):
         blob = self._bucket.blob(key)
         try:
             with _translate_errors(self):
-                blob.reload()
+                blob.reload(**self._options)
         except FileNotFoundError:
             return None
         return blob
@@ -202,7 +281,7 @@ class GsPath(UriPath):
             # A one-item listing (NotFound for a missing bucket) needs only
             # the object-list permission the rest of the path uses.
             with _translate_errors(self):
-                for _ in self._bucket.list_blobs(max_results=1):
+                for _ in self._bucket.list_blobs(max_results=1, **self._options):
                     break
             return FileStat(is_dir=True)
         # Only a not-found reply falls through to the prefix probe: a
@@ -219,7 +298,9 @@ class GsPath(UriPath):
         # object under the "<key>/" prefix means this is a "directory".
         prefix = f"{key}/"
         with _translate_errors(self):
-            for _ in self._bucket.list_blobs(prefix=prefix, max_results=1):
+            for _ in self._bucket.list_blobs(
+                prefix=prefix, max_results=1, **self._options
+            ):
                 return FileStat(is_dir=True)
         raise FileNotFoundError(self)
 
@@ -229,7 +310,9 @@ class GsPath(UriPath):
         prefix = f"{self.key}/" if self.key else ""
         seen = set()
         with _translate_errors(self):
-            iterator = self._bucket.list_blobs(prefix=prefix, delimiter="/")
+            iterator = self._bucket.list_blobs(
+                prefix=prefix, delimiter="/", **self._options
+            )
             blobs = list(iterator)
             prefixes = list(iterator.prefixes)
         if not blobs and not prefixes and self.key:
@@ -268,13 +351,19 @@ class GsPath(UriPath):
             yield name
 
     def _open(self, mode="r", buffering=-1):
+        if not self.bucket_name:
+            raise FileNotFoundError(
+                _errno.ENOENT, "a gs: path needs a bucket", str(self)
+            )
         if mode in ("r", "r+"):
+            if not self.key:
+                raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
             # The client is resolved outside the translation, so a missing
             # SDK raises ImportError instead of FileNotFoundError.
             blob = self._bucket.blob(self.key)
             try:
                 with _translate_errors(self):
-                    content = blob.download_as_bytes()
+                    content = blob.download_as_bytes(**self._options)
             except FileNotFoundError:
                 if self.is_dir():
                     raise IsADirectoryError(
@@ -290,6 +379,8 @@ class GsPath(UriPath):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
+        if not self.key:
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         if mode == "w" and self._holds_keys(self.key):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _GsWriteStream(self, exclusive=(mode == "x"))
@@ -302,7 +393,9 @@ class GsPath(UriPath):
             return False
         try:
             with _translate_errors(self):
-                for _ in self._bucket.list_blobs(prefix=f"{key}/", max_results=1):
+                for _ in self._bucket.list_blobs(
+                    prefix=f"{key}/", max_results=1, **self._options
+                ):
                     return True
         except PermissionError:
             pass
@@ -314,9 +407,9 @@ class GsPath(UriPath):
             if exclusive:
                 # Generation 0 matches only a missing object: a concurrent
                 # creator makes this fail with 412, never overwritten.
-                blob.upload_from_string(data, if_generation_match=0)
+                blob.upload_from_string(data, if_generation_match=0, **self._options)
             else:
-                blob.upload_from_string(data)
+                blob.upload_from_string(data, **self._options)
 
     def _mkdir(self, mode):
         # stat(), not exists(): a failed probe must not read as "missing".
@@ -340,7 +433,7 @@ class GsPath(UriPath):
         blob = self._bucket.blob(self.key)
         try:
             with _translate_errors(self):
-                blob.delete()
+                blob.delete(**self._options)
         except FileNotFoundError:
             # Deleted since the stat() above. Anything else -- a hold, a
             # permission error -- is not "already gone" and raises.
@@ -356,12 +449,14 @@ class GsPath(UriPath):
             )
         marker = f"{self.key}/"
         with _translate_errors(self):
-            for blob in self._bucket.list_blobs(prefix=marker, max_results=2):
+            for blob in self._bucket.list_blobs(
+                prefix=marker, max_results=2, **self._options
+            ):
                 if blob.name != marker:
                     raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
         try:
             with _translate_errors(self):
-                self._bucket.blob(marker).delete()
+                self._bucket.blob(marker).delete(**self._options)
         except FileNotFoundError:
             pass
 
@@ -388,9 +483,9 @@ class GsPath(UriPath):
                 follow_binds=follow_binds,
             )
 
-        def on_error(error):
+        def on_error(error, path=None):
             if callable(ignore_error):
-                return ignore_error(error, self)
+                return ignore_error(error, self if path is None else path)
             return bool(ignore_error)
 
         if not self.key:
@@ -414,6 +509,9 @@ class GsPath(UriPath):
             marker = f"{self.key}/"
             try:
                 entries = self._flat_entries(marker)
+            except FileNotFoundError:
+                # A missing bucket holds nothing: the same answer as a missing key.
+                entries = []
             except Exception as error:
                 if not on_error(error):
                     raise
@@ -441,10 +539,10 @@ class GsPath(UriPath):
 
         for key in keys:
             try:
-                with _translate_errors(self):
-                    self._bucket.blob(key).delete()
+                with _translate_errors(self._key_path(key)):
+                    self._bucket.blob(key).delete(**self._options)
             except Exception as error:
-                if not on_error(error):
+                if not on_error(error, self._key_path(key)):
                     raise
 
     def _flat_entries(self, prefix: str) -> "list[tuple[str, int]]":
@@ -452,7 +550,7 @@ class GsPath(UriPath):
         with _translate_errors(self):
             return [
                 (blob.name, blob.size or 0)
-                for blob in self._bucket.list_blobs(prefix=prefix)
+                for blob in self._bucket.list_blobs(prefix=prefix, **self._options)
             ]
 
     def _unreachable_keys(self) -> "list[str]":
@@ -494,7 +592,11 @@ class GsPath(UriPath):
         # pathlib returns the new path.
         renamed = self.with_path(target.path)
         if dest_key == self.key:
-            # Copying onto itself and then deleting the source loses the object.
+            # Copying onto itself and then deleting the source loses the
+            # object; a name that is not there is not renamed.
+            if self._reload(self.key) is None:
+                self._pop_stat_hint()
+                self.stat()
             return renamed
         source_blob = self._reload(self.key)
         if source_blob is None:
@@ -507,6 +609,6 @@ class GsPath(UriPath):
         if self._holds_keys(dest_key):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
         with _translate_errors(self):
-            self._bucket.copy_blob(source_blob, self._bucket, dest_key)
-            source_blob.delete()
+            self._bucket.copy_blob(source_blob, self._bucket, dest_key, **self._options)
+            source_blob.delete(**self._options)
         return renamed

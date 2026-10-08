@@ -878,6 +878,21 @@ chained (their text can carry credentials).
   - Reads stream; `"w"`/`"x"`/`"r+"` spool and upload on close; `"x"` is a
     conditional put (check-then-put above 5 GiB); `"a"` unsupported.
     `st_mtime` from `LastModified`.
+  - Errors (the same on `GsPath` and `AzPath`): the store's answer is
+    `FileNotFoundError` (a key or a bucket), `PermissionError`, or
+    `OSError(EIO)`; a request that runs out of time is `TimeoutError`, an
+    endpoint that cannot be reached `ConnectionError`, a connection that
+    breaks while the answer or a body arrives `ConnectionResetError`. Each
+    names the path as `filename`, none is chained to the SDK's exception, and
+    the message carries the SDK's exception type but not its text (it holds
+    the request URL). They reach `exists()` and `walk(on_error=)` as
+    `OSError`. A bucket root read or written is `IsADirectoryError`; a path
+    with no bucket does not exist (`FileNotFoundError`, nothing is sent).
+    `rm(recursive=True)` of a missing bucket is a missing path
+    (`missing_ok`, `ignore_error` decide); a key a batch delete refuses is
+    offered to `ignore_error(error, path)` with that key's path, one error
+    per key. `rename()` of a missing path onto its own name is
+    `FileNotFoundError`.
   - `rename()`: server-side copy + delete in the same bucket; a prefix
     directory → `NotImplementedError` (`move()` copies). `rm(recursive=True)`
     batch-deletes; at the bucket root → `PermissionError`. No `chmod()`.
@@ -894,7 +909,12 @@ chained (their text can carry credentials).
   `key`. `GsBackend(**client_kwargs)` → `google.cloud.storage.Client(
   **client_kwargs)` unchanged (emulator: `client_options={"api_endpoint":
   url}, use_auth_w_custom_endpoint=False`, or set `STORAGE_EMULATOR_HOST`
-  yourself); `BaseGsBackend.client()`. Same prefix model, rename and
+  yourself); `BaseGsBackend.client()`. `GsBackend(*, timeout=, retry=,
+  **client_kwargs)`: `timeout` (seconds or `(connect, read)`) and `retry`
+  (`google.api_core.retry.Retry`, or `None` for none) are passed to every SDK
+  call a path makes (`BaseGsBackend.call_options()` is the hook); left out,
+  the SDK's defaults apply, under which an unreachable endpoint fails after
+  about two minutes. Same prefix model, rename, error and
   recursive-copy/remove rules as `S3Path` (same bucket); `rmdir()` of the
   bucket root → `PermissionError`; reads load the whole object; `"x"` uses
   `if_generation_match=0`; `"a"` unsupported; `st_mtime` from `updated`.
@@ -907,9 +927,12 @@ chained (their text can carry credentials).
   `azure-identity`'s `DefaultAzureCredential` unless `credential=` is passed.
   Without `backend=`, one shared backend per URI account is used, which needs
   `azure-identity` (installed by the `az` extra; `ImportError` otherwise). Same
-  prefix model and recursive-copy/remove rules as `S3Path` (a name that is
-  both a blob and a prefix is the blob, whatever order the SDK lists them
-  in); `rmdir()` of the container root → `PermissionError`; `rename()` within
+  prefix model, error and recursive-copy/remove rules as `S3Path` (a name
+  that is both a blob and a prefix is the blob, whatever order the SDK lists
+  them in; timeouts and retries are the SDK's own `retry_*`, `connection_timeout=`
+  and `read_timeout=` client options); `az://account` is a directory whose
+  children are the containers; a path with no account and no `backend=`
+  does not exist; `rmdir()` of the container root → `PermissionError`; `rename()` within
   one container; `"x"` sends
   `If-None-Match: *`; `"a"` unsupported; `st_mtime` from `last_modified`.
 - **`GitHubPath`** (`github://[TOKEN@]host/owner/repo/path?ref=REF`; `http`

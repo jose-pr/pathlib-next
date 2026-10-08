@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib as _contextlib
 import errno as _errno
 import io as _io
+import sys as _sys
 import threading as _thread
 import typing as _ty
 
@@ -125,12 +126,44 @@ def _http_status(error: BaseException) -> "int | None":
     return None
 
 
+def _transport_kind(error: BaseException) -> "str | None":
+    """Which `_store.transport_error()` kind `error` is when it is the SDK's
+    report of a connection failure (not of a reply), else None."""
+    # An SDK error exists only once its module is loaded, so there is nothing
+    # to import here.
+    azexc = _sys.modules.get("azure.core.exceptions")
+    if azexc is None:
+        return None
+    timeouts = tuple(
+        getattr(azexc, name)
+        for name in ("ServiceRequestTimeoutError", "ServiceResponseTimeoutError")
+        if hasattr(azexc, name)
+    )
+    if isinstance(error, timeouts):
+        return _store.TIMEOUT
+    if isinstance(error, azexc.ServiceRequestError):
+        # The request could not be sent: no connection, no name, no route.
+        return _store.TIMEOUT if _store.mentions_timeout(error) else _store.UNREACHABLE
+    if isinstance(error, azexc.ServiceResponseError):
+        # Sent, but the answer did not arrive whole.
+        return _store.TIMEOUT if _store.mentions_timeout(error) else _store.INTERRUPTED
+    incomplete = getattr(azexc, "IncompleteReadError", None)
+    if incomplete is not None and isinstance(error, incomplete):
+        return _store.INTERRUPTED
+    return None
+
+
 def _oserror(error: BaseException, path, *, create=False):
-    """The OSError an error reply means for `path`, or None for any other
-    exception (a missing SDK, bad configuration, a bug), which must
-    propagate as itself rather than read as "no such file". `create`: the
-    reply answers a conditional create, where 409/412 mean the blob exists
-    (elsewhere a 412 is e.g. a lease held by someone else)."""
+    """The OSError an error reply or a connection failure means for `path`,
+    or None for any other exception (a missing SDK, bad configuration, a
+    bug), which must propagate as itself rather than read as "no such
+    file". `create`: the reply answers a conditional create, where 409/412
+    mean the blob exists (elsewhere a 412 is e.g. a lease held by someone
+    else). A request that ran out of time is TimeoutError, an endpoint that
+    cannot be reached ConnectionError. Raise it `from None`."""
+    kind = _transport_kind(error)
+    if kind is not None:
+        return _store.transport_error(kind, "Azure", path, error)
     status = _http_status(error)
     if status is None:
         return None
@@ -142,6 +175,8 @@ def _oserror(error: BaseException, path, *, create=False):
         return PermissionError(_errno.EACCES, str(error), str(path))
     if create and status in (409, 412):
         return FileExistsError(_errno.EEXIST, f"File exists ({error})", str(path))
+    if status in (408, 504):
+        return _store.transport_error(_store.TIMEOUT, "Azure", path, error)
     return OSError(_errno.EIO, f"Azure request failed: {error}", str(path))
 
 
@@ -153,7 +188,7 @@ def _translate_errors(path, *, create=False):
         translated = _oserror(error, path, create=create)
         if translated is None:
             raise
-        raise translated from error
+        raise translated from None
 
 
 class _AzWriteStream(_io.BytesIO):
@@ -225,7 +260,16 @@ class AzPath(UriPath):
         backend: BaseAzBackend
 
     def _initbackend(self):
+        self._check_account()
         return _default_backend(self.account)
+
+    def _check_account(self) -> None:
+        """FileNotFoundError for a path with no account whose backend is the
+        default one; a backend the caller supplied names its own account."""
+        if not self.account and self._supplied_backend() is None:
+            raise FileNotFoundError(
+                _errno.ENOENT, "an az: path needs a storage account", str(self)
+            )
 
     @property
     def account(self) -> str:
@@ -251,6 +295,10 @@ class AzPath(UriPath):
     @property
     def _container(self):
         return self._client.get_container_client(self.container)
+
+    def _key_path(self, key: str) -> "AzPath":
+        """The path of the blob `key` in this path's container."""
+        return self.with_path(f"/{self.container}/{key}")
 
     def _properties(self, key: str):
         """The properties of the blob at `key`, or None if there is no such
@@ -310,6 +358,14 @@ class AzPath(UriPath):
         # reuse it instead of `iterdir()` + a stat call per child.
         BlobPrefix = _import_client("azure.storage.blob", "az").BlobPrefix
 
+        if not self.container:
+            # The account: its containers are its directories.
+            with _translate_errors(self):
+                names = [item.name for item in self._client.list_containers()]
+            for name in names:
+                if _utils.is_safe_child_name(name):
+                    yield name, FileStat(is_dir=True)
+            return
         prefix = f"{self.key}/" if self.key else ""
         seen = set()
         with _translate_errors(self):
@@ -356,7 +412,11 @@ class AzPath(UriPath):
             yield name
 
     def _open(self, mode="r", buffering=-1):
+        self._check_account()
         if mode in ("r", "r+"):
+            if not self.key:
+                # An account or a container, not a blob.
+                raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
             # The client is resolved outside the translation, so a missing
             # SDK or an unusable default backend raises as itself instead of
             # FileNotFoundError.
@@ -379,6 +439,8 @@ class AzPath(UriPath):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
+        if not self.key:
+            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         if mode == "w" and self._holds_keys(self.key):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _AzWriteStream(self, exclusive=(mode == "x"))
@@ -479,9 +541,9 @@ class AzPath(UriPath):
                 follow_binds=follow_binds,
             )
 
-        def on_error(error):
+        def on_error(error, path=None):
             if callable(ignore_error):
-                return ignore_error(error, self)
+                return ignore_error(error, self if path is None else path)
             return bool(ignore_error)
 
         if not self.key:
@@ -505,6 +567,10 @@ class AzPath(UriPath):
             marker = f"{self.key}/"
             try:
                 entries = self._flat_entries(marker)
+            except FileNotFoundError:
+                # A missing container holds nothing: the same answer as a
+                # missing blob.
+                entries = []
             except Exception as error:
                 if not on_error(error):
                     raise
@@ -594,13 +660,13 @@ class AzPath(UriPath):
     def _delete_each(self, keys, on_error, *, ignore_missing=False):
         for key in keys:
             try:
-                with _translate_errors(self):
+                with _translate_errors(self._key_path(key)):
                     self._container.get_blob_client(key).delete_blob()
             except Exception as error:
                 if ignore_missing and isinstance(error, FileNotFoundError):
                     # Removed by the batch that was just retried.
                     continue
-                if not on_error(error):
+                if not on_error(error, self._key_path(key)):
                     raise
 
     def _same_location(self, other: Uri) -> bool:
@@ -619,7 +685,11 @@ class AzPath(UriPath):
         dest_key = dest.key
         if dest_key == self.key:
             # Copying a blob onto itself and then deleting the "source"
-            # deletes the only copy. pathlib returns the new path.
+            # deletes the only copy; a name that is not there is not renamed.
+            # pathlib returns the new path.
+            if self._properties(self.key) is None:
+                self._pop_stat_hint()
+                self.stat()
             return dest
         if self._properties(self.key) is None:
             # No blob at the key: a prefix directory (stat() raises

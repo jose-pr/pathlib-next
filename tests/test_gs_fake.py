@@ -207,7 +207,7 @@ def test_rm_recursive_delete_error_reroutes_to_ignore_error():
         recursive=True,
         ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
     )
-    assert calls == [(OSError, "dir")]
+    assert calls == [(OSError, "dir/a.txt")]
 
 
 # --- a trailing "/" names the directory, not the "dir/" marker object -------
@@ -323,7 +323,7 @@ def test_transient_reload_error_is_not_file_not_found():
     with pytest.raises(OSError) as info:
         p.stat()
     assert not isinstance(info.value, FileNotFoundError)
-    assert isinstance(info.value.__cause__, _ServiceUnavailable)
+    assert info.value.__cause__ is None
     assert bucket.objects == {"report.csv": b"PRECIOUS"}
 
 
@@ -748,3 +748,229 @@ def test_rmdir_of_the_bucket_root_is_refused():
         root.rm()
     assert bucket.objects == {"a.txt": b"x"}
     assert bucket.deleted == []
+
+
+# --- a failed request is an OSError of the right type, with nothing chained --
+
+
+class _GatewayTimeout(_ApiError):  # DeadlineExceeded
+    code = 504
+
+
+def _get_failure(error):
+    backend, bucket = _bucket_with(**{"a.txt": b"x"})
+    bucket.reload_errors["a.txt"] = error
+    return _gs("gs://bucket/a.txt", backend)
+
+
+def test_a_connection_failure_is_a_connection_error_naming_the_path():
+    requests_exc = pytest.importorskip("requests.exceptions")
+    error = requests_exc.ConnectionError(
+        "Max retries: /o/a.txt?X-Goog-Signature=SECRET"
+    )
+    path = _get_failure(error)
+    with pytest.raises(ConnectionError) as info:
+        path.stat()
+    assert not isinstance(info.value, TimeoutError)
+    assert info.value.filename == "gs://bucket/a.txt"
+    assert info.value.__cause__ is None
+    assert "SECRET" not in str(info.value)
+    assert path.exists() is False
+
+
+@pytest.mark.parametrize("name", ["ReadTimeout", "ConnectTimeout"])
+def test_a_timeout_of_the_http_client_is_a_timeout_error(name):
+    requests_exc = pytest.importorskip("requests.exceptions")
+    path = _get_failure(getattr(requests_exc, name)("slow"))
+    with pytest.raises(TimeoutError) as info:
+        path.stat()
+    assert info.value.filename == "gs://bucket/a.txt"
+    assert info.value.__cause__ is None
+
+
+def test_a_gateway_timeout_reply_is_a_timeout_error():
+    path = _get_failure(_GatewayTimeout("504"))
+    with pytest.raises(TimeoutError):
+        path.stat()
+
+
+@pytest.mark.parametrize(
+    "cause, expected",
+    [
+        ("connection", ConnectionError),
+        ("read timeout", TimeoutError),
+        (None, TimeoutError),
+        ("unavailable", OSError),
+    ],
+)
+def test_a_retry_that_ran_out_of_time_reports_what_the_last_attempt_failed_with(
+    cause, expected
+):
+    requests_exc = pytest.importorskip("requests.exceptions")
+    api_exc = pytest.importorskip("google.api_core.exceptions")
+    last = {
+        "connection": requests_exc.ConnectionError("refused"),
+        "read timeout": requests_exc.ReadTimeout("slow"),
+        "unavailable": _ServiceUnavailable("503"),
+        None: None,
+    }[cause]
+    path = _get_failure(api_exc.RetryError("Timeout of 120.0s exceeded", last))
+    with pytest.raises(expected) as info:
+        path.stat()
+    if expected is OSError:
+        assert not isinstance(info.value, (ConnectionError, TimeoutError))
+    assert info.value.__cause__ is None
+    assert path.exists() is False
+
+
+def test_a_body_cut_short_is_a_connection_reset_naming_the_path(monkeypatch):
+    requests_exc = pytest.importorskip("requests.exceptions")
+    backend, bucket = _bucket_with(**{"a.txt": b"x"})
+
+    def cut(self, **_kwargs):
+        raise requests_exc.ChunkedEncodingError("Connection broken")
+
+    monkeypatch.setattr(_FakeBlob, "download_as_bytes", cut)
+    with pytest.raises(ConnectionResetError) as info:
+        _gs("gs://bucket/a.txt", backend).read_bytes()
+    assert info.value.filename == "gs://bucket/a.txt"
+    assert info.value.__cause__ is None
+
+
+def test_other_exceptions_still_propagate_as_themselves():
+    path = _get_failure(KeyError("a bug"))
+    with pytest.raises(KeyError):
+        path.stat()
+
+
+# --- timeout and retry reach every call -------------------------------------
+
+
+def _record_sdk_calls(monkeypatch):
+    seen = []
+
+    def wrap(cls, name):
+        original = getattr(cls, name)
+
+        def method(self, *args, **kwargs):
+            options = {k: kwargs.pop(k) for k in ("timeout", "retry") if k in kwargs}
+            seen.append((name, options))
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, name, method)
+
+    for name in ("reload", "delete", "download_as_bytes", "upload_from_string"):
+        wrap(_FakeBlob, name)
+    for name in ("list_blobs", "copy_blob"):
+        wrap(_FakeBucket, name)
+    return seen
+
+
+def test_the_backend_timeout_and_retry_reach_every_sdk_call(monkeypatch):
+    class Backend(_FakeBackend):
+        def call_options(self):
+            return {"timeout": 7, "retry": None}
+
+    seen = _record_sdk_calls(monkeypatch)
+    backend = Backend()
+    bucket = backend.client_obj.bucket_obj
+    bucket.objects.update({"d/a.txt": b"a", "d/b.txt": b"b", "f.txt": b"f"})
+    root = _gs("gs://bucket/", backend)
+    (root / "f.txt").stat()
+    (root / "d").stat()
+    list((root / "d").iterdir())
+    (root / "f.txt").read_bytes()
+    (root / "w.txt").write_bytes(b"w")
+    (root / "w.txt").rename("v.txt")
+    (root / "v.txt").unlink()
+    (root / "m").mkdir()
+    (root / "m").rmdir()
+    (root / "d").rm(recursive=True)
+    assert {name for name, _ in seen} == {
+        "reload",
+        "delete",
+        "download_as_bytes",
+        "upload_from_string",
+        "list_blobs",
+        "copy_blob",
+    }
+    assert all(options == {"timeout": 7, "retry": None} for _, options in seen)
+
+
+def test_a_backend_without_options_adds_no_keyword_to_a_call(monkeypatch):
+    seen = _record_sdk_calls(monkeypatch)
+    backend, _bucket = _bucket_with(**{"f.txt": b"f"})
+    _gs("gs://bucket/f.txt", backend).stat()
+    assert seen and all(options == {} for _, options in seen)
+
+
+def test_gs_backend_carries_timeout_and_retry_apart_from_the_client_kwargs(
+    fake_storage_module,
+):
+    from pathlib_next.uri.schemes.gs import GsBackend
+
+    backend = GsBackend(project="p", timeout=(3, 9), retry=None)
+    assert backend.call_options() == {"timeout": (3, 9), "retry": None}
+    backend.client()
+    assert fake_storage_module == [{"project": "p"}]
+    assert GsBackend(timeout=5).call_options() == {"timeout": 5}
+    assert GsBackend().call_options() == {}
+
+
+# --- paths that name no object --------------------------------------------------
+
+
+def test_a_bucket_root_is_a_directory_to_read_or_write():
+    backend, bucket = _bucket_with(**{"a.txt": b"x"})
+    root = _gs("gs://bucket/", backend)
+    with pytest.raises(IsADirectoryError):
+        root.read_bytes()
+    with pytest.raises(IsADirectoryError):
+        root.write_bytes(b"clobber")
+    with pytest.raises(IsADirectoryError):
+        root.open("r+b")
+    assert bucket.list_calls == [] and bucket.uploads == []
+    assert bucket.objects == {"a.txt": b"x"}
+
+
+@pytest.mark.parametrize("uri", ["gs:x", "gs:///x", "gs:///"])
+def test_a_path_without_a_bucket_does_not_exist_and_asks_nothing(uri):
+    backend, bucket = _bucket_with(**{"x": b"x"})
+    path = _gs(uri, backend)
+    assert path.exists() is False
+    with pytest.raises(FileNotFoundError):
+        path.stat()
+    with pytest.raises(FileNotFoundError):
+        path.read_bytes()
+    with pytest.raises(FileNotFoundError):
+        path.write_bytes(b"x")
+    assert bucket.list_calls == [] and bucket.uploads == []
+
+
+def test_removing_a_missing_bucket_with_missing_ok_is_not_an_error():
+    backend, bucket = _bucket_with()
+
+    def missing(prefix="", **_kwargs):
+        raise _Missing("The specified bucket does not exist")
+
+    bucket.list_blobs = missing
+    path = _gs("gs://nobucket/x", backend)
+    assert path.rm(recursive=True, missing_ok=True) is None
+    with pytest.raises(FileNotFoundError):
+        path.rm(recursive=True)
+    offered = []
+    path.rm(
+        recursive=True,
+        ignore_error=lambda error, where: offered.append(type(error)) or True,
+    )
+    assert offered == [FileNotFoundError]
+
+
+def test_renaming_a_missing_path_onto_its_own_name_is_file_not_found():
+    backend, bucket = _bucket_with(**{"there.txt": b"x", "d/f": b"x"})
+    with pytest.raises(FileNotFoundError):
+        _gs("gs://bucket/nope", backend).rename("nope")
+    there = _gs("gs://bucket/there.txt", backend)
+    assert there.rename("there.txt") == there
+    assert _gs("gs://bucket/d", backend).rename("d").key == "d"
+    assert bucket.objects == {"there.txt": b"x", "d/f": b"x"}

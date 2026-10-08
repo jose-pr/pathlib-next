@@ -139,3 +139,31 @@ def test_az_rmdir_of_the_container_root_is_refused(az_server):
     with pytest.raises(PermissionError):
         path.rmdir()
     assert (path / "a.txt").exists()
+
+
+def _closed_port():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_az_nothing_listening_is_a_connection_error_with_the_sas_token_unseen():
+    # The SDK's own error is not an OSError, and its text names the URL.
+    sas = "sv=2024-01-01&sp=r&sig=SECRETSIGNATUREVALUE"
+    backend = AzBackend(
+        account_url=f"http://127.0.0.1:{_closed_port()}/acct?{sas}",
+        retry_total=0,
+        # A refused loopback connection takes about two seconds to be
+        # reported on Windows; a shorter timeout would be the error instead.
+        connection_timeout=10,
+    )
+    path = AzPath("az://acct/container/blob.txt", backend=backend)
+    with pytest.raises(ConnectionError) as info:
+        path.stat()
+    assert not isinstance(info.value, TimeoutError)
+    assert info.value.filename == "az://acct/container/blob.txt"
+    assert info.value.__cause__ is None
+    assert "SECRETSIGNATUREVALUE" not in str(info.value)
+    assert path.exists() is False

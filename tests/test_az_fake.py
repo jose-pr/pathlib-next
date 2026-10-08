@@ -321,7 +321,7 @@ def test_rm_recursive_delete_error_reroutes_to_ignore_error():
         recursive=True,
         ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
     )
-    assert calls == [(OSError, "dir")]
+    assert calls == [(OSError, "dir/a.txt")]
 
 
 # --- a trailing "/" names the directory; interior empty segments stay -------
@@ -376,7 +376,7 @@ def test_transient_properties_error_is_not_file_not_found():
     with pytest.raises(OSError) as info:
         p.stat()
     assert not isinstance(info.value, FileNotFoundError)
-    assert isinstance(info.value.__cause__, _ServiceUnavailable)
+    assert info.value.__cause__ is None
     assert container.objects == {"report.csv": b"PRECIOUS"}
 
 
@@ -884,3 +884,186 @@ def test_rmdir_of_the_container_root_is_refused():
         root.rm()
     assert container.objects == {"a.txt": b"x"}
     assert container.deleted == []
+
+
+# --- a failed request is an OSError of the right type, with nothing chained --
+
+
+class _GatewayTimeout(_HttpResponseError):
+    status_code = 504
+
+
+def _properties_failure(error):
+    backend, container = _container_with(**{"a.txt": b"x"})
+    container.properties_errors["a.txt"] = error
+    return _az("az://account/container/a.txt", backend)
+
+
+def _azure_core():
+    return pytest.importorskip("azure.core.exceptions")
+
+
+def test_a_connection_failure_is_a_connection_error_naming_the_path():
+    azexc = _azure_core()
+    error = azexc.ServiceRequestError("refused: /c/a.txt?sv=1&sig=SECRET")
+    path = _properties_failure(error)
+    with pytest.raises(ConnectionError) as info:
+        path.stat()
+    assert not isinstance(info.value, (TimeoutError, ConnectionResetError))
+    assert info.value.filename == "az://account/container/a.txt"
+    assert info.value.__cause__ is None
+    assert "SECRET" not in str(info.value)
+    assert path.exists() is False
+    backend, container = _container_with(**{"a.txt": b"x"})
+
+    def refused(*args, **kwargs):
+        raise error
+
+    container.walk_blobs = refused
+    errors = []
+    root = _az("az://account/container", backend)
+    assert list(root.walk(on_error=errors.append)) == []
+    assert [type(e) for e in errors] == [ConnectionError]
+
+
+def test_a_request_that_times_out_is_a_timeout_error():
+    azexc = _azure_core()
+    requests_exc = pytest.importorskip("requests.exceptions")
+    errors = [
+        azexc.ServiceRequestError("slow", error=requests_exc.ConnectTimeout("c")),
+        azexc.ServiceResponseError("slow", error=requests_exc.ReadTimeout("r")),
+    ]
+    for name in ("ServiceRequestTimeoutError", "ServiceResponseTimeoutError"):
+        if hasattr(azexc, name):
+            errors.append(getattr(azexc, name)("slow"))
+    for error in errors:
+        path = _properties_failure(error)
+        with pytest.raises(TimeoutError) as info:
+            path.stat()
+        assert info.value.filename == "az://account/container/a.txt"
+        assert info.value.__cause__ is None
+
+
+def test_a_gateway_timeout_reply_is_a_timeout_error():
+    path = _properties_failure(_GatewayTimeout("504"))
+    with pytest.raises(TimeoutError):
+        path.stat()
+
+
+def test_a_response_that_does_not_arrive_whole_is_a_connection_reset():
+    azexc = _azure_core()
+    errors = [azexc.ServiceResponseError("Connection aborted")]
+    if hasattr(azexc, "IncompleteReadError"):
+        errors.append(azexc.IncompleteReadError("short body"))
+    for error in errors:
+        path = _properties_failure(error)
+        with pytest.raises(ConnectionResetError) as info:
+            path.stat()
+        assert info.value.filename == "az://account/container/a.txt"
+        assert info.value.__cause__ is None
+
+
+def test_a_body_cut_short_is_a_connection_reset_naming_the_path(monkeypatch):
+    azexc = _azure_core()
+    backend, container = _container_with(**{"a.txt": b"x"})
+
+    def cut(self):
+        raise azexc.ServiceResponseError("Connection broken")
+
+    monkeypatch.setattr(_FakeDownloader, "readall", cut)
+    with pytest.raises(ConnectionResetError) as info:
+        _az("az://account/container/a.txt", backend).read_bytes()
+    assert info.value.filename == "az://account/container/a.txt"
+    assert info.value.__cause__ is None
+
+
+def test_other_exceptions_still_propagate_as_themselves():
+    path = _properties_failure(KeyError("a bug"))
+    with pytest.raises(KeyError):
+        path.stat()
+
+
+# --- paths that name no blob ---------------------------------------------------
+
+
+def test_a_container_root_is_a_directory_to_read_or_write():
+    backend, container = _container_with(**{"a.txt": b"x"})
+    root = _az("az://account/container/", backend)
+    with pytest.raises(IsADirectoryError):
+        root.read_bytes()
+    with pytest.raises(IsADirectoryError):
+        root.write_bytes(b"clobber")
+    with pytest.raises(IsADirectoryError):
+        root.open("r+b")
+    assert container.list_calls == [] and container.uploads == []
+    assert container.objects == {"a.txt": b"x"}
+
+
+def test_an_account_lists_its_containers_as_directories(walk_sdk):
+    backend, _container = _container_with()
+
+    class Properties:
+        def __init__(self, name):
+            self.name = name
+
+    backend.client_obj.list_containers = lambda **kwargs: iter(
+        [Properties("logs"), Properties("data")]
+    )
+    account = _az("az://account/container/x", backend).parents[-1]
+    assert account.container == ""
+    assert account.is_dir()
+    children = {child.name: child.is_dir() for child in account.iterdir()}
+    assert children == {"logs": True, "data": True}
+    with pytest.raises(IsADirectoryError):
+        account.read_bytes()
+    with pytest.raises(IsADirectoryError):
+        account.write_bytes(b"x")
+
+
+def test_a_path_without_an_account_does_not_exist_and_builds_no_credential(
+    monkeypatch,
+):
+    from pathlib_next.uri.schemes import az
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a credential must not be built")
+
+    monkeypatch.setattr(az, "_default_credential", forbidden)
+    monkeypatch.setattr(az, "_DEFAULT_BACKENDS", {})
+    for uri in ("az:x", "az:///c/x"):
+        path = AzPath(uri)
+        assert path.exists() is False
+        with pytest.raises(FileNotFoundError):
+            path.stat()
+        with pytest.raises(FileNotFoundError):
+            path.write_bytes(b"x")
+    assert az._DEFAULT_BACKENDS == {}
+
+
+def test_removing_a_missing_container_with_missing_ok_is_not_an_error():
+    backend, container = _container_with()
+
+    def missing(name_starts_with="", **_kwargs):
+        raise _Missing("ContainerNotFound")
+
+    container.list_blobs = missing
+    path = _az("az://account/nocontainer/x", backend)
+    assert path.rm(recursive=True, missing_ok=True) is None
+    with pytest.raises(FileNotFoundError):
+        path.rm(recursive=True)
+    offered = []
+    path.rm(
+        recursive=True,
+        ignore_error=lambda error, where: offered.append(type(error)) or True,
+    )
+    assert offered == [FileNotFoundError]
+
+
+def test_renaming_a_missing_path_onto_its_own_name_is_file_not_found():
+    backend, container = _container_with(**{"there.txt": b"x", "d/f": b"x"})
+    with pytest.raises(FileNotFoundError):
+        _az("az://account/container/nope", backend).rename("nope")
+    there = _az("az://account/container/there.txt", backend)
+    assert there.rename("there.txt") == there
+    assert _az("az://account/container/d", backend).rename("d").key == "d"
+    assert container.objects == {"there.txt": b"x", "d/f": b"x"}

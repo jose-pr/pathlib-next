@@ -277,7 +277,7 @@ def test_rm_recursive_delete_objects_errors_ignore_error():
         recursive=True,
         ignore_error=lambda err, path: calls.append((type(err), path.key)) or True,
     )
-    assert calls == [(OSError, "dir")]
+    assert calls == [(PermissionError, "dir/a.txt")]
 
 
 def test_rm_non_recursive_keeps_rmdir_contract():

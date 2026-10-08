@@ -155,3 +155,43 @@ def test_gs_rmdir_of_the_bucket_root_is_refused(gs_server):
     with pytest.raises(PermissionError):
         path.rmdir()
     assert (path / "a.txt").exists()
+
+
+def _closed_port():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _unreachable(monkeypatch, **options):
+    monkeypatch.delenv("STORAGE_EMULATOR_HOST", raising=False)
+    backend = GsBackend(
+        client_options={"api_endpoint": f"http://127.0.0.1:{_closed_port()}"},
+        use_auth_w_custom_endpoint=False,
+        project="p",
+        **options,
+    )
+    return GsPath("gs://bucket/blob.txt", backend=backend)
+
+
+def test_gs_nothing_listening_is_a_connection_error_without_retries(monkeypatch):
+    # A refused loopback connection takes about two seconds to be reported on
+    # Windows, so the timeout must be longer than that.
+    path = _unreachable(monkeypatch, timeout=10, retry=None)
+    with pytest.raises(ConnectionError) as info:
+        path.stat()
+    assert not isinstance(info.value, TimeoutError)
+    assert info.value.filename == "gs://bucket/blob.txt"
+    assert info.value.__cause__ is None
+    assert path.exists() is False
+
+
+def test_gs_a_retry_that_runs_out_of_time_is_still_a_connection_error(monkeypatch):
+    from google.cloud.storage.retry import DEFAULT_RETRY
+
+    path = _unreachable(monkeypatch, timeout=10, retry=DEFAULT_RETRY.with_deadline(1))
+    with pytest.raises(ConnectionError) as info:
+        path.stat()
+    assert info.value.__cause__ is None
