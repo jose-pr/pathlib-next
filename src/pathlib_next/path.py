@@ -841,12 +841,13 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         missing layer from an unreadable one. `error.filename` names the
         directory even when the backend left it empty.
 
-        `bound_loops=True` descends a directory at most once per "**",
-        keyed on `(st_dev, st_ino)`: that bounds a Windows junction loop,
-        which no symlink check can see (a junction reports
-        `is_symlink() == False`, so `recurse_symlinks=False` does not help
-        and pathlib itself loops until the recursion limit). A backend whose
-        stat carries no identity is walked unbounded, as before.
+        `bound_loops=True` skips a directory whose `(st_dev, st_ino)` is
+        already on the current descent path, which is what a loop is: that
+        bounds a Windows junction loop, which no symlink check can see (a
+        junction reports `is_symlink() == False`, so `recurse_symlinks=False`
+        does not help and pathlib itself loops until the recursion limit). A
+        directory reachable under two sibling names is entered under both. A
+        backend whose stat carries no identity is walked unbounded.
 
         A "**" component auto-enables recursion. Pass `recursive=False`
         explicitly to treat "**" as a plain "*" instead.

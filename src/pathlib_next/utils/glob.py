@@ -228,8 +228,10 @@ def glob(
     starting with a dot) are not matched by wildcards and not descended into
     by "**" unless `include_hidden` is true.
 
-    If recursive is true, the pattern '**' will match any files and
-    zero or more directories and subdirectories. `recursive=None` decides
+    If recursive is true, the pattern '**' will match zero or more
+    directories and subdirectories; as the last component it also matches
+    files on Python 3.13+ or with `native=False`, and directories only
+    otherwise. `recursive=None` decides
     from the pattern itself, as `Path.glob()` does: a "**" component enables
     it. `native=` follows the running interpreter's rules, or applies one
     rule on every version -- see `parse_pattern()`.
