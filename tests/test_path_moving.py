@@ -154,7 +154,6 @@ def test_localpath_resolves_the_into_methods_to_this_library(tmp_path):
 
 
 def test_localpath_keeps_stdlibs_replace():
-    assert pathlib_next.LocalPath.replace.__module__ == "pathlib"
     assert pathlib_next.LocalPath.replace is pathlib.Path.replace
 
 
@@ -200,7 +199,7 @@ def test_a_downstream_local_class_gets_the_into_methods_of_this_library(tmp_path
 
     for name in ("copy_into", "move_into"):
         assert getattr(Downstream, name) is getattr(Path, name)
-    assert Downstream.replace.__module__ == "pathlib"
+    assert Downstream.replace is pathlib.Path.replace
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="3.14 added the stdlib methods")
