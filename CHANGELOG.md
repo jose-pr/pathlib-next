@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `0..0o177777` (a `st_mode` with its type bits still passes, as `os.chmod`
   accepts it; `stat.S_IMODE()` drops them) and an id outside `0..2**32-1`
   (`-1` stays "unchanged") `ValueError`.
+- **`UriPath(url)` type-checks under pyright.** `UriPath.__new__` annotated
+  `schemesmap` as `dict` with a default of `None`, which pyright rejects for
+  every construction (`UriPath("sftp://h/x")`); it is now an optional mapping of
+  scheme to class.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -310,6 +314,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   client is installed now gets the `ImportError` at the first operation, and
   `from pathlib_next.uri.schemes import HttpPath` no longer fails without
   `requests`.
+- **`schemesmap=` is an allow-list for every class a path chooses.** It was read
+  once, for the first dispatch: `zip:` opened its outer archive through the
+  global registry (so `file:` was reachable although the map omitted it),
+  `copy("file:///x")` wrote a local file, and joining a `UriPath` argument,
+  `with_source()` and a `str` destination chose from every registered class.
+  The path now keeps the map, and each of those chooses from it (a scheme the
+  map omits gives a plain `UriPath`, whose I/O raises `NotImplementedError`);
+  an archive path does not reuse a handle another path opened through
+  `file:`. The map restricts dispatch only: it does not stop code that holds a
+  built path or class from using it.
 
 ## [0.9.12] - 2026-10-08
 

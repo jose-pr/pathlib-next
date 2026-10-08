@@ -888,7 +888,7 @@ class Uri(Pathname):
         return posix
 
 
-def _looks_like_uri(value: str) -> bool:
+def _looks_like_uri(value: str, schemesmap=None) -> bool:
     """Whether a destination string is URI syntax rather than a path.
 
     Needs an RFC 3986 scheme prefix; without `://` the scheme must also be
@@ -896,6 +896,7 @@ def _looks_like_uri(value: str) -> bool:
     happens to carry a colon (`notes:draft`, `Fedora-42:latest.tar`) stays a
     path. A one-letter scheme is a Windows drive (`C:/Temp`). Same rule
     `pathlib_next.tools.uripath` applies to command-line arguments.
+    `schemesmap` is the allow-list the scheme is looked up in, if any.
     """
     match = _URI_SCHEME_RE.match(value)
     if match is None:
@@ -906,7 +907,9 @@ def _looks_like_uri(value: str) -> bool:
         return True
     scheme = value[: match.end() - 1].lower()
     try:
-        return Source(scheme, None, None, None).get_scheme_cls() is not UriPath
+        return (
+            Source(scheme, None, None, None).get_scheme_cls(schemesmap) is not UriPath
+        )
     except Exception:
         # A scheme plugin that fails to load: treat it as a URI, as the
         # scheme lookup would have.
@@ -928,8 +931,16 @@ class UriPath(Uri, Path):
     #: `_backend` is the backend object, or None until one is built or
     #: inherited; `_backend_derived` says the path built it (or inherited one
     #: that was); `_backend_candidates` holds the join segments' backends
-    #: until the path knows its own endpoint.
-    __slots__ = ("_backend", "_backend_derived", "_backend_candidates", "_stat_hint")
+    #: until the path knows its own endpoint; `_schemes_in_use` is the
+    #: `schemesmap=` the path was constructed with, which every path and
+    #: destination it makes is dispatched with.
+    __slots__ = (
+        "_backend",
+        "_backend_derived",
+        "_backend_candidates",
+        "_stat_hint",
+        "_schemes_in_use",
+    )
     __SCHEMES: _ty.Sequence[str] = ()
     __SCHEMESMAP: _ty.Mapping[str, type["Self"]] = None
 
@@ -1042,7 +1053,7 @@ class UriPath(Uri, Path):
     def __new__(
         cls,
         *args,
-        schemesmap: dict[str, type["Self"]] = None,
+        schemesmap: "_ty.Mapping[str, type[UriPath]] | None" = None,
         findclass=False,
         **kwargs,
     ) -> "UriPath":
@@ -1053,9 +1064,11 @@ class UriPath(Uri, Path):
                 inst = Uri.__new__(cls, *args, **kwargs)
             else:
                 inst = cls.__new__(cls, *args, **kwargs)
+            inst._schemes_in_use = schemesmap
             inst._init(uri.source, uri.path, uri.query, uri.fragment, **kwargs)
         else:
             inst = Uri.__new__(cls, *args, **kwargs)
+            inst._schemes_in_use = schemesmap
             backend = kwargs.get("backend", None)
             if backend is not None:
                 inst._backend = backend
@@ -1114,13 +1127,15 @@ class UriPath(Uri, Path):
             self._backend is None and self._backend_candidates is None
         ):
             # Given, or nothing to carry: the usual case before any I/O.
-            return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
-        backend, derived = self._backend_for(source)
-        if backend is not None:
-            kwargs["backend"] = backend
-        inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
-        if backend is not None and inst._backend is backend:
-            inst._backend_derived = derived
+            inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+        else:
+            backend, derived = self._backend_for(source)
+            if backend is not None:
+                kwargs["backend"] = backend
+            inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+            if backend is not None and inst._backend is backend:
+                inst._backend_derived = derived
+        inst._schemes_in_use = self._schemes_in_use
         return inst
 
     def _init(
@@ -1197,8 +1212,10 @@ class UriPath(Uri, Path):
         A single-letter scheme is a Windows drive, not a scheme: `C:/Temp/x`
         is a path (the same rule the `uripath` CLI applies).
         """
-        if _looks_like_uri(target):
-            destination = type(self)(target, findclass=True)
+        if _looks_like_uri(target, self._schemes_in_use):
+            destination = type(self)(
+                target, findclass=True, schemesmap=self._schemes_in_use
+            )
             # Same endpoint: reuse the connection (and whatever auth was
             # configured on it) rather than opening a second, bare one.
             backend, derived = self._backend_for(destination.source)
@@ -1225,12 +1242,22 @@ class UriPath(Uri, Path):
             converted.__init__(key)
         except (TypeError, NotImplementedError):
             return NotImplemented
-        return type(self)(self, *converted._raw_uris, findclass=True)
+        return type(self)(
+            self,
+            *converted._raw_uris,
+            findclass=True,
+            schemesmap=self._schemes_in_use,
+        )
 
     def __rtruediv__(self, key: str):
         if not isinstance(key, str):
             return NotImplemented
-        return type(self)(Uri()._from_decoded_path(key), self, findclass=True)
+        return type(self)(
+            Uri()._from_decoded_path(key),
+            self,
+            findclass=True,
+            schemesmap=self._schemes_in_use,
+        )
 
     def joinpath(self, *args: str | Uri | os.PathLike) -> "UriPath":
         """Combine this path with segments, choosing the result's class from
@@ -1245,7 +1272,12 @@ class UriPath(Uri, Path):
             result = (
                 result._join_decoded(arg)
                 if isinstance(arg, str)
-                else type(result)(result, arg, findclass=True)
+                else type(result)(
+                    result,
+                    arg,
+                    findclass=True,
+                    schemesmap=result._schemes_in_use,
+                )
             )
         return result
 
@@ -1256,12 +1288,18 @@ class UriPath(Uri, Path):
             # for a host-only Source): a plain UriPath.
             inst = Uri.__new__(UriPath)
         elif source.scheme not in cls._schemes():
-            inst = cls.__new__(cls, source.scheme + ":", findclass=True)
+            inst = cls.__new__(
+                cls,
+                source.scheme + ":",
+                findclass=True,
+                schemesmap=self._schemes_in_use,
+            )
         else:
             inst = cls.__new__(cls)
             backend, derived = self._backend_for(source)
             if backend is not None:
                 inst._backend, inst._backend_derived = backend, derived
+        inst._schemes_in_use = self._schemes_in_use
         inst._init(source, self.path, self.query, self.fragment)
         return inst
 

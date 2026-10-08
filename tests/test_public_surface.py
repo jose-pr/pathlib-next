@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import pathlib
@@ -261,11 +262,22 @@ joined = bare / "y"
 """
 
 
+URI_CONSUMER = """
+from pathlib_next.uri import UriPath
+
+remote = UriPath("sftp://h/x")
+allowed = UriPath("data:,x", schemesmap={})
+"""
+
+
 def _consumer(tmp_path):
     # Outside any dot-directory: pyright silently skips those.
     directory = tmp_path / "consumer"
     directory.mkdir()
-    (directory / "consumer.py").write_text(CONSUMER, encoding="utf-8")
+    source = CONSUMER
+    if importlib.util.find_spec("uritools") and importlib.util.find_spec("netimps"):
+        source += URI_CONSUMER
+    (directory / "consumer.py").write_text(source, encoding="utf-8")
     return directory
 
 

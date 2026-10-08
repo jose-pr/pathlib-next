@@ -135,13 +135,13 @@ def _parse_archive_uri(raw: str, scheme: str) -> "tuple[str, str, object, str] |
     return archive, path.lstrip("/"), query, fragment
 
 
-def _open_outer(archive_uri: str) -> "UriPath":
+def _open_outer(archive_uri: str, schemesmap=None) -> "UriPath":
     if not _SCHEME_RE.match(archive_uri):
         raise ValueError(
             f"Archive URI {archive_uri!r} has no scheme -- prefix it "
             "explicitly, e.g. 'file:///path/to/archive.zip'."
         )
-    return UriPath(archive_uri)
+    return UriPath(archive_uri, schemesmap=schemesmap)
 
 
 _registry_lock = _threading.Lock()
@@ -438,11 +438,16 @@ class ArchiveUri(UriPath):
             else:
                 archive_str, inner = _split_archive_path(path)
                 inner = inner.lstrip("/")
-            outer = _open_outer(archive_str)
+            outer = _open_outer(archive_str, self._schemes_in_use)
             # `ZipUri`/`TarUri` pin `_backend_cls`; the base `archive:`
             # scheme leaves it `None`, meaning "detect per outer archive".
             backend_cls = self._backend_cls or _detect_backend_cls(outer)
-            backend = _get_backend(backend_cls, outer)
+            if type(outer) is UriPath:
+                # No class serves the outer's scheme (not in `schemesmap`, or
+                # unknown): it must not borrow a handle another path opened.
+                backend = backend_cls(outer)
+            else:
+                backend = _get_backend(backend_cls, outer)
         else:
             # Derived instance (with_segments/joinpath/_make_child_relpath)
             # -- backend already known, `path` is already just the inner

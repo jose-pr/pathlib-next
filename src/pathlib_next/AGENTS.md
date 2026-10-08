@@ -484,7 +484,13 @@ not by a checker.
   unknown scheme (its I/O raises `NotImplementedError`). Resolution: classes
   already imported → entry point in group `pathlib_next.schemes` → built-in
   `pathlib_next.uri.schemes.*` module. An explicit `schemesmap` is the only
-  map consulted.
+  map consulted. It is an allow-list of classes for dispatch, not a sandbox:
+  the path keeps it and every class chosen after construction uses it -- a
+  join with a `Uri`/`UriPath` argument, `with_source()`, a `copy()`/`move()`
+  `str` destination and the outer URI of a `zip:`/`tar:`/`archive:` path (a
+  scheme the map omits gives a plain `UriPath`, whose I/O raises
+  `NotImplementedError`) -- but it restricts nothing an already-built path or
+  class does.
   - Registering: `__SCHEMES = ("myscheme",)` in the class body (name-mangled:
     redeclare per class; the class name must not start with `_`). Defining or
     importing the subclass is enough, including after the first dispatch.
