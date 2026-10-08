@@ -10,12 +10,15 @@ import time as _time
 import typing as _ty
 import urllib.parse as _urlparse
 
-import requests as _req
-import urllib3.exceptions as _urllib3_exc
-
 from ... import utils as _utils
 from ...utils.stat import FileStat
 from .. import UriPath, _DerivedBackend
+from ._extras import import_or_stub as _import_or_stub
+
+# The `http` extra. Without it a path still constructs and joins; the first
+# request raises an ImportError naming the extra.
+_req = _import_or_stub("requests", "http")
+_urllib3_exc = _import_or_stub("urllib3.exceptions", "http")
 
 DEFAULT_TIMEOUT = (10, 60)
 """`(connect, read)` timeout, in seconds, `HttpBackend` sends with every

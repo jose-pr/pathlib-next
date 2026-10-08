@@ -5,11 +5,12 @@ import errno as _errno
 import io as _io
 import typing as _ty
 
-import requests as _req
-
 from ... import utils as _utils
 from .. import Source, UriPath
 from ..source import _compose_host
+from ._extras import import_or_stub as _import_or_stub
+
+_req = _import_or_stub("requests", "http")
 
 DEFAULT_TIMEOUT = (10, 60)
 """`(connect, read)` timeout, in seconds, `RepoBackend` sends with every

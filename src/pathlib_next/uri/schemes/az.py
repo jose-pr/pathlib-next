@@ -11,6 +11,7 @@ from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
 from . import _objstore as _store
+from ._extras import import_client as _import_client
 
 
 class BaseAzBackend(object):
@@ -34,7 +35,7 @@ def _default_credential():
         raise ImportError(
             "az:// paths without an explicit backend authenticate with "
             "azure-identity's DefaultAzureCredential, which is not installed: "
-            "`pip install azure-identity`, or pass "
+            'pip install "pathlib-next[az]" (the az extra), or pass '
             "backend=AzBackend(account_url=..., credential=...) or "
             "AzBackend(connection_string=...)"
         ) from error
@@ -63,7 +64,9 @@ class AzBackend(BaseAzBackend):
 
     def client(self):
         if self._client is None:
-            from azure.storage.blob import BlobServiceClient
+            BlobServiceClient = _import_client(
+                "azure.storage.blob", "az"
+            ).BlobServiceClient
 
             kwargs = dict(self.client_kwargs)
             if "connection_string" in kwargs:
@@ -305,7 +308,7 @@ class AzPath(UriPath):
     def _scandir(self):
         # Each walk_blobs call already carries size/mtime for every blob --
         # reuse it instead of `iterdir()` + a stat call per child.
-        from azure.storage.blob import BlobPrefix
+        BlobPrefix = _import_client("azure.storage.blob", "az").BlobPrefix
 
         prefix = f"{self.key}/" if self.key else ""
         seen = set()

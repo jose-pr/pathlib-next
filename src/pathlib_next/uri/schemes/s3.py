@@ -6,13 +6,13 @@ import itertools as _itertools
 import tempfile as _tempfile
 import typing as _ty
 
-import botocore.exceptions as _botoexc
-
 from ... import utils as _utils
 from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
 from . import _objstore as _store
+from ._extras import import_client as _import_client
+from ._extras import import_or_stub as _import_or_stub
 
 try:
     from boto3.exceptions import S3UploadFailedError as _S3UploadFailedError
@@ -46,8 +46,7 @@ class S3Backend(BaseS3Backend):
 
     def client(self):
         if self._client is None:
-            import boto3
-
+            boto3 = _import_client("boto3", "s3")
             self._client = boto3.client("s3", **self.client_kwargs)
         return self._client
 
@@ -60,11 +59,18 @@ CopyObject copies; above it writes and renames use boto3's managed
 _SPOOL_SIZE = 8 * 1024**2
 """Bytes a write stream keeps in memory before spilling to a temp file."""
 
-# botocore's connection-level failures: an endpoint that cannot be reached,
-# a timeout, a dropped connection. Not an OSError, so exists() and walk()'s
-# on_error would not see them.
-_TRANSPORT_ERRORS = (_botoexc.ConnectionError, _botoexc.HTTPClientError)
-_S3_ERRORS = (_botoexc.ClientError,) + _TRANSPORT_ERRORS
+# The `s3` extra. Without botocore the error tuples are empty (nothing to
+# catch) and the first client the backend builds raises an ImportError naming
+# the extra.
+_botoexc = _import_or_stub("botocore.exceptions", "s3")
+try:
+    # botocore's connection-level failures: an endpoint that cannot be reached,
+    # a timeout, a dropped connection. Not an OSError, so exists() and walk()'s
+    # on_error would not see them.
+    _TRANSPORT_ERRORS = (_botoexc.ConnectionError, _botoexc.HTTPClientError)
+    _S3_ERRORS = (_botoexc.ClientError,) + _TRANSPORT_ERRORS
+except ImportError:
+    _TRANSPORT_ERRORS = _S3_ERRORS = ()
 
 
 def _error_code(error: _botoexc.ClientError) -> str:

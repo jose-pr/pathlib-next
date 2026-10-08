@@ -294,6 +294,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `str()`, `repr()`, `hash()`, `==` and `sorted()` of it raised
   `UnicodeEncodeError`. Such a name renders as its UTF-8 bytes
   (`%ED%A0%80`); an escaped non-UTF-8 byte renders as that byte, as before.
+- **A path of a scheme works without its client library, and the error names the
+  extra.** `UriPath("http://h/x")`, `https:`, `dav:`, `github:`, `gitlab:` and
+  `git:` raised `ModuleNotFoundError: requests` at construction, `s3:` did the
+  same for `botocore`, so such a URL could not even be parsed or joined; `gs:`
+  and `az:` constructed and failed on the first request with `No module named
+  'google'`. Every scheme class now imports and constructs, joins, compares and
+  renders without its library, and the first operation that needs it raises
+  `ImportError` saying so and naming the extra (`pip install
+  "pathlib-next[http]"`; `s3`, `gs` and `az` likewise). `import
+  pathlib_next.uri` without `uritools` raises a `ModuleNotFoundError` that names
+  the `uri` extra, `pathlib_next.UriPath` an `AttributeError` that does, and
+  `hasattr(pathlib_next, "UriPath")` stays `False`. A program that caught
+  `ModuleNotFoundError` around the construction of a path to find out whether a
+  client is installed now gets the `ImportError` at the first operation, and
+  `from pathlib_next.uri.schemes import HttpPath` no longer fails without
+  `requests`.
 
 ## [0.9.12] - 2026-10-08
 

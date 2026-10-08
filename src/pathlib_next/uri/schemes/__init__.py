@@ -5,9 +5,9 @@ imported, and `UriPath` imports the submodule on demand the first time its
 scheme is used. The class re-exports below (`HttpPath`, `S3Path`, ...) are
 resolved lazily (PEP 562): importing this package, or one scheme submodule
 such as `.file`, imports no other backend, so a `file:` path never pays for
-`requests` or `botocore`. A name whose optional dependency is missing is
-absent, as before: `hasattr()` is False and `from ... import` raises
-`ImportError`.
+`requests` or `botocore`. A scheme class imports whether or not its client
+library is installed: a path of it joins and compares, and the first
+operation that needs the library raises an `ImportError` naming the extra.
 """
 
 from __future__ import annotations

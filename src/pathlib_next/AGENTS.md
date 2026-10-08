@@ -26,10 +26,18 @@ resulting contract.
 `PosixPathname`, `WindowsPathname`, `FileStat`, the protocols `Stat`, `Chmod`,
 `BinaryOpen`, `FsPathLike`, the aliases `PathLike`/`PurePathLike`, the modules
 `glob` (`utils.glob`) and `sync` (`utils.sync`), and `Uri`/`UriPath` **only
-when `uritools` is importable** — without the `uri` extra those two names are
-silently absent and `from pathlib_next.uri import UriPath` raises
-`ModuleNotFoundError`. `MemPath` lives in `pathlib_next.mempath`;
+when `uritools` is importable**. Without the `uri` extra `hasattr(pathlib_next,
+"UriPath")` is False, `pathlib_next.UriPath` raises an `AttributeError` that
+names the extra, and `import pathlib_next.uri` raises a `ModuleNotFoundError`
+that does (`from pathlib_next import UriPath` raises Python's own
+`ImportError`). `MemPath` lives in `pathlib_next.mempath`;
 `pathlib_next.testing` is never imported implicitly.
+
+A scheme class always imports, constructs, joins and compares, whether or not
+its client library is installed. The first operation that needs the library
+(`exists()`, `stat()`, a read, a listing, `is_local()` without `netimps`)
+raises an `ImportError` that names the extra:
+`pip install "pathlib-next[http]"`.
 
 `pathlib_next.__version__` is the installed distribution's version
 (`importlib.metadata`), `"0+unknown"` for a source tree that is not installed.
@@ -547,7 +555,8 @@ not by a checker.
 Every class is dispatched by `UriPath(...)`; `pathlib_next.uri.schemes`
 re-exports `FileUri`, `DataUri`, `HttpPath`, `DavPath`, `FtpPath`, `SftpPath`,
 `S3Path`, `GsPath`, `AzPath`, `GitHubPath`, `GitLabPath`, `GitPath`, `ZipUri`,
-`TarUri` lazily (a name whose extra is missing is absent). Backends are passed
+`TarUri` lazily (every name imports without its extra; see "Install and
+imports"). Backends are passed
 as `UriPath(uri, backend=...)` or `path.with_backend(...)`. Unsupported
 operations raise `NotImplementedError`. Network errors map to pathlib types
 (`FileNotFoundError`, `PermissionError`, `FileExistsError`,

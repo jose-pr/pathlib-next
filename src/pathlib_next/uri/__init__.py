@@ -7,7 +7,13 @@ import posixpath as _posix
 import typing as _ty
 import weakref as _weakref
 
-import uritools
+try:
+    import uritools
+except ImportError as _error:
+    raise ModuleNotFoundError(
+        'pathlib_next.uri needs the "uri" extra: pip install "pathlib-next[uri]"',
+        name="uritools",
+    ) from _error
 
 if _ty.TYPE_CHECKING:
     from typing import Self, TypeAlias

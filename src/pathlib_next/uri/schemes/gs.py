@@ -10,6 +10,7 @@ from ...path import _check_follow
 from ...utils.stat import FileStat
 from .. import Uri, UriPath
 from . import _objstore as _store
+from ._extras import import_client as _import_client
 
 
 class BaseGsBackend(object):
@@ -43,7 +44,7 @@ class GsBackend(BaseGsBackend):
 
     def client(self):
         if self._client is None:
-            from google.cloud import storage
+            storage = _import_client("google.cloud.storage", "gs")
 
             # Passed through as given. This used to turn a dict
             # `api_endpoint` into a process-wide, never-restored
