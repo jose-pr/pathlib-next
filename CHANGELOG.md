@@ -579,6 +579,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   tolerates. Errors now carry the remote path in `filename` (and `filename2` for
   `rename()`), and the two-path error of asyncssh no longer prints
   `[WinError None]` on Windows.
+- **`chown(None, gid)` and `chown(uid, None)` on `sftp:` never send 0 for the id
+  they leave alone.** An SFTP version 4 server (asyncssh asks for 4 by default)
+  names the owner and the group instead of numbering them, so every file read
+  as owned by 0 and `chown(None, 4242)` asked the server to give the file to
+  root. An owner name that is a number is that id; any other name makes the
+  partial `chown()` raise `NotImplementedError` naming the field, with nothing
+  sent. `chown(uid, gid)` is unchanged, and so is a version 3 server's (OpenSSH).
+- **A pickled or deep-copied `sftp:` backend works.** The default `ssh_config`
+  and, for paramiko, the default `known_hosts` were bare objects compared by
+  identity, so a copy was read as "an iterable of paths" and the first request
+  raised `TypeError`. They are the same object after a pickle or a copy. A
+  path pickled with a `backend=` still carries only its URI and `ssh_config`.
+- **`SftpPath.with_source()` carries the path's `ssh_config`, and a join onto
+  another host does not.** `with_source()` handed the default back (a path told
+  to read no configuration read `~/.ssh/config` on the new host), and
+  `SftpPath(a, "sftp://other/y")` took `a`'s `ssh_config` onto `other`. The
+  configuration now follows a derivation on the same endpoint and is dropped,
+  with the backend, on another host. Two paths of one endpoint whose
+  `ssh_config` differs no longer share the backend they build for themselves.
+- **`checksum()` on `sftp:` asks per algorithm.** A server that refused one
+  algorithm with "operation unsupported" (a FIPS build and md5), a bare failure
+  for one file, or a probe by `supported_checksums()` (md5 only) switched native
+  checksums off for the whole connection, and every later digest was streamed.
+  Only the algorithm refused is remembered now, a failure for one file refuses
+  nothing, and `supported_checksums()` is never empty for a connection that
+  produced a digest. An algorithm other than `md5`, `sha1`, `sha224`,
+  `sha256`, `sha384`, `sha512` and `crc32` is `NotImplementedError` without a
+  request, and a reply is a digest only of the size its algorithm has (an empty
+  reply was returned as `''` for `crc32`).
+- **File objects of the two SFTP backends agree.** `write_bytes()` and
+  `open("xb").write()` returned `None` on paramiko; they return the count, as on
+  asyncssh. `truncate()` raised `io.UnsupportedOperation` on asyncssh and
+  required a size on paramiko; both truncate, and `truncate()` without a size
+  cuts at the current position. `fileno()` raises `io.UnsupportedOperation` on
+  both.
+- **A file left open at exit is written.** `path.open("w").write(...)` without
+  `close()` at module scope left an empty file on asyncssh (and, for text, on
+  paramiko) with a `RuntimeError` about shutting down. Files opened for writing
+  are flushed and closed when the interpreter exits, before its threads stop,
+  waiting at most five seconds for a connection that has hung.
+- **A URI user cannot add arguments to an asyncssh `ProxyCommand`.** A user such
+  as `a -oProxyCommand=calc` was expanded into `%r` and split afterwards, so
+  the part after the space became an argument of the proxy program (paramiko
+  already refused it). The same users are refused with `ValueError` before
+  asyncssh is given the user, when the configuration for the host would pass it
+  on; with no `%r` in the `ProxyCommand` (or no configuration) a user with a
+  space still connects.
 
 ## [0.9.12] - 2026-10-08
 
