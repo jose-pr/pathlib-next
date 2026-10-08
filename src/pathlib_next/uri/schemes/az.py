@@ -274,7 +274,7 @@ class AzPath(_store.ObjectStorePath):
         # Everything after the container, minus exactly one trailing "/":
         # `az://acct/cont/dir/` is the directory `dir`, as on s3:/gs:.
         # Interior empty segments (`a//b`) are literal blob-name bytes and
-        # stay -- they used to be dropped, making `a//b` unreachable.
+        # stay, so `a//b` is addressable.
         _container, _, key = self.path.lstrip("/").partition("/")
         return key[:-1] if key.endswith("/") else key
 

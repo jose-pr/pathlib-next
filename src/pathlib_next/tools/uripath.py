@@ -58,8 +58,8 @@ def _shipped_schemes() -> "frozenset[str]":
                 eps = _md.entry_points().get("pathlib_next.schemes", ())
             _SHIPPED_SCHEMES = frozenset(ep.name.lower() for ep in eps)
         except Exception:
-            # No metadata (a zipapp, a vendored copy): fall back to treating
-            # any scheme-shaped argument as a URI, as before.
+            # No metadata (a zipapp, a vendored copy): treat any
+            # scheme-shaped argument as a URI.
             _SHIPPED_SCHEMES = frozenset()
     return _SHIPPED_SCHEMES
 

@@ -278,11 +278,9 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def __eq__(self, other: object) -> bool:
         """Compare by (exact type, segments).
 
-        The ABC previously defined no equality at all, so every pure
-        subclass that didn't hand-write one -- including `MemPath`, the
-        documented reference exemplar -- compared by identity. That made
-        `is_relative_to()` (which decides via `==`) silently return False
-        for every subclass, and broke paths as dict keys or set members.
+        Identity equality would make `is_relative_to()` (which decides via
+        `==`) return False for every subclass and break paths as dict keys
+        or set members, so a pure subclass that defines none gets this one.
         `_BaseFSPathname`/`LocalPath` are unaffected: `pathlib.PurePath`
         precedes `Pathname` in their MRO and keeps its own `__eq__`, as
         does `Uri`, which defines one.
@@ -1754,7 +1752,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         native = src._rename_compatible(target)
 
         # Everything that can fail cheaply is checked before the target is
-        # touched: a missing source, or a file onto a directory, used to
+        # touched: a missing source, or a file onto a directory, must not
         # delete the target and only then raise.
         src_stat = FileStat.from_path(src, follow_symlink=False)
         if src_stat is None:

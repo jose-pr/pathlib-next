@@ -466,7 +466,7 @@ def _recurse(
     in the same place.
 
     A backend whose stat has no identity cannot be bounded this way and is
-    walked as before.
+    walked unbounded.
     """
     yield top
     top_key = _identity(top) if bound_loops else None
