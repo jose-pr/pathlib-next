@@ -31,6 +31,22 @@ silently absent and `from pathlib_next.uri import UriPath` raises
 `ModuleNotFoundError`. `MemPath` lives in `pathlib_next.mempath`;
 `pathlib_next.testing` is never imported implicitly.
 
+`pathlib_next.__version__` is the installed distribution's version
+(`importlib.metadata`), `"0+unknown"` for a source tree that is not installed.
+The root, `path`, `fspath`, `protocols` (and its `fs`, `io`, `checksum`),
+`utils`, `utils.stat` and `utils.glob` declare `__all__` with exactly the names
+this file documents for them, so `from pathlib_next import *` publishes those
+and nothing else (`P` and `PN` are not among them; they stay importable from
+`pathlib_next.path`).
+
+The package ships `py.typed`: `Path(...)`, `LocalPath(...)`, `MemPath(...)` and
+`FileStat(...)` pass mypy and pyright at their defaults. A protocol stub (`stat`,
+`chmod`, `_chown`, `_open`, `checksum`, `__fspath__`) is an ordinary method that
+raises `NotImplementedError`, and a type checker reads `Pathname`'s abstract
+members as ordinary methods too, because the bare `Path(...)` builds a
+`LocalPath`: a subclass that leaves one out is refused when it is instantiated,
+not by a checker.
+
 ## Pure-path / I/O base (`pathlib_next.path`)
 
 - **`Pathname`** — ABC for a pure (no I/O) path. Abstract: `segments`,

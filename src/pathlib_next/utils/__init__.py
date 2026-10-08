@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import calendar as _calendar
 import collections
 import functools as _functools
@@ -7,6 +9,23 @@ import typing as _ty
 from email.utils import parsedate_tz as _parsedate_tz
 from pathlib import PureWindowsPath as _PureWindowsPath
 from threading import RLock
+
+__all__ = [
+    "LRU",
+    "UNCHANGED",
+    "as_error_handler",
+    "as_mode",
+    "as_owner",
+    "is_safe_child_name",
+    "is_windows_flavoured",
+    "make_archive",
+    "md5",
+    "notimplemented",
+    "parsedate",
+    "sha256",
+    "sizeof_fmt",
+    "unpack_archive",
+]
 
 try:
     ParamSpec = _ty.ParamSpec  # 3.10+
@@ -183,6 +202,14 @@ def notimplemented(method):
         raise NotImplementedError(f"Method not implemented: {method.__name__}")
 
     return _notimplemented
+
+
+def _unimplemented(name: str) -> _ty.NoReturn:
+    """Raise the error `notimplemented` raises for `name`. A protocol stub
+    returns this call rather than `...` or `raise NotImplementedError`, which
+    mypy and pyright read as "abstract": a class that subclasses the protocol
+    explicitly then cannot be instantiated."""
+    raise NotImplementedError(f"Method not implemented: {name}")
 
 
 def as_error_handler(

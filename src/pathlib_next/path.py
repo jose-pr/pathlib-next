@@ -22,10 +22,24 @@ from .protocols import BinaryOpen, Chmod, Stat
 from .utils import glob as _glob
 from .utils.stat import FileStat
 
+__all__ = ["FsPathLike", "Path", "PathLike", "Pathname", "PurePathLike"]
+
 P = _ty.TypeVar("P", bound="Path")
 PN = _ty.TypeVar("PN", bound="Pathname")
 
 _P = _ty.TypeVar("_P")
+_F = _ty.TypeVar("_F", bound=_ty.Callable[..., _ty.Any])
+
+if _ty.TYPE_CHECKING:
+
+    def _abstract(method: _F) -> _F:
+        # `Path(...)` builds a LocalPath, so type checkers must read the bare
+        # class as instantiable; at run time ABCMeta still refuses a subclass
+        # that leaves one of these out.
+        return method
+
+else:
+    _abstract = _abc.abstractmethod
 
 
 def _os_error(exc_type: type, code: int, path: object) -> OSError:
@@ -79,14 +93,11 @@ class FsPathLike(_ty.Protocol):
 
     __slots__ = ()
 
-    @_utils.notimplemented
-    def __fspath__(self) -> str: ...
+    def __fspath__(self) -> str:
+        return _utils._unimplemented("__fspath__")
 
 
 _os.PathLike.register(FsPathLike)
-
-
-_FsPathLike = _ty.Union[str, FsPathLike]
 
 
 class _PathnameParents(_ty.Sequence[PN]):
@@ -142,7 +153,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
     def _is_case_sensitive(self) -> bool:
         return True
 
-    @_abc.abstractmethod
+    @_abstract
     def as_uri(self) -> str:
         """Return the path as a URI string."""
         ...
@@ -177,18 +188,18 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return _name_stem(self.name)
 
     @property
-    @_abc.abstractmethod
+    @_abstract
     def segments(self) -> _ty.Sequence[str]:
         """The sequence of path component strings."""
         ...
 
     @property
-    @_abc.abstractmethod
+    @_abstract
     def parts(self) -> _P:
         """The individual components/parts of the path."""
         ...
 
-    @_abc.abstractmethod
+    @_abstract
     def with_segments(self, *segments: str) -> _ty.Self:
         """Construct a same-type path instance from new segments."""
         ...
@@ -233,7 +244,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
             name = name[: -len(old_suffix)] + suffix
         return self.with_name(name)
 
-    @_abc.abstractmethod
+    @_abstract
     def relative_to(self, other: _ty.Self | str) -> _ty.Self:
         """Return the relative path to another path identified by the passed
         arguments.  If the operation is not possible (because this is not
@@ -313,7 +324,7 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         return self.drive + self.root
 
     @property
-    @_abc.abstractmethod
+    @_abstract
     def parent(self) -> _ty.Self:
         """The logical parent of the path."""
 
@@ -640,7 +651,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 continue
             setattr(cls, name, ours)
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args: _ty.Any, **kwargs: _ty.Any) -> _ty.Self:
         if cls is Path:
             from .fspath import LocalPath
 
@@ -655,7 +666,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             # leaving a blank instance -- masked on 3.12+ because __init__
             # does the real work there, but crashed on 3.9-3.11 the moment
             # any pathlib internal (e.g. `/`) touched the missing state.
-            return LocalPath.__new__(LocalPath, *args, **kwargs)
+            return _ty.cast("_ty.Self", LocalPath.__new__(LocalPath, *args, **kwargs))
         return Pathname.__new__(cls)
 
     def is_hidden(self):

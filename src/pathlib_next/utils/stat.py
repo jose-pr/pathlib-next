@@ -11,6 +11,8 @@ if _ty.TYPE_CHECKING:
 
     from ..path import Path
 
+__all__ = ["FileStat"]
+
 
 class FileStat(_FStat):
     """Concrete, slotted `FileStatLike` for backends without a real
@@ -32,6 +34,15 @@ class FileStat(_FStat):
     )
     __slots__ = _FIELDS + ("mode_known",)
 
+    st_mode: int
+    st_nlink: int
+    st_uid: int
+    st_gid: int
+    st_size: int
+    st_atime: float
+    st_mtime: float
+    st_ctime: float
+
     #: Whether `st_mode` is metadata the backend actually reported (True) or
     #: a placeholder synthesized from `is_dir` (False: `S_IFREG | 0o444`, or
     #: `S_IFDIR | 0o555` for a directory). Consumers that would *write* the
@@ -41,9 +52,9 @@ class FileStat(_FStat):
 
     def __init__(
         self,
-        st_mode: int = None,
+        st_mode: int | None = None,
         st_size: int = 0,
-        st_mtime: int = 0,
+        st_mtime: float = 0,
         is_dir: bool = False,
     ):
         self.mode_known = bool(st_mode)

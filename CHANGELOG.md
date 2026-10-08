@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.9.12] - 2026-10-08
 
 ### Added
+- **`pathlib_next.__version__` and `__all__` on the core modules.** The root has
+  `__version__`, the installed distribution's version (`"0+unknown"` for a
+  source tree that is not installed). The root, `path`, `fspath`, `protocols`
+  (with `fs`, `io` and `checksum`), `utils`, `utils.stat` and `utils.glob`
+  declare `__all__` with the names `src/pathlib_next/AGENTS.md` documents for
+  them. Nothing documented moved.
 - **`Path._node_key()`, an override hook** answering where a path's node
   lives: `(namespace, names)`, the object two paths share when they resolve
   names in one tree and the node's normalized position in it. `copy()` and
@@ -24,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   attribute changed.
 
 ### Changed
+- **`from pathlib_next import *` publishes only the documented names.** It also
+  brought `P`, `PN` and the `__future__` name `annotations`, and
+  `from pathlib_next.protocols import *` and `from pathlib_next.utils import *`
+  brought the modules they import. `P`, `PN`, `K`, `V` and the rest stay
+  importable from the module that defines them; a script that relied on
+  `from pathlib_next import *` for one of them imports it by name.
+- **The constructors of `Path`, `LocalPath`, `MemPath` and `FileStat` pass mypy
+  and pyright at their defaults.** Both read `Path("x")`, `LocalPath("x")`,
+  `MemPath("/a")` and `FileStat(...)` as constructing an abstract class (the
+  protocol stubs had empty bodies, `FileStat`'s fields were not declared, and
+  `Pathname`'s abstract members counted against the bare `Path`, which builds a
+  `LocalPath`). The stubs now raise `NotImplementedError` through a call,
+  `FileStat` declares its fields, `Path.__new__` is annotated, and a checker
+  treats `Pathname`'s abstract members as ordinary methods. Nothing changes at
+  run time: ABC enforcement still refuses a subclass that omits one. A consumer
+  can drop a `# type: ignore[abstract]` on those four constructions.
+  `FileStatLike.st_mtime` is annotated `float`, which is what every backend
+  reports.
 - **The scheme extras now declare version ranges.** `uritools`, `requests`,
   `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
   `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the

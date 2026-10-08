@@ -4,6 +4,8 @@ import typing as _ty
 
 from .. import utils as _utils
 
+__all__ = ["NativeChecksum"]
+
 
 class NativeChecksum(_ty.Protocol):
     """Composable protocol for backends that can compute a file digest
@@ -51,7 +53,6 @@ class NativeChecksum(_ty.Protocol):
         """
         return frozenset()
 
-    @_utils.notimplemented
     def checksum(self, algorithm: str = "md5") -> str:
         """Return a hex-digest checksum of this file's content, computed by
         the backend itself (e.g. an SFTP server implementing the filexfer draft's
@@ -73,4 +74,4 @@ class NativeChecksum(_ty.Protocol):
         `supported_checksums()` not listing `algorithm` is advisory, not a
         substitute for this method enforcing its own contract.
         """
-        ...
+        return _utils._unimplemented("checksum")

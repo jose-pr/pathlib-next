@@ -17,6 +17,8 @@ from . import utils as _utils
 from .utils import glob as _glob
 from .utils.stat import FileStat as _FileStat
 
+__all__ = ["LocalPath", "PosixPathname", "WindowsPathname"]
+
 # pathlib.Path.stat()/chmod() only accept follow_symlinks= on 3.10+; below
 # that, LocalPath (which inherits them directly from pathlib.Path via MRO,
 # see class LocalPath below) needs a shim.

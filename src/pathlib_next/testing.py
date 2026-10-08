@@ -45,6 +45,8 @@ affected tests then report as skipped, never as passed:
   cannot).
 """
 
+from __future__ import annotations
+
 import errno as _errno
 
 import pytest

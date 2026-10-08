@@ -6,6 +6,8 @@ import typing as _ty
 
 from .. import utils as _utils
 
+__all__ = ["Chmod", "FileStatLike", "Stat"]
+
 
 class FileStatLike(_ty.Protocol):
     """Minimum properties stat like object should provide"""
@@ -20,7 +22,7 @@ class FileStatLike(_ty.Protocol):
     def st_size(self) -> int: ...
     @property
     @_abc.abstractmethod
-    def st_mtime(self) -> int: ...
+    def st_mtime(self) -> float: ...
 
 
 class Stat(_ty.Protocol):
@@ -28,8 +30,9 @@ class Stat(_ty.Protocol):
 
     __slots__ = ()
 
-    @_utils.notimplemented
-    def stat(self, *, follow_symlinks=True) -> FileStatLike: ...
+    def stat(self, *, follow_symlinks=True) -> FileStatLike:
+        """Return the stat of the path (a stub: `NotImplementedError`)."""
+        return _utils._unimplemented("stat")
 
     def lstat(self) -> FileStatLike:
         """
@@ -113,7 +116,6 @@ class Chmod(_ty.Protocol):
 
     __slots__ = ()
 
-    @_utils.notimplemented
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         """
         Change the permissions of the path, like os.chmod().
@@ -129,7 +131,7 @@ class Chmod(_ty.Protocol):
         there is no single wrapper to hang the conversion on; the shared
         helper is what keeps the base from drifting between them.
         """
-        ...
+        return _utils._unimplemented("chmod")
 
     def lchmod(self, mode: int | str):
         """
@@ -138,7 +140,6 @@ class Chmod(_ty.Protocol):
         """
         self.chmod(mode, follow_symlinks=False)
 
-    @_utils.notimplemented
     def _chown(
         self,
         uid: int | str | None,
@@ -154,7 +155,7 @@ class Chmod(_ty.Protocol):
         `os.chown`, an omitted attr field for SFTP `setstat`. Normalizing
         the caller's input is `chown()`'s job, not the primitive's.
         """
-        ...
+        return _utils._unimplemented("_chown")
 
     def chown(
         self,

@@ -6,6 +6,8 @@ import typing as _ty
 
 from .. import utils as _utils
 
+__all__ = ["BinaryOpen"]
+
 
 def _canonical_mode(mode, buffering, encoding, errors, newline) -> str:
     """`open()`'s mode validation (CPython `_io.open`), returning the mode
@@ -48,7 +50,6 @@ class BinaryOpen(_ty.Protocol):
 
     __slots__ = ()
 
-    @_utils.notimplemented
     def _open(
         self,
         mode="r",
@@ -58,7 +59,7 @@ class BinaryOpen(_ty.Protocol):
         All operations should be binary
         To be used only by open() to obtain binary stream to provide implementations for all methods
         """
-        ...
+        return _utils._unimplemented("_open")
 
     def open(
         self,

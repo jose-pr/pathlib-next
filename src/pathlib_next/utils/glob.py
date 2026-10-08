@@ -13,6 +13,15 @@ import re as _re
 import sys as _sys
 import typing as _ty
 
+__all__ = [
+    "NonRelativePatternError",
+    "RECURSIVE",
+    "full_match",
+    "glob",
+    "parse_pattern",
+    "select",
+]
+
 RECURSIVE = "**"
 ANY_PATTERN = _re.compile(_fnmatch.translate("*"))
 WILDCARD_PATTERN = _re.compile("([*?[])")
