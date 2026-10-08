@@ -323,3 +323,62 @@ def test_localpath_keeps_stdlib_equality_semantics():
 
     assert issubclass(PosixPathname, _BaseFSPathname)
     assert LocalPath("a/b") == pathlib.Path("a/b")
+
+
+# --- ordering --------------------------------------------------------------
+
+
+def test_generic_paths_sort_by_their_segments():
+    paths = [MemPath("/b"), MemPath("/a/x"), MemPath("/a"), MemPath("c"), MemPath("/")]
+    assert [p.as_posix() for p in sorted(paths)] == ["/", "/a", "/a/x", "/b", "c"]
+
+
+@pytest.mark.parametrize("cls", [MemPath, Uri])
+def test_ordering_agrees_with_equality(cls):
+    a, b = cls("/a/b"), cls("/a/c")
+    same = cls("/a/b")
+    assert a < b and a <= b and b > a and b >= a
+    assert not (b < a) and not (b <= a) and not (a > b) and not (a >= b)
+    assert a == same and a <= same and a >= same
+    assert not (a < same) and not (a > same)
+
+
+def test_ordering_is_unavailable_between_unrelated_types():
+    memory = MemPath("/a")
+    for other in (PosixPathname("/a"), Uri("file:///a"), "/a", 1):
+        for compare in (
+            lambda x, y: x < y,
+            lambda x, y: x <= y,
+            lambda x, y: x > y,
+            lambda x, y: x >= y,
+        ):
+            with pytest.raises(TypeError):
+                compare(memory, other)
+    assert MemPath.__lt__(memory, PosixPathname("/a")) is NotImplemented
+
+
+def test_a_subclass_does_not_order_against_its_base():
+    class Sub(MemPath):
+        pass
+
+    with pytest.raises(TypeError):
+        Sub("/a") < MemPath("/b")
+    assert Sub("/a") < Sub("/b")
+
+
+def test_uris_sort_by_their_text_so_the_host_counts():
+    uris = [Uri("http://b/a"), Uri("http://a/z"), Uri("http://a/b?q=1")]
+    assert [u.as_uri() for u in sorted(uris)] == [
+        "http://a/b?q=1",
+        "http://a/z",
+        "http://b/a",
+    ]
+
+
+def test_localpath_keeps_stdlib_ordering():
+    from pathlib_next.fspath import LocalPath
+
+    for cls in (LocalPath, PosixPathname):
+        for name in ("__lt__", "__le__", "__gt__", "__ge__"):
+            assert getattr(cls, name) is getattr(pathlib.PurePath, name)
+    assert LocalPath("a") < LocalPath("b")

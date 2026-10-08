@@ -838,6 +838,9 @@ class Uri(Pathname):
     def __hash__(self):
         return hash(self.as_uri())
 
+    def _order_key(self):
+        return self.as_uri()
+
     def __truediv__(self, key):
         """`uri / "name"`. A `str` is a decoded path segment, never URI
         syntax: "a?b.txt" is a filename, not a query (`Uri._join_arg`)."""

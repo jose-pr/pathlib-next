@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import abc as _abc
 import errno as _errno
+import operator as _operator
 import os as _os
 import pathlib as _pathlib
 import re as _re
@@ -283,6 +284,31 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     def __hash__(self) -> int:
         return hash((type(self), tuple(self.segments)))
+
+    def _order_key(self) -> _ty.Any:
+        """What `<`, `<=`, `>` and `>=` compare, between two paths of one
+        exact type: the segments, as `__eq__` does. A type whose `__eq__`
+        compares something else overrides it with that."""
+        return tuple(self.segments)
+
+    def _compare(
+        self, other: Pathname, compare: _ty.Callable[[_ty.Any, _ty.Any], bool]
+    ):
+        if type(self) is not type(other):
+            return NotImplemented
+        return compare(self._order_key(), other._order_key())
+
+    def __lt__(self, other: Pathname) -> bool:
+        return self._compare(other, _operator.lt)
+
+    def __le__(self, other: Pathname) -> bool:
+        return self._compare(other, _operator.le)
+
+    def __gt__(self, other: Pathname) -> bool:
+        return self._compare(other, _operator.gt)
+
+    def __ge__(self, other: Pathname) -> bool:
+        return self._compare(other, _operator.ge)
 
     def __truediv__(self, key: _ty.Self | str) -> _ty.Self:
         try:

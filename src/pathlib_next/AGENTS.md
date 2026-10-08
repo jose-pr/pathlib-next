@@ -65,6 +65,12 @@ not by a checker.
     type, so a subclass never equals its base. `LocalPath`/`PosixPathname`/
     `WindowsPathname` keep `pathlib.PurePath` equality; `Uri` compares its URI
     text. Override both together.
+  - `<`, `<=`, `>`, `>=` compare `_order_key()` (default: the segments; `Uri`:
+    its URI text) between two paths of the same exact type, so `sorted()` works
+    over `MemPath` and `Uri`; any other operand gives `NotImplemented`
+    (`TypeError`), as `pathlib` does across flavours. A type with its own
+    `__eq__` overrides `_order_key()` with the value that `__eq__` compares.
+    `LocalPath`/`PosixPathname`/`WindowsPathname` keep `pathlib`'s ordering.
   - A `str` argument to `is_relative_to()` is parsed standalone via
     `self.with_segments(other)`, which keeps per-instance state (a `MemPath`
     backend). Normalize strings the same way in subclasses: `type(self)(x)`

@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.9.12] - 2026-10-08
 
 ### Added
+- **Generic paths can be ordered.** `sorted()`, `<`, `<=`, `>` and `>=` raised
+  `TypeError` for `MemPath`, `Uri`, `UriPath` and every custom `Path`.
+  `Pathname` now orders two paths of the same exact type by the key its `==`
+  uses (the segments; the URI text for `Uri`), and returns `NotImplemented`
+  for anything else, as `pathlib` does across flavours. A subclass with its
+  own `__eq__` overrides `_order_key()` to match it. `LocalPath` keeps
+  `pathlib`'s ordering.
 - **`pathlib_next.__version__` and `__all__` on the core modules.** The root has
   `__version__`, the installed distribution's version (`"0+unknown"` for a
   source tree that is not installed). The root, `path`, `fspath`, `protocols`
