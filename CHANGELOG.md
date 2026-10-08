@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.9.12] - 2026-10-08
-
 ### Added
 - **`copy_into()`, `move_into()` and `replace()` on every `Path`.** pathlib 3.14
   has them and the generic classes did not (`MemPath`, `UriPath`, `DavPath`,
@@ -36,18 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (with `fs`, `io` and `checksum`), `utils`, `utils.stat` and `utils.glob`
   declare `__all__` with the names `src/pathlib_next/AGENTS.md` documents for
   them. Nothing documented moved.
-- **`Path._node_key()`, an override hook** answering where a path's node
-  lives: `(namespace, names)`, the object two paths share when they resolve
-  names in one tree and the node's normalized position in it. `copy()` and
-  `move()` compare two paths that both answer it across classes. `MemPath`
-  and the archive paths override it; any other type keeps comparing two paths
-  of one type with `==`, so nothing needs to change.
-- **`PathContract` calls `rm(recursive=True)` with `follow_symlinks=` and
-  `follow_binds=`** (`test_rm_recursive_accepts_the_follow_policies`, and
-  `test_rm_rejects_a_policy_that_is_not_one`). An implementation that
-  overrides `rm()` must accept both keywords, as `Path.rm()` does; its contract
-  subclass fails these two tests until it does. No fixture or capability
-  attribute changed.
 
 ### Changed
 - **`from pathlib_next import *` publishes only the documented names.** It also
@@ -94,30 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `0..0o177777` (a `st_mode` with its type bits still passes, as `os.chmod`
   accepts it; `stat.S_IMODE()` drops them) and an id outside `0..2**32-1`
   (`-1` stays "unchanged") `ValueError`.
-- **The scheme extras now declare version ranges.** `uritools`, `requests`,
-  `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
-  `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the
-  Python 3.9 cap) and no upper bound, and `netimps` had only a floor. The
-  ranges are now `uritools>=5.0,<7`, `netimps>=0.4.0,<0.5` (was `>=0.3.1`),
-  `requests>=2.22.0,<3`, `paramiko>=5.0,<6`, `asyncssh>=2.20.0,<3` (below 2.22
-  on Python 3.9), `boto3>=1.36.0,<2`, `google-cloud-storage>=3.0,<4`,
-  `azure-storage-blob>=12.4.0,<13` and `azure-identity>=1.0,<2`. An
-  environment that pins one of them below its floor must raise the pin; one
-  that needs a new major version must wait for a release that admits it.
-- **`copy(preserve_metadata=True)` drops the setuid, setgid and sticky bits
-  between two different classes.** A mode read from a tar member, a zip entry
-  or a remote server was applied verbatim, so `04755` in an archive made a
-  setuid file on the local disk. A copy between two classes now applies the
-  permission bits without those three; a copy within one class keeps them.
-  Run `chmod()` afterwards where the bit is wanted.
-- **`move()` calls `rename()` only onto a path of the same class.** The default
-  of `Path._rename_compatible()` was True, so a `Path` subclass with a
-  `rename()` of its own was handed a path of another store and ran the rename
-  inside its own (a `MemPath` subclass moved onto a `LocalPath` looked for the
-  local path in memory). The target of another class now gets copy + delete.
-  A subclass whose `rename()` handles other classes overrides
-  `_rename_compatible()`; `UriPath` and `LocalPath` decide for themselves as
-  before.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -169,6 +131,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `is_fifo()`, `is_socket()`, `is_block_device()` and `is_char_device()` are
   stdlib's and, before 3.13, raise for an error such as `PermissionError`. The
   behaviour is unchanged.
+- **Joining a `MemPath` onto another keeps the left operand's tree.**
+  `root / MemPath("f.txt")`, `root.joinpath(MemPath("f.txt"))` and
+  `MemPath(root, MemPath("f.txt"))` addressed the last argument's own empty
+  backend, so `.exists()` was `False` for a file `root` held, and
+  `utils.glob.glob(MemPath("*.py"), root_dir=src)` found nothing. The first
+  `MemPath` argument now names the backend; an explicit `backend=` still wins.
+  Pass `backend=` to place a join on a different tree.
+- **`MemPath` applies `..` to the tree.** `/missing/../a.txt` existed,
+  `/a.txt/../d` was a directory and `/missing/../new` was created as `/new`,
+  because `..` was removed from the text first. As on a POSIX filesystem, the
+  directory a `..` leaves must exist (`FileNotFoundError`) and be a directory
+  (`NotADirectoryError`); `..` above the root stays at the root. A spelling
+  through a directory that exists names the same node as before.
+- **Two `MemPath` append handles both land, and a write never shows a reader
+  an empty file.** Each handle opened with `"ab"` published its own snapshot
+  of the whole file on close, so the second close overwrote the first's bytes
+  (`b"02"` for appends of `1` and `2` to `0`), and every publish emptied the
+  file before refilling it. A handle now adds only what it wrote, in one step
+  (`b"012"`), and a write replaces the content in one step.
+- **`MemPath.rmdir()` of the root raises `OSError(EBUSY)`, not
+  `FileNotFoundError`.** The root exists, and `FileNotFoundError` read as
+  "already gone" to a caller that catches it; `root.rm(recursive=True)` emptied
+  the tree and then failed with it. The tree is still emptied; catch `OSError`
+  if you call it on a root.
+- **`MemPath.segments` is a tuple and an unknown keyword is a `TypeError`.**
+  The list was the path's own: `p.segments.append("c")` changed `str(p)` and
+  its hash. `MemPath("/", bakend=b)` silently built a fresh backend. Code that
+  mutated `segments` or passed a stray keyword was already wrong; read a copy
+  with `list(p.segments)`.
+- **On Python 3.9 a copied or pickled `MemPath` file keeps its `st_mtime`.**
+  `copy`, `deepcopy` and `pickle` of a `MemFile` (and of a `MemPathBackend`)
+  gave every file the time of the copy on 3.9; 3.14 already kept it. A sync
+  quick check that compares `(size, mtime)` across a copied tree now sees the
+  same answer on every version.
+- **A sync that changes nothing stats each root once and lists each directory
+  once.** `PathSyncer` stat'd every source entry (with the default
+  `follow_symlinks=True`, although the listing already carried the stat) and
+  every target entry one by one, and with `remove_missing=True` listed each
+  target directory and stat'd its entries a second time: 205 entries in 6
+  directories cost 206 source and 206 to 411 target `stat()` calls. The
+  listing's stat now answers for every entry that is not a link; a link, an
+  entry whose listing stat is `None` (unknown) and a target name the listing
+  did not report are stat'd, one call each. On a remote scheme each of those
+  calls was a request. A backend that does not override `_scandir()` (the
+  default stats every entry itself) now stats the entries of each target
+  directory it syncs into once, instead of each source entry. With
+  `follow_symlinks=True` and `remove_missing=True` the target link that is
+  removed is reported to `hook` and `ignore_error` by its own stat, not by the
+  stat of what it points at, as it already was with `follow_symlinks=False`.
+- **The default `PathSyncer` checksum asks for a native digest only when both
+  sides can give one.** For a source with a server-side digest and a target
+  without (`LocalPath`, `MemPath`), every compared file computed one digest
+  that was thrown away before both sides were streamed. Whether a side can
+  answer is now checked first, and the second side is asked only when the first
+  answered.
+- **A carried pattern under an extended-length anchor is expanded, and checked
+  when it is carried.** `LocalPath(r"\\?\C:\data\*.py").glob(None)` selected
+  nothing (a wildcard-free `\\?\C:\data\a.py` too): the `?` of the prefix was
+  read as a wildcard. The anchor is no longer searched for one. A carried
+  pattern that is invalid (`a**` before 3.13) now raises when `glob(None)` is
+  called, as a pattern argument does, and not when the result is first
+  iterated.
+- **An explicit `case_sensitive=` changes the case rule and nothing else.** On
+  Windows `case_sensitive=True` made `..` select nothing (`glob("sub/../*")`,
+  `rglob("..")`), and `case_sensitive=False` joined a literal without looking
+  for it (`glob("SUB")` yielded `SUB`, `glob("nul")` and `glob(" ")` yielded a
+  path). `.` and `..` stay literal, and a literal is looked for in the listing
+  whenever `case_sensitive` is passed, yielding the name as stored, as `pathlib`
+  does.
+- **`glob()` checks a literal component as the running `pathlib` does.** Before
+  3.13 one that is not the last must be a directory: `a.txt/..`, `missing/..`
+  and `**/deep/..` selected the base or every directory on 3.9. From 3.12 the
+  last literal is tested without following a link, so `glob("dangling")`
+  selects a dangling symlink, as `pathlib` does there; `glob("dang*")` already
+  did. A `MemPath` follows the tree for `..`, which makes the same patterns
+  select nothing there on every version.
+- **`rglob(".")` selects every entry below.** It raised `ValueError`; `pathlib`
+  globs `**`. `glob(".")` is still a `ValueError`.
+- **`glob(on_error=)` is told about a missing or non-directory base whatever
+  the first component is.** `glob("*")` reported it and `glob("**")` and
+  `glob("**/*")` did not. Each failed listing is reported once: a recursive glob
+  called the hook twice for one unreadable directory.
+- **A recursive glob lists each directory once.** `glob("**/*.txt")` and
+  `rglob("*")` listed every directory twice, once to find the directories below
+  it and once to match names in it; on a remote scheme each listing is a
+  request. The first listing now serves both.
+- **`bound_loops=True` keeps every directory where `st_ino` is 0 or `None`.**
+  A filesystem that reports a device but no file index gave every directory the
+  same identity, so each looked like its own ancestor and `glob("**/*.conf",
+  bound_loops=True)` returned only the top level. Such a path is walked
+  unbounded, as the documentation says.
+- **`LocalPath.glob()` and `rglob()` raise the audit events `pathlib` raises.**
+  `pathlib.Path.glob` and `pathlib.Path.rglob` were never raised for a
+  `LocalPath` (`os.scandir` still audited each directory). An audit hook
+  written against `pathlib` now sees the same events with the same arguments
+  on the running version. `glob(None)` has no `pathlib` counterpart and raises
+  none.
+- **`make_archive(format="tar")` sizes a member from the bytes it read.** The
+  member size was `stat().st_size`, so a file whose backend does not know its
+  size (an HTTP file served without `Content-Length` reports 0) became an empty
+  member with no error, and a size that was too large failed with `unexpected
+  end of data`. The content is read once into a buffer, counted, and then
+  written, so the member holds the file. A tar of a large file is read and
+  buffered once more than before.
+- **`make_archive` keeps directories, times and permissions.** A source with
+  `empty/` and `sub/run.sh` archived one member, so `unpack_archive` rebuilt no
+  `empty/`; every directory is now a member of its own, before what is in it.
+  Members were dated 1980-01-01 (zip) or the epoch (tar) whatever the source
+  said; a member now carries the modification time the source reports, and a
+  source that reports none keeps those two defaults. A tar member from a source
+  that reports no permission bits (`MemPath`, an HTTP file) was read-only
+  (`0o444`); it is `0o644` for a file and `0o755` for a directory. Code that
+  unpacks these archives needs no change.
+- **`unpack_archive` skips a tar link that names itself.** A symlink `a -> a`,
+  `a -> b` with `b -> a`, or a hard link to itself ended the extraction with
+  `RecursionError` and no warning. Links are resolved by a loop that follows a
+  chain once, so such a link is skipped with the `UserWarning` every other
+  unresolvable link gets, the other members are extracted, and a chain of any
+  length ending at a file is followed.
+
+## [0.9.12] - 2026-10-08
+
+### Added
+- **`Path._node_key()`, an override hook** answering where a path's node
+  lives: `(namespace, names)`, the object two paths share when they resolve
+  names in one tree and the node's normalized position in it. `copy()` and
+  `move()` compare two paths that both answer it across classes. `MemPath`
+  and the archive paths override it; any other type keeps comparing two paths
+  of one type with `==`, so nothing needs to change.
+- **`PathContract` calls `rm(recursive=True)` with `follow_symlinks=` and
+  `follow_binds=`** (`test_rm_recursive_accepts_the_follow_policies`, and
+  `test_rm_rejects_a_policy_that_is_not_one`). An implementation that
+  overrides `rm()` must accept both keywords, as `Path.rm()` does; its contract
+  subclass fails these two tests until it does. No fixture or capability
+  attribute changed.
+
+### Changed
+- **The scheme extras now declare version ranges.** `uritools`, `requests`,
+  `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
+  `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the
+  Python 3.9 cap) and no upper bound, and `netimps` had only a floor. The
+  ranges are now `uritools>=5.0,<7`, `netimps>=0.4.0,<0.5` (was `>=0.3.1`),
+  `requests>=2.22.0,<3`, `paramiko>=5.0,<6`, `asyncssh>=2.20.0,<3` (below 2.22
+  on Python 3.9), `boto3>=1.36.0,<2`, `google-cloud-storage>=3.0,<4`,
+  `azure-storage-blob>=12.4.0,<13` and `azure-identity>=1.0,<2`. An
+  environment that pins one of them below its floor must raise the pin; one
+  that needs a new major version must wait for a release that admits it.
+- **`copy(preserve_metadata=True)` drops the setuid, setgid and sticky bits
+  between two different classes.** A mode read from a tar member, a zip entry
+  or a remote server was applied verbatim, so `04755` in an archive made a
+  setuid file on the local disk. A copy between two classes now applies the
+  permission bits without those three; a copy within one class keeps them.
+  Run `chmod()` afterwards where the bit is wanted.
+- **`move()` calls `rename()` only onto a path of the same class.** The default
+  of `Path._rename_compatible()` was True, so a `Path` subclass with a
+  `rename()` of its own was handed a path of another store and ran the rename
+  inside its own (a `MemPath` subclass moved onto a `LocalPath` looked for the
+  local path in memory). The target of another class now gets copy + delete.
+  A subclass whose `rename()` handles other classes overrides
+  `_rename_compatible()`; `UriPath` and `LocalPath` decide for themselves as
+  before.
+
+### Fixed
 - **A `..` or `.` name in a remote listing no longer escapes the tree.** The
   `s3:`, `gs:`, `az:`, `github:` and `gitlab:` listings and the default
   `UriPath` listing yielded a name such as `..`, `.`, `a/b` or an empty one as
@@ -639,125 +764,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   had changed into (`CWD`) when it is. `ftp://host/` always listed the root.
   An empty path now sends `/` in every command that takes the path, so both
   spellings name the same directory.
-- **Joining a `MemPath` onto another keeps the left operand's tree.**
-  `root / MemPath("f.txt")`, `root.joinpath(MemPath("f.txt"))` and
-  `MemPath(root, MemPath("f.txt"))` addressed the last argument's own empty
-  backend, so `.exists()` was `False` for a file `root` held, and
-  `utils.glob.glob(MemPath("*.py"), root_dir=src)` found nothing. The first
-  `MemPath` argument now names the backend; an explicit `backend=` still wins.
-  Pass `backend=` to place a join on a different tree.
-- **`MemPath` applies `..` to the tree.** `/missing/../a.txt` existed,
-  `/a.txt/../d` was a directory and `/missing/../new` was created as `/new`,
-  because `..` was removed from the text first. As on a POSIX filesystem, the
-  directory a `..` leaves must exist (`FileNotFoundError`) and be a directory
-  (`NotADirectoryError`); `..` above the root stays at the root. A spelling
-  through a directory that exists names the same node as before.
-- **Two `MemPath` append handles both land, and a write never shows a reader
-  an empty file.** Each handle opened with `"ab"` published its own snapshot
-  of the whole file on close, so the second close overwrote the first's bytes
-  (`b"02"` for appends of `1` and `2` to `0`), and every publish emptied the
-  file before refilling it. A handle now adds only what it wrote, in one step
-  (`b"012"`), and a write replaces the content in one step.
-- **`MemPath.rmdir()` of the root raises `OSError(EBUSY)`, not
-  `FileNotFoundError`.** The root exists, and `FileNotFoundError` read as
-  "already gone" to a caller that catches it; `root.rm(recursive=True)` emptied
-  the tree and then failed with it. The tree is still emptied; catch `OSError`
-  if you call it on a root.
-- **`MemPath.segments` is a tuple and an unknown keyword is a `TypeError`.**
-  The list was the path's own: `p.segments.append("c")` changed `str(p)` and
-  its hash. `MemPath("/", bakend=b)` silently built a fresh backend. Code that
-  mutated `segments` or passed a stray keyword was already wrong; read a copy
-  with `list(p.segments)`.
-- **On Python 3.9 a copied or pickled `MemPath` file keeps its `st_mtime`.**
-  `copy`, `deepcopy` and `pickle` of a `MemFile` (and of a `MemPathBackend`)
-  gave every file the time of the copy on 3.9; 3.14 already kept it. A sync
-  quick check that compares `(size, mtime)` across a copied tree now sees the
-  same answer on every version.
-- **A sync that changes nothing stats each root once and lists each directory
-  once.** `PathSyncer` stat'd every source entry (with the default
-  `follow_symlinks=True`, although the listing already carried the stat) and
-  every target entry one by one, and with `remove_missing=True` listed each
-  target directory and stat'd its entries a second time: 205 entries in 6
-  directories cost 206 source and 206 to 411 target `stat()` calls. The
-  listing's stat now answers for every entry that is not a link; a link, an
-  entry whose listing stat is `None` (unknown) and a target name the listing
-  did not report are stat'd, one call each. On a remote scheme each of those
-  calls was a request. A backend that does not override `_scandir()` (the
-  default stats every entry itself) now stats the entries of each target
-  directory it syncs into once, instead of each source entry. With
-  `follow_symlinks=True` and `remove_missing=True` the target link that is
-  removed is reported to `hook` and `ignore_error` by its own stat, not by the
-  stat of what it points at, as it already was with `follow_symlinks=False`.
-- **The default `PathSyncer` checksum asks for a native digest only when both
-  sides can give one.** For a source with a server-side digest and a target
-  without (`LocalPath`, `MemPath`), every compared file computed one digest
-  that was thrown away before both sides were streamed. Whether a side can
-  answer is now checked first, and the second side is asked only when the first
-  answered.
-- **A carried pattern under an extended-length anchor is expanded, and checked
-  when it is carried.** `LocalPath(r"\\?\C:\data\*.py").glob(None)` selected
-  nothing (a wildcard-free `\\?\C:\data\a.py` too): the `?` of the prefix was
-  read as a wildcard. The anchor is no longer searched for one. A carried
-  pattern that is invalid (`a**` before 3.13) now raises when `glob(None)` is
-  called, as a pattern argument does, and not when the result is first
-  iterated.
-- **An explicit `case_sensitive=` changes the case rule and nothing else.** On
-  Windows `case_sensitive=True` made `..` select nothing (`glob("sub/../*")`,
-  `rglob("..")`), and `case_sensitive=False` joined a literal without looking
-  for it (`glob("SUB")` yielded `SUB`, `glob("nul")` and `glob(" ")` yielded a
-  path). `.` and `..` stay literal, and a literal is looked for in the listing
-  whenever `case_sensitive` is passed, yielding the name as stored, as `pathlib`
-  does.
-- **`glob()` checks a literal component as the running `pathlib` does.** Before
-  3.13 one that is not the last must be a directory: `a.txt/..`, `missing/..`
-  and `**/deep/..` selected the base or every directory on 3.9. From 3.12 the
-  last literal is tested without following a link, so `glob("dangling")`
-  selects a dangling symlink, as `pathlib` does there; `glob("dang*")` already
-  did. A `MemPath` follows the tree for `..`, which makes the same patterns
-  select nothing there on every version.
-- **`rglob(".")` selects every entry below.** It raised `ValueError`; `pathlib`
-  globs `**`. `glob(".")` is still a `ValueError`.
-- **`glob(on_error=)` is told about a missing or non-directory base whatever
-  the first component is.** `glob("*")` reported it and `glob("**")` and
-  `glob("**/*")` did not. Each failed listing is reported once: a recursive glob
-  called the hook twice for one unreadable directory.
-- **A recursive glob lists each directory once.** `glob("**/*.txt")` and
-  `rglob("*")` listed every directory twice, once to find the directories below
-  it and once to match names in it; on a remote scheme each listing is a
-  request. The first listing now serves both.
-- **`bound_loops=True` keeps every directory where `st_ino` is 0 or `None`.**
-  A filesystem that reports a device but no file index gave every directory the
-  same identity, so each looked like its own ancestor and `glob("**/*.conf",
-  bound_loops=True)` returned only the top level. Such a path is walked
-  unbounded, as the documentation says.
-- **`LocalPath.glob()` and `rglob()` raise the audit events `pathlib` raises.**
-  `pathlib.Path.glob` and `pathlib.Path.rglob` were never raised for a
-  `LocalPath` (`os.scandir` still audited each directory). An audit hook
-  written against `pathlib` now sees the same events with the same arguments
-  on the running version. `glob(None)` has no `pathlib` counterpart and raises
-  none.
-- **`make_archive(format="tar")` sizes a member from the bytes it read.** The
-  member size was `stat().st_size`, so a file whose backend does not know its
-  size (an HTTP file served without `Content-Length` reports 0) became an empty
-  member with no error, and a size that was too large failed with `unexpected
-  end of data`. The content is read once into a buffer, counted, and then
-  written, so the member holds the file. A tar of a large file is read and
-  buffered once more than before.
-- **`make_archive` keeps directories, times and permissions.** A source with
-  `empty/` and `sub/run.sh` archived one member, so `unpack_archive` rebuilt no
-  `empty/`; every directory is now a member of its own, before what is in it.
-  Members were dated 1980-01-01 (zip) or the epoch (tar) whatever the source
-  said; a member now carries the modification time the source reports, and a
-  source that reports none keeps those two defaults. A tar member from a source
-  that reports no permission bits (`MemPath`, an HTTP file) was read-only
-  (`0o444`); it is `0o644` for a file and `0o755` for a directory. Code that
-  unpacks these archives needs no change.
-- **`unpack_archive` skips a tar link that names itself.** A symlink `a -> a`,
-  `a -> b` with `b -> a`, or a hard link to itself ended the extraction with
-  `RecursionError` and no warning. Links are resolved by a loop that follows a
-  chain once, so such a link is skipped with the `UserWarning` every other
-  unresolvable link gets, the other members are extracted, and a chain of any
-  length ending at a file is followed.
 
 ## [0.9.11] - 2026-09-21
 
