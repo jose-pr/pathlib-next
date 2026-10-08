@@ -176,6 +176,22 @@ def test_an_sftp_path_pickles_without_the_connect_options():
     assert _roundtrip(path) == UriPath("sftp://u@h/x")
 
 
+def test_an_sftp_path_keeps_its_ssh_config_through_a_pickle_and_a_copy():
+    from pathlib_next.uri.schemes.sftp import SftpPath
+    from pathlib_next.uri.schemes.sftp._sshconfig import _DEFAULT_SSH_CONFIG
+
+    custom = SftpPath("sftp://h/x", ssh_config=None)
+    default = SftpPath("sftp://h/x")
+    assert default._ssh_config is _DEFAULT_SSH_CONFIG
+    for convert in (_roundtrip, copy.copy, copy.deepcopy):
+        assert convert(custom)._ssh_config is None
+        assert convert(default)._ssh_config is _DEFAULT_SSH_CONFIG
+    assert _roundtrip(SftpPath("sftp://h/x", ssh_config=["a", "b"]))._ssh_config == [
+        "a",
+        "b",
+    ]
+
+
 def test_an_s3_path_pickles_without_client_kwargs_or_its_live_client(monkeypatch):
     pytest.importorskip("boto3")
     pytest.importorskip("moto")

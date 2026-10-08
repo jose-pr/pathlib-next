@@ -260,6 +260,12 @@ class SftpPath(UriPath):
         cls = self._default_backend_cls or _resolve_default_backend_cls()
         return cls.default(ssh_config=self._ssh_config)
 
+    def _reduce_options(self):
+        # The default is a sentinel that must not travel as a copy of itself.
+        if self._ssh_config is _DEFAULT_SSH_CONFIG:
+            return {}
+        return {"ssh_config": self._ssh_config}
+
     def _from_parsed_parts(self, source, path, query, fragment, /, **kwargs):
         kwargs.setdefault("ssh_config", self._ssh_config)
         return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
