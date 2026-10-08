@@ -225,11 +225,21 @@ loop bridges it to the synchronous API).
 - `rename()` is a server-side copy + delete within one bucket (container);
   renaming a prefix directory raises `NotImplementedError`, so `move()` copies
   it. `S3Path.rm(recursive=True)` at the bucket root raises
-  `PermissionError`.
+  `PermissionError`. `AzPath.rename()` waits for the copy at most
+  `schemes.az.COPY_POLL_TIMEOUT` (300 s), then aborts it and raises
+  `TimeoutError`.
+- A failed request is an `OSError`: `FileNotFoundError`, `PermissionError`,
+  `TimeoutError` for a request that runs out of time, `ConnectionError` for
+  an endpoint that cannot be reached, `ConnectionResetError` for a connection
+  that breaks while a body arrives. The SDK's exception is not chained and its
+  text (the request URL) is not repeated. A bucket root read or written is
+  `IsADirectoryError`, and a path with no bucket does not exist.
 - Clients: `S3Backend(**client_kwargs)` builds `boto3.client("s3",
   **client_kwargs)`; `GsBackend(**client_kwargs)` builds
   `google.cloud.storage.Client(**client_kwargs)` (for an emulator pass
-  `client_options={"api_endpoint": url}` and `use_auth_w_custom_endpoint=False`);
+  `client_options={"api_endpoint": url}` and `use_auth_w_custom_endpoint=False`;
+  `timeout=` and `retry=` go to every call instead: the SDK's defaults keep an
+  unreachable endpoint waiting for about two minutes);
   `AzBackend(account=None, **client_kwargs)` builds a `BlobServiceClient`
   (`connection_string=`, or `account_url=`/`credential=`). An `AzPath`
   without `backend=` targets `https://<account>.blob.core.windows.net` with

@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   by a program that held a path. `path.refresh()` forgets what is held of the
   archive, for every path to it, and the next use reads it again. A local
   archive is checked against its file on every use and needs none.
+- **`GsBackend(timeout=, retry=)`.** Both go to every call a `GsPath` makes
+  (`timeout` in seconds or a `(connect, read)` pair, `retry` a
+  `google.api_core.retry.Retry` or `None` for none). Without them the SDK's
+  defaults apply, and an unreachable endpoint kept every call waiting for about
+  two minutes. A custom `BaseGsBackend` adds options through `call_options()`.
+- **`schemes.az.COPY_POLL_TIMEOUT`.** How long `AzPath.rename()` waits for the
+  server-side copy (300 seconds); set it before the call to change it.
 
 ### Changed
 - **`from pathlib_next import *` publishes only the documented names.** It also
@@ -775,6 +782,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the scheme it was written with) are unchanged. `type(path)` of an
   `archive+zip:` path is `ZipUri`, so `repr()` shows that name, and
   `isinstance(path, ArchiveZipUri)` is also true for a `zip:` path.
+- **A failed request on `s3:`, `gs:` and `az:` is an `OSError` of the type the
+  header promises, and the SDK's exception is not chained.** A timeout was
+  `OSError(EIO)` on `s3:`; an unreachable endpoint reached `exists()` and
+  `walk(on_error=)` as the SDK's own exception on `gs:` and `az:` (after up to
+  two minutes with the SDKs' default retries), so neither saw it. A request that
+  runs out of time is now `TimeoutError`, an endpoint that cannot be reached
+  `ConnectionError`, a connection that breaks while an answer or a body arrives
+  `ConnectionResetError`, each with the path as `filename`; the store's answers
+  stay `FileNotFoundError`, `PermissionError` and `OSError(EIO)`. The message
+  names the SDK exception's type and not its text, which holds the request URL
+  and with it any query-string credential, and `__cause__` is `None`. Catch
+  `OSError` or these subclasses; code that read the SDK exception from
+  `__cause__` must catch it from the SDK call itself.
+- **An `s3:` read cut short or stalled in the body is an `OSError`.** Only the
+  call that opens the object was translated: a server that closed the
+  connection mid-body raised botocore's `ResponseStreamingError` from
+  `read_bytes()` and `copy()`, and a stalled body botocore's
+  `ReadTimeoutError` without the path. They are `ConnectionResetError` and
+  `TimeoutError` naming the path.
+- **Reading or writing a bucket or container root, and a path with no bucket or
+  account.** `read_bytes()`, `write_bytes()` or `open("r+")` of `s3://bucket/`
+  raised an SDK error (botocore's `ParamValidationError`, a `ValueError` or an
+  HTTP 400 reply), and `S3Path("s3:x").exists()` raised the first too. A root is a directory
+  (`IsADirectoryError`, nothing is sent), and a path with no bucket, or no
+  account and no `backend=`, does not exist (`FileNotFoundError`, `exists()` is
+  `False`).
+- **`az://account` can be listed.** `is_dir()` answered `True` for it while
+  `iterdir()` and `walk()` raised `ValueError`; its children are the containers.
+- **`rm(recursive=True, missing_ok=True)` under a missing bucket or container
+  returns.** It raised `FileNotFoundError` (a missing key in an existing
+  bucket was already fine). `rename()` of a missing path onto its own name returned the path; it
+  is `FileNotFoundError`, and renaming an existing key or prefix onto itself
+  still changes nothing.
+- **A key a batch delete refuses is offered to `ignore_error` with its own
+  path.** On `s3:` the refused keys of a 1000-key batch reached `ignore_error`
+  as one `OSError` without an `errno`, with the directory being removed as the
+  path; each is now a `PermissionError` (`AccessDenied`) or `OSError(EIO)` for
+  its key, offered once with that key's path, and without a handler the first is
+  raised. `gs:` and `az:` offered a failed delete with the directory's path too.
+- **An `S3Backend`, `GsBackend` or `AzBackend` builds one client however many
+  threads ask first, and can be pickled or copied after it built one.** Threads
+  racing for the first request each built a client (and, on Azure, a
+  credential). A backend that had made its client could not be pickled or
+  deep-copied (`PicklingError` for boto3's and Google's clients, a
+  `RecursionError` in `copy.deepcopy`). A pickled or copied backend keeps its
+  options and builds its own client on first use. A pickled `S3Path`, `GsPath`
+  or `AzPath` still holds only its URI: the receiving process uses the default
+  backend unless the program supplies one, and no `client_kwargs`, credential or
+  client is in the bytes.
+- **Existence probes on `az:` ask the service for one item.** `stat()` of a
+  prefix, `exists()` of a missing path, `mkdir()`, `open("x")`, writes and
+  `rmdir()` listed with the service's default page (up to 5000 entries) to learn
+  whether one blob exists. `rename()` of a prefix directory on all three stores
+  asked for the key a second time before listing the prefix.
+- **`AzPath.rename()` no longer waits for ever on a pending copy.** It waits at
+  most `COPY_POLL_TIMEOUT`, aborts the copy and raises `TimeoutError`, the source
+  untouched.
 
 ## [0.9.12] - 2026-10-08
 
