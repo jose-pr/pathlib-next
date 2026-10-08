@@ -150,9 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **The 3.12 `match()` pass swaps newlines and separators in both directions.**
   A newline inside a name was read as a separator, so on Python 3.12
   `MemPath("a\nb").match("a/b")` was `True`. Other interpreters are unchanged.
-- **`LocalPath.symlink_to("./t/")` stores `./t/`**, as `pathlib` does; it
+- **`LocalPath.symlink_to("./t/")` stores `./t/` on POSIX**, as `pathlib` does; it
   stored `t` (and `t//x` as `t/x`) because the text was parsed as a path first.
-  A generic `Path` builds a `str` target with `with_segments()`, so a subclass
+  Windows still rewrites a relative target into its own separators, without
+  which the link would not resolve. A generic `Path` builds a `str` target with `with_segments()`, so a subclass
   with per-instance state (a `MemPath` backend) no longer receives a target
   bound to a fresh one.
 - **`utils.parsedate()` says what it accepts.** `bytes`, a `datetime` and a

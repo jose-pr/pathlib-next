@@ -295,7 +295,11 @@ class LocalPath(
         )
 
     def _symlink_target(self, target):
-        # pathlib stores the text it is given: "./t/" stays "./t/".
+        # pathlib stores the text it is given: "./t/" stays "./t/". Windows
+        # cannot resolve a relative target that spells its separators "/", so
+        # there the path class turns the text into its own form.
+        if isinstance(target, str) and _os.name == "nt":
+            return self.with_segments(target)
         return target
 
     def _symlink_to(

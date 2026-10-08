@@ -227,9 +227,11 @@ not by a checker.
     never removes a directory). A `str` target goes through the overridable
     `_symlink_target()` and is stored verbatim; relative stays relative:
     `LocalPath` hands the text on untouched (`./t/` stays `./t/`, as
-    `pathlib` stores it), `UriPath` does not parse it as a URI, and any other
-    class normalizes it with `with_segments()`, which keeps per-instance
-    state. Implemented by `LocalPath` and `SftpPath` only.
+    `pathlib` stores it) except on Windows, which cannot resolve a relative
+    target spelled with `/`, so the path class rewrites it there; `UriPath`
+    does not parse it as a URI, and any other class normalizes it with
+    `with_segments()`, which keeps per-instance state. Implemented by
+    `LocalPath` and `SftpPath` only.
   - `copy(target, *, overwrite=False, follow_symlinks=True,
     preserve_metadata=True, recursive=False, ignore_error=None,
     progress=None) -> None`
