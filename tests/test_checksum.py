@@ -261,9 +261,8 @@ def test_pathsyncer_mixed_capability_falls_back_to_streaming_both_sides():
     # detects "in sync", no Copy event, despite source's native digest
     # value being nonsense (proving it was NOT trusted alone).
     assert SyncEvent.Copy not in events
-    # The native attempt was tried on source (and failed to find a partner
-    # on target), so source's native path was exercised at least once.
-    assert (source / "a.txt").checksum_calls == ["md5"]
+    # The target has no native digest, so the source's was never computed.
+    assert (source / "a.txt").checksum_calls == []
 
 
 def test_pathsyncer_mixed_capability_detects_real_difference():

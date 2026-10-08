@@ -41,6 +41,19 @@ _DOUBLESTAR_SELECTS_FILES = _sys.version_info >= (3, 13)
 _TRAILING_SLASH_SELECTS_DIRS = _sys.version_info >= (3, 11)
 _PARTIAL_DOUBLESTAR_ALLOWED = _sys.version_info >= (3, 13)
 
+# And two rules of how a literal component is checked, which `native=False`
+# pins to the current pathlib's:
+#   - before 3.13 a literal that is not the last component must be a
+#     directory; from 3.13 it is joined unchecked and only the whole path is
+#     tested.
+#   - from 3.12 the last literal is tested without following a link, so a
+#     dangling symlink is selected; before that it is tested with `exists()`.
+_INTERMEDIATE_LITERAL_IS_CHECKED = _sys.version_info < (3, 13)
+_FINAL_LITERAL_IS_NOT_FOLLOWED = _sys.version_info >= (3, 12)
+
+#: Components that name a directory relative to the one before them.
+_SPECIAL_PARTS = (".", "..")
+
 if _ty.TYPE_CHECKING:
     from ..path import P as _Globable
 else:
@@ -206,7 +219,7 @@ def glob(
     native: bool = True,
     on_error: "_ty.Callable[[OSError], None] | None" = None,
     bound_loops: bool = False,
-) -> _ty.Iterable[_Globable]:
+) -> _ty.Iterator[_Globable]:
     """Return an iterator which yields the paths matching a pathname pattern.
 
     `path` is the pattern itself, as a path (e.g. `UriPath("file:/x/**/*.py")`).
@@ -220,6 +233,10 @@ def glob(
     from the pattern itself, as `Path.glob()` does: a "**" component enables
     it. `native=` follows the running interpreter's rules, or applies one
     rule on every version -- see `parse_pattern()`.
+
+    The pattern is validated when this is called and the paths are selected
+    lazily. The path's anchor (a drive, an extended-length drive prefix) is
+    never a wildcard, whatever characters it holds.
     """
     segments = list(path.segments)
     if len(segments) > 1 and segments[-1] == "":
@@ -236,19 +253,21 @@ def glob(
                 raise ValueError(
                     "Invalid pattern: '**' can only be an entire path component"
                 )
+    anchor = getattr(path, "anchor", "")
+    searched = 1 if segments and anchor and segments[0] == anchor else 0
     first_wildcard = next(
-        (i for i, seg in enumerate(segments) if WILDCARD_PATTERN.search(seg)),
+        (
+            i
+            for i, seg in enumerate(segments)
+            if i >= searched and WILDCARD_PATTERN.search(seg)
+        ),
         max(len(segments) - 1, 0),
     )
     base = path.with_segments(*segments[:first_wildcard])
     if root_dir is not None:
         base = root_dir / base
     parts = [part for part in segments[first_wildcard:] if part not in ("", ".")]
-    if not parts:
-        if base.is_dir() if dironly else base.exists():
-            yield base
-        return
-    yield from select(
+    return _expand(
         base,
         parts,
         dironly=dironly,
@@ -259,6 +278,14 @@ def glob(
         on_error=on_error,
         bound_loops=bound_loops,
     )
+
+
+def _expand(base, parts, *, dironly, **options) -> _ty.Iterator[_Globable]:
+    if not parts:
+        if base.is_dir() if dironly else base.exists():
+            yield base
+        return
+    yield from select(base, parts, dironly=dironly, **options)
 
 
 def select(
@@ -284,16 +311,21 @@ def select(
     the third rule `native=False` pins: it then selects files on every
     version (3.13's rule, the one current pathlib applies).
     """
-    default_case = getattr(base, "_is_case_sensitive", True)
+    # An explicit `case_sensitive` asks for names to be compared, so a literal
+    # is looked for in the listing and yields the name as stored, as pathlib
+    # does when it is given. "." and ".." are never names to find.
+    explicit_case = case_sensitive is not None
     if case_sensitive is None:
-        case_sensitive = default_case
+        case_sensitive = getattr(base, "_is_case_sensitive", True)
     if recursive:
         parts = _collapse_recursive(parts)
     steps: _ty.List[_ty.Tuple[str, _ty.Any]] = []
     for part in parts:
         if recursive and part == RECURSIVE:
             steps.append((part, None))
-        elif WILDCARD_PATTERN.search(part) or case_sensitive != default_case:
+        elif part in _SPECIAL_PARTS:
+            steps.append((part, False))
+        elif explicit_case or WILDCARD_PATTERN.search(part):
             steps.append((part, compile_pattern(part, case_sensitive)))
         else:
             steps.append((part, False))
@@ -303,6 +335,8 @@ def select(
         _DOUBLESTAR_SELECTS_FILES if native else True,
         on_error,
         bound_loops,
+        _INTERMEDIATE_LITERAL_IS_CHECKED and native,
+        _FINAL_LITERAL_IS_NOT_FOLLOWED or not native,
     )
     selected = _select(base, steps, 0, opts, None)
     if sum(1 for _, kind in steps if kind is None) < 2:
@@ -322,6 +356,8 @@ class _Options(_ty.NamedTuple):
     doublestar_selects_files: bool = _DOUBLESTAR_SELECTS_FILES
     on_error: "_ty.Callable[[OSError], None] | None" = None
     bound_loops: bool = False
+    check_intermediate_literal: bool = _INTERMEDIATE_LITERAL_IS_CHECKED
+    unfollowed_final_literal: bool = _FINAL_LITERAL_IS_NOT_FOLLOWED
 
 
 def _select(
@@ -330,12 +366,16 @@ def _select(
     index: int,
     opts: _Options,
     is_dir: bool | None,
+    entries: "_ty.Sequence | None" = None,
 ) -> _ty.Iterator[_Globable]:
+    """Select from `path` with `steps[index:]`. `entries` is `path`'s listing
+    when the caller took it already (see `_scan()`)."""
     part, kind = steps[index]
     last = index == len(steps) - 1
 
     if kind is None:  # "**"
         if is_dir is None and not path.is_dir():
+            _report_unlistable(path, opts.on_error)
             return
         if last:
             with_files = opts.doublestar_selects_files and not opts.dironly
@@ -347,23 +387,47 @@ def _select(
                 opts.bound_loops,
             )
             return
-        for directory in _recurse(
-            path, opts.include_hidden, False, opts.on_error, opts.bound_loops
+        for directory, listing in _recurse_dirs(
+            path, opts.include_hidden, opts.on_error, opts.bound_loops
         ):
-            yield from _select(directory, steps, index + 1, opts, True)
+            yield from _select(directory, steps, index + 1, opts, True, listing)
         return
 
     if kind is False:  # literal component: no listing needed
+        if (
+            index == 0
+            and part == ".."
+            and opts.check_intermediate_literal
+            and not path.is_dir()
+        ):
+            # pathlib selects nothing from a base that is not a directory,
+            # even where the system would resolve "base/.." by its text.
+            _report_unlistable(path, opts.on_error)
+            return
         child = _child(path, part, None)
         if not last:
+            if (
+                opts.check_intermediate_literal
+                and part not in _SPECIAL_PARTS
+                and not child.is_dir()
+            ):
+                _report_unlistable(child, opts.on_error)
+                return
             yield from _select(child, steps, index + 1, opts, None)
-        elif child.is_dir() if opts.dironly else child.exists():
+        elif opts.dironly:
+            if child.is_dir():
+                yield child
+        elif (
+            child.exists(follow_symlinks=False)
+            if opts.unfollowed_final_literal
+            else child.exists()
+        ):
             yield child
         return
 
     need_dir = opts.dironly or not last
     skip_hidden = not opts.include_hidden and not part.startswith(".")
-    for child, stat in _scan(path, opts.on_error):
+    for child, stat in _scan(path, opts.on_error) if entries is None else entries:
         if skip_hidden and child.is_hidden():
             continue
         if not kind.match(child.name):
@@ -414,21 +478,76 @@ def _recurse(
                 continue
             is_dir = _entry_is_dir(child, stat, follow_symlinks=False)
             child_ancestors = ancestors
-            if is_dir and bound_loops:
-                key = _identity(child)
-                if key is not None:
-                    if key in ancestors:
-                        # The child IS one of its own ancestors: descending
-                        # would walk the same tree again, without end.
-                        # Skipped entirely -- yielding it would let the next
-                        # pattern component match everything under it a
-                        # second time, through the loop.
-                        continue
-                    child_ancestors = ancestors + (key,)
+            if is_dir:
+                descend, child_ancestors = _loop_guard(child, ancestors, bound_loops)
+                if not descend:
+                    continue
             if is_dir or with_files:
                 yield child
             if is_dir:
                 stack.append((child, child_ancestors))
+
+
+def _recurse_dirs(
+    top: _Globable,
+    include_hidden: bool,
+    on_error=None,
+    bound_loops: bool = False,
+) -> _ty.Iterator[_ty.Tuple[_Globable, _ty.Sequence]]:
+    """`_recurse()` over directories only, as `(directory, its listing)`: the
+    caller lists each one next, and gets the listing that found the
+    directories below it instead of asking the backend again. Same order,
+    same loop rule. A directory waiting its turn keeps its subdirectories,
+    not its whole listing."""
+    entries = _scan(top, on_error)
+    yield top, entries
+    top_key = _identity(top) if bound_loops else None
+    stack = [
+        (
+            _subdirectories(entries, include_hidden),
+            (top_key,) if top_key is not None else (),
+        )
+    ]
+    while stack:
+        children, ancestors = stack.pop()
+        for child in children:
+            descend, child_ancestors = _loop_guard(child, ancestors, bound_loops)
+            if not descend:
+                continue
+            entries = _scan(child, on_error)
+            yield child, entries
+            stack.append((_subdirectories(entries, include_hidden), child_ancestors))
+
+
+def _subdirectories(entries, include_hidden: bool) -> "list[_Globable]":
+    return [
+        child
+        for child, stat in entries
+        if (include_hidden or not child.is_hidden())
+        and _entry_is_dir(child, stat, follow_symlinks=False)
+    ]
+
+
+def _loop_guard(child: _Globable, ancestors: tuple, bound_loops: bool):
+    """`(descend, identities of the directories child is inside)`. A child
+    that is one of its own ancestors is neither descended into nor yielded:
+    the next pattern component would match everything under it a second
+    time, through the loop."""
+    if not bound_loops:
+        return True, ancestors
+    key = _identity(child)
+    if key is None:
+        return True, ancestors
+    if key in ancestors:
+        return False, ancestors
+    return True, ancestors + (key,)
+
+
+def _report_unlistable(path: _Globable, on_error) -> None:
+    """Tell `on_error` why `path` has nothing to select from (a missing path,
+    a file), in the words listing it would use."""
+    if on_error is not None:
+        _scan(path, on_error)
 
 
 def _scan(directory: _Globable, on_error=None):
@@ -471,7 +590,9 @@ def _identity(path: _Globable) -> "tuple | None":
         return None
     dev = getattr(st, "st_dev", None)
     ino = getattr(st, "st_ino", None)
-    if dev is None or ino is None or (not dev and not ino):
+    # `st_ino` is zero where the filesystem reports no file identity; every
+    # directory would then share one key and look like its own ancestor.
+    if dev is None or not ino:
         return None
     return (dev, ino)
 

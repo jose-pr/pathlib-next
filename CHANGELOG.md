@@ -694,6 +694,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that was thrown away before both sides were streamed. Whether a side can
   answer is now checked first, and the second side is asked only when the first
   answered.
+- **A carried pattern under an extended-length anchor is expanded, and checked
+  when it is carried.** `LocalPath(r"\\?\C:\data\*.py").glob(None)` selected
+  nothing (a wildcard-free `\\?\C:\data\a.py` too): the `?` of the prefix was
+  read as a wildcard. The anchor is no longer searched for one. A carried
+  pattern that is invalid (`a**` before 3.13) now raises when `glob(None)` is
+  called, as a pattern argument does, and not when the result is first
+  iterated.
+- **An explicit `case_sensitive=` changes the case rule and nothing else.** On
+  Windows `case_sensitive=True` made `..` select nothing (`glob("sub/../*")`,
+  `rglob("..")`), and `case_sensitive=False` joined a literal without looking
+  for it (`glob("SUB")` yielded `SUB`, `glob("nul")` and `glob(" ")` yielded a
+  path). `.` and `..` stay literal, and a literal is looked for in the listing
+  whenever `case_sensitive` is passed, yielding the name as stored, as `pathlib`
+  does.
+- **`glob()` checks a literal component as the running `pathlib` does.** Before
+  3.13 one that is not the last must be a directory: `a.txt/..`, `missing/..`
+  and `**/deep/..` selected the base or every directory on 3.9. From 3.12 the
+  last literal is tested without following a link, so `glob("dangling")`
+  selects a dangling symlink, as `pathlib` does there; `glob("dang*")` already
+  did. A `MemPath` follows the tree for `..`, which makes the same patterns
+  select nothing there on every version.
+- **`rglob(".")` selects every entry below.** It raised `ValueError`; `pathlib`
+  globs `**`. `glob(".")` is still a `ValueError`.
+- **`glob(on_error=)` is told about a missing or non-directory base whatever
+  the first component is.** `glob("*")` reported it and `glob("**")` and
+  `glob("**/*")` did not. Each failed listing is reported once: a recursive glob
+  called the hook twice for one unreadable directory.
+- **A recursive glob lists each directory once.** `glob("**/*.txt")` and
+  `rglob("*")` listed every directory twice, once to find the directories below
+  it and once to match names in it; on a remote scheme each listing is a
+  request. The first listing now serves both.
+- **`bound_loops=True` keeps every directory where `st_ino` is 0 or `None`.**
+  A filesystem that reports a device but no file index gave every directory the
+  same identity, so each looked like its own ancestor and `glob("**/*.conf",
+  bound_loops=True)` returned only the top level. Such a path is walked
+  unbounded, as the documentation says.
+- **`LocalPath.glob()` and `rglob()` raise the audit events `pathlib` raises.**
+  `pathlib.Path.glob` and `pathlib.Path.rglob` were never raised for a
+  `LocalPath` (`os.scandir` still audited each directory). An audit hook
+  written against `pathlib` now sees the same events with the same arguments
+  on the running version. `glob(None)` has no `pathlib` counterpart and raises
+  none.
 
 ## [0.9.11] - 2026-09-21
 

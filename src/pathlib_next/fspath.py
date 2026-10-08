@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars as _contextvars
 import functools as _func
 import ntpath as _ntpath
 import os as _os
@@ -23,6 +24,12 @@ __all__ = ["LocalPath", "PosixPathname", "WindowsPathname"]
 # that, LocalPath (which inherits them directly from pathlib.Path via MRO,
 # see class LocalPath below) needs a shim.
 _HAS_FOLLOW_SYMLINKS = _sys.version_info >= (3, 10)
+
+#: True while `rglob()` calls `glob()` for itself: the audit event of that
+#: inner call belongs to pathlib's `rglob()` only from 3.13 and is raised there.
+_IN_RGLOB: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
+    "pathlib_next_in_rglob", default=False
+)
 
 
 @_func.cache
@@ -416,7 +423,12 @@ class LocalPath(
         interpreter, or one rule on every version); every separator of this
         flavour splits the pattern, and a pattern with a drive or root
         raises `glob.NonRelativePatternError` like pathlib.
+
+        Raises the audit event `pathlib.Path.glob` with `(self, pattern)`, as
+        pathlib does. `pattern=None` has no pathlib counterpart and raises none.
         """
+        if pattern is not None and not _IN_RGLOB.get():
+            _sys.audit("pathlib.Path.glob", self, pattern)
         if pattern is None:
             return _proto.Path.glob(
                 self,
@@ -455,3 +467,55 @@ class LocalPath(
             on_error=on_error,
             bound_loops=bound_loops,
         )
+
+    def rglob(
+        self,
+        pattern: "str | _proto.FsPathLike | None",
+        *,
+        case_sensitive: bool = None,
+        include_hidden: bool = True,
+        recursive: bool = True,
+        dironly: bool = None,
+        recurse_symlinks: bool = False,
+        native: bool = True,
+        on_error: "_ty.Callable[[OSError], None]" = None,
+        bound_loops: bool = False,
+    ):
+        """Equivalent to `glob(f"**/{pattern}", recursive=True)`, as
+        `Path.rglob()`; raises the audit event `pathlib.Path.rglob` with
+        `(self, pattern)`, and from 3.13 the `pathlib.Path.glob` event of the
+        `glob()` it stands for, as pathlib does. `pattern=None` raises none."""
+        if pattern is None:
+            return _proto.Path.rglob(
+                self,
+                None,
+                case_sensitive=case_sensitive,
+                include_hidden=include_hidden,
+                recursive=recursive,
+                dironly=dironly,
+                recurse_symlinks=recurse_symlinks,
+                native=native,
+                on_error=on_error,
+                bound_loops=bound_loops,
+            )
+        _sys.audit("pathlib.Path.rglob", self, pattern)
+        if _sys.version_info >= (3, 13):
+            _sys.audit(
+                "pathlib.Path.glob", self, self._parser.join("**", _os.fspath(pattern))
+            )
+        token = _IN_RGLOB.set(True)
+        try:
+            return _proto.Path.rglob(
+                self,
+                pattern,
+                case_sensitive=case_sensitive,
+                include_hidden=include_hidden,
+                recursive=recursive,
+                dironly=dironly,
+                recurse_symlinks=recurse_symlinks,
+                native=native,
+                on_error=on_error,
+                bound_loops=bound_loops,
+            )
+        finally:
+            _IN_RGLOB.reset(token)

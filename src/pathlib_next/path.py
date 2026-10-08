@@ -919,8 +919,15 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             )
         if not (isinstance(pattern, str) and not pattern):
             # Reject an absolute pattern before "**/" hides its anchor;
-            # glob() validates without listing anything.
-            self.glob(pattern, recursive=False, native=native)
+            # glob() validates without listing anything. Only the anchor is
+            # judged here: a pattern with no component ("." or "./") means
+            # every entry below, and the glob() below judges the rest.
+            try:
+                self.glob(pattern, recursive=False, native=native)
+            except _glob.NonRelativePatternError:
+                raise
+            except ValueError:
+                pass
         return self.glob(
             f"**/{pattern}",
             case_sensitive=case_sensitive,

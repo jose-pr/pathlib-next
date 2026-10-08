@@ -145,7 +145,15 @@ not by a checker.
     `glob.NonRelativePatternError`. `recursive=None` enables recursion when a
     component is `**`; an explicit value wins. Validates eagerly, selects
     lazily. On a remote scheme a recursive glob lists every directory of the
-    subtree.
+    subtree, once. A path two `**` reach along several splits is yielded once
+    (3.13+ `pathlib` yields it once per split). A literal component is checked
+    as the running `pathlib` checks it: before 3.13 one that is not the last
+    must be a directory (`a.txt/..` selects nothing), and from 3.12 the last
+    is tested without following a link, so a dangling symlink is selected.
+    An explicit `case_sensitive` compares literals against the listing too
+    and yields the name as stored; `.` and `..` stay literal. A pattern with
+    no component (`.`) is a `ValueError`; `rglob(".")` selects every entry
+    below.
     - **`pattern=None`** expands the pattern THIS PATH CARRIES
       (`LocalPath("/etc/*.conf").glob(None)`), splitting at the first
       wildcard — the supported form for a path that is itself a pattern.
@@ -154,8 +162,10 @@ not by a checker.
       the same contract as `walk()`/`os.walk`: raising from it propagates,
       returning treats that directory as empty. Without it the listing is
       skipped in silence (pathlib's behaviour), so a caller could not tell
-      an unreadable directory from an absent one. `error.filename` names the
-      directory even when the backend left it unset.
+      an unreadable directory from an absent one. A base that is missing or
+      not a directory is reported (once) whatever the first component is.
+      `error.filename` names the directory even when the backend left it
+      unset.
     - **`bound_loops=True`** skips a directory whose `(st_dev, st_ino)` is
       already on the CURRENT DESCENT PATH — a directory reachable below
       itself, which is what a loop is. It bounds a Windows junction loop,
@@ -165,7 +175,8 @@ not by a checker.
       SIBLING names (a shared layer junctioned in twice) is not a loop and
       both names expand — the rule is the ancestor chain, not everything
       seen, the same line `find -L` draws. A backend whose stat carries no
-      identity (`MemPath`, most remote schemes) is walked unbounded.
+      identity (`MemPath`, most remote schemes, a `st_ino` of 0 or `None`) is
+      walked unbounded.
     - **`native=True`** (default) follows the running interpreter on the two
       rules pathlib changed mid-series: a trailing `/` is ignored before 3.11
       and selects directories only from 3.11; `a**` raises `ValueError`
@@ -174,7 +185,10 @@ not by a checker.
       plain wildcard), so a pattern answers the same on every interpreter and
       backend; `pathlib_next.testing`'s contract suite uses it.
   - `rglob(pattern, **same_kwargs)` — `glob(f"**/{pattern}", recursive=True)`.
-    `pattern=None` is `glob(None)`.
+    `pattern=None` is `glob(None)`. `LocalPath` raises the audit events
+    `pathlib.Path.glob` and `pathlib.Path.rglob` with the arguments `pathlib`
+    passes on the running version (3.13+ also raises `glob` for the call
+    `rglob` stands for); `pattern=None` raises none.
   - `walk(top_down=True, on_error=None, follow_symlinks=False)` — drives
     `_scandir()`; its stats are trusted only with `follow_symlinks=False`.
     Without `follow_symlinks` a symlink to a directory and a Windows junction
@@ -900,7 +914,9 @@ class TestMyPath(PathContract):
 - **`glob`** — `glob.glob(path, *, dironly=False, root_dir=None,
   recursive=False, include_hidden=False, case_sensitive=None)`: the pattern
   is itself a path (`UriPath("file:/x/**/*.py")`); like stdlib `glob`, hidden
-  names need `include_hidden=True`. `glob.parse_pattern(pattern) ->
+  names need `include_hidden=True`. It is split at the first wildcard, never
+  in the path's anchor (a drive, `\\?\C:\`); a bad pattern raises when it is
+  called, the selection is lazy. `glob.parse_pattern(pattern) ->
   (parts, trailing_sep)` (`ValueError`/`NonRelativePatternError`),
   `glob.select(base, parts, *, dironly=False, recursive=True,
   include_hidden=True, case_sensitive=None)` (the engine behind
