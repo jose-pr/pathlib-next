@@ -294,39 +294,6 @@ class LocalPath(
             self, top_down=top_down, on_error=on_error, follow_symlinks=follow_symlinks
         )
 
-    def copy(
-        self,
-        target,
-        *,
-        overwrite=False,
-        follow_symlinks=True,
-        preserve_metadata=True,
-        recursive=False,
-        ignore_error=None,
-        progress=None,
-    ):
-        # Python 3.14 added pathlib.Path.copy(), which sits ahead of our
-        # generic implementation in the MRO and does not accept pathlib_next's
-        # overwrite=/recursive=/ignore_error=/progress= extensions. Keep
-        # LocalPath's cross-version contract stable by routing explicitly to
-        # our method.
-        return _proto.Path.copy(
-            self,
-            target,
-            overwrite=overwrite,
-            follow_symlinks=follow_symlinks,
-            preserve_metadata=preserve_metadata,
-            recursive=recursive,
-            ignore_error=ignore_error,
-            progress=progress,
-        )
-
-    def move(self, target, *, overwrite=False):
-        # Python 3.14 added pathlib.Path.move() alongside copy(); route around
-        # the same MRO collision so overwrite= and the generic fallback remain
-        # available on every supported Python version.
-        return _proto.Path.move(self, target, overwrite=overwrite)
-
     def _symlink_target(self, target):
         # pathlib stores the text it is given: "./t/" stays "./t/".
         return target

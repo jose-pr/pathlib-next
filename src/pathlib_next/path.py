@@ -20,6 +20,7 @@ import typing as _ty
 
 from . import utils as _utils
 from .protocols import BinaryOpen, Chmod, Stat
+from .protocols.io import _ASK_STAT
 from .utils import glob as _glob
 from .utils.stat import FileStat
 
@@ -949,7 +950,6 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         those listing calls); an explicit `follow_symlinks=True` always
         re-`stat()`s each entry so a symlink is still resolved.
 
-        A listed name that is not one path component (`""`, `.`, `..`, or one
         Without `follow_symlinks` a symlink to a directory is listed in
         `filenames` and not entered, and so is a Windows junction
         (`is_junction()`): like a symlink it is a second NAME for another
@@ -958,6 +958,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         path is too long). Nothing protects a walk with `follow_symlinks=True`
         from a loop.
 
+        A listed name that is not one path component (`""`, `.`, `..`, or one
         containing `/` or NUL; see `utils.is_safe_child_name()`) is left out
         of `dirnames` and `filenames`. `on_error`, when given, is called with
         a `ValueError` for it, `error.filename` naming the directory.
@@ -1002,9 +1003,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                             _glob._child(path, name), follow_symlink=follow_symlinks
                         )
                     is_dir = stat.is_dir() if stat is not None else False
-                except OSError:
                     if is_dir and not follow_symlinks:
                         is_dir = not _is_junction(_glob._child(path, name))
+                except OSError:
                     # Carried over from os.path.isdir().
                     is_dir = False
 
@@ -1217,7 +1218,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         else:
                             child.unlink()
                     elif child_stat is not None and child_stat.is_dir():
-                        if child._is_junction_link():
+                        if child.is_dir_binding():
                             # A binding: what is inside belongs to the tree
                             # it names, not to this one.
                             policy = _follow_policy(follow_binds, child)
@@ -1264,7 +1265,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             except Exception as error:
                 _handle(error, self)
         elif stat.is_dir():
-            binding = self._is_junction_link()
+            binding = self.is_dir_binding()
             policy = _follow_policy(follow_binds, self) if binding else "follow"
             if policy == "ignore":
                 return
@@ -1378,11 +1379,6 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             except (NotImplementedError, OSError, ValueError):
                 continue
         return False
-
-    def _is_junction_link(self) -> bool:
-        """Deprecated internal spelling of `is_dir_binding()`, kept because
-        `FileUri` and downstream subclasses may override it."""
-        return self.is_dir_binding()
 
     @_utils.notimplemented
     def rename(self, target: "_ty.Self | str"):
@@ -1519,7 +1515,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             # own 0o777) silently defeated the flag.
             return src._copy_symlink(target, overwrite=overwrite)
 
-        if recursive and src.is_dir():
+        # One stat of the source answers its type, its mode and, beside the
+        # target's, whether the two are one file; None when it cannot be had.
+        src_stat = _stat_or_none(src, follow_symlinks)
+
+        if recursive and src_stat is not None and _stat.S_ISDIR(src_stat.st_mode):
             if _contains(src, target):
                 # Checked before anything is created: the new directory would
                 # be listed and copied into itself without end.
@@ -1581,10 +1581,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
             if preserve_metadata:
                 # After the children: a read-only directory could not take
                 # them, and its mode is only settled once they are in.
-                _copy_mode(src, target, follow_symlinks)
+                _copy_mode(src, target, follow_symlinks, src_stat)
             return
 
-        if _same_file(src, target):
+        # What needs no I/O first; the stats below settle the rest.
+        if _same_file(src, target, identity=False):
             raise OSError(
                 _errno.EINVAL, "Source and target are the same file", str(target)
             )
@@ -1592,12 +1593,16 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         # timeout) as "missing", and overwrite=False must never be decided by
         # a failure. Only FileNotFoundError means the target is absent.
         try:
-            target.stat()
-            target_exists = True
+            target_stat = target.stat()
         except FileNotFoundError:
-            target_exists = False
-        if target_exists:
-            if target.is_dir():
+            target_stat = None
+        target_exists = target_stat is not None
+        if target_stat is not None:
+            if _same_identity(src_stat, target_stat):
+                raise OSError(
+                    _errno.EINVAL, "Source and target are the same file", str(target)
+                )
+            if _stat.S_ISDIR(target_stat.st_mode):
                 raise IsADirectoryError(target)
             if not overwrite:
                 raise FileExistsError(target)
@@ -1621,6 +1626,11 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                             if progress is None
                             else lambda copied, total: progress(src, copied, total)
                         ),
+                        total_size=(
+                            _ASK_STAT
+                            if src_stat is None
+                            else getattr(src_stat, "st_size", None)
+                        ),
                     )
             except BaseException:
                 # A half-written target is not a copy of anything; do not
@@ -1633,7 +1643,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 raise
 
         if preserve_metadata:
-            _copy_mode(src, target, follow_symlinks)
+            _copy_mode(src, target, follow_symlinks, src_stat)
 
     def _into(self, target_dir: "Path | str") -> "Path":
         """`target_dir / self.name`, the target of `copy_into()` and
@@ -1811,7 +1821,7 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if src_stat.is_symlink() and links:
             src.copy(target, overwrite=overwrite, follow_symlinks=False)
             src.unlink()
-        elif src.is_dir():
+        elif src.is_dir() if src_stat.is_symlink() else src_stat.is_dir():
             src.copy(
                 target, overwrite=overwrite, recursive=True, follow_symlinks=not links
             )
@@ -1819,6 +1829,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         else:
             src.copy(target, overwrite=overwrite)
             src.unlink()
+
+
+def _is_junction(path: "Path") -> bool:
+    """`path.is_junction()`, where a class that cannot answer says no."""
+    try:
+        return bool(path.is_junction())
+    except (NotImplementedError, OSError, ValueError):
+        return False
 
 
 def _follow_policy(policy, path: "Path") -> str:
@@ -1831,14 +1849,6 @@ def _follow_policy(policy, path: "Path") -> str:
     keep one mount and follow another.
 
     Returns the internal name: "rm", "follow" or "ignore". An answer that is
-def _is_junction(path: "Path") -> bool:
-    """`path.is_junction()`, where a class that cannot answer says no."""
-    try:
-        return bool(path.is_junction())
-    except (NotImplementedError, OSError, ValueError):
-        return False
-
-
     none of the three raises `_InvalidPolicy`, which `rm()` never hands to
     its `ignore_error`.
     """
@@ -1857,7 +1867,26 @@ class _InvalidPolicy(ValueError):
     """A follow policy that is not `True`, `False` or `None`."""
 
 
-def _copy_mode(src: Path, target: Path, follow_symlinks: bool) -> None:
+def _stat_or_none(path: Path, follow_symlinks: bool):
+    """`path.stat()`, or None where there is none to have: a missing path, a
+    backend without `stat()`. The callers then do what they did without it."""
+    try:
+        return path.stat(follow_symlinks=follow_symlinks)
+    except (OSError, ValueError, NotImplementedError):
+        return None
+
+
+def _same_identity(first, second) -> bool:
+    """Whether two stats carry the same `(st_dev, st_ino)`. A stat without
+    them (a `FileStat`, an SFTP attribute set) says nothing."""
+    one = (getattr(first, "st_dev", None), getattr(first, "st_ino", None))
+    other = (getattr(second, "st_dev", None), getattr(second, "st_ino", None))
+    return None not in one and None not in other and one == other
+
+
+def _copy_mode(
+    src: Path, target: Path, follow_symlinks: bool, stat: "_ty.Any" = None
+) -> None:
     """Give `target` the permission bits `src` reports, when it reports any.
 
     Only a mode the source backend actually reported is metadata:
@@ -1869,7 +1898,8 @@ def _copy_mode(src: Path, target: Path, follow_symlinks: bool) -> None:
     dropped: a mode read from another backend (a tar member, a remote
     server) must not make a privileged file here."""
     try:
-        stat = src.stat(follow_symlinks=follow_symlinks)
+        if stat is None:
+            stat = src.stat(follow_symlinks=follow_symlinks)
         if getattr(stat, "mode_known", True) and stat.st_mode:
             mode = _stat.S_IMODE(stat.st_mode)
             if type(src) is not type(target):
@@ -2025,9 +2055,9 @@ def _contains(src: Path, target: Path) -> bool:
     )
 
 
-def _same_file(src: Path, target: Path) -> bool:
+def _same_file(src: Path, target: Path, *, identity: bool = True) -> bool:
     """Whether `src` and `target` name the same file, looking through
-    symlinks (see `_relation`)."""
+    symlinks (see `_relation`, and its `identity`)."""
     mine, theirs = _local_file(src), _local_file(target)
     if mine is not None and theirs is not None:
         # The cheap form of `_local_relation()`: copy() asks this once per
@@ -2042,7 +2072,7 @@ def _same_file(src: Path, target: Path) -> bool:
             )
         except (OSError, ValueError):
             return False
-    return _relation(src, target, follow=True) in (_SAME, _OTHER)
+    return _relation(src, target, follow=True, identity=identity) in (_SAME, _OTHER)
 
 
 def _holds_links(src: Path, target: Path) -> bool:

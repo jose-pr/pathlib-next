@@ -233,6 +233,8 @@ not by a checker.
   - `copy(target, *, overwrite=False, follow_symlinks=True,
     preserve_metadata=True, recursive=False, ignore_error=None,
     progress=None) -> None`
+    - A file copy calls `stat()` once on the source (type, mode, size and
+      identity) and once on the target.
     - Existing target: `FileExistsError` unless `overwrite=True`; a directory
       target of a file copy → `IsADirectoryError`; a directory source needs
       `recursive=True`; copying into its own subtree → `OSError(EINVAL)`; onto
@@ -319,12 +321,13 @@ not by a checker.
 
 - **`LocalPath`** — `pathlib.WindowsPath`/`PosixPath` (by `os.name`) with
   `Path` mixed in; stdlib behavior except where overridden: `_scandir()`
-  (tuples from `os.scandir` lstat), `walk()`, `glob()`, `copy()`, `move()`,
+  (tuples from `os.scandir` lstat), `walk()`, `glob()`,
   `stat()`/`chmod()` (`follow_symlinks=` on 3.9; `chmod` accepts octal
   strings), `is_dir()`/`is_file()` (`follow_symlinks=` before 3.13),
   `_symlink_to()`, `_chown()` (`shutil.chown`; `NotImplementedError` where
-  `os.chown` is missing, i.e. Windows), plus pathlib_next's `exists`,
-  `rglob`, `read_text`, `write_text`, `symlink_to`, `copy_into`, `move_into`.
+  `os.chown` is missing, i.e. Windows), plus pathlib_next's `copy`, `move`,
+  `copy_into`, `move_into`, `exists`, `rglob`, `read_text`, `write_text` and
+  `symlink_to`.
   `exists()` returns `False` for any `OSError`/`ValueError` on every Python
   version; `is_dir()`, `is_file()`, `is_fifo()`, `is_socket()`,
   `is_block_device()` and `is_char_device()` are stdlib's: before 3.13 they

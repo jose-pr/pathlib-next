@@ -113,6 +113,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   before.
 
 ### Fixed
+- **`copy()` makes two `stat()` calls per file, not three to five.** The source's
+  type, mode and size come from one `stat()` and the target's existence and
+  type from another, and two stats that carry `st_dev`/`st_ino` are compared
+  rather than asking `samefile()` for stats that a `FileStat` backend cannot
+  answer. On a remote scheme each is a request. Everything `copy()` refused it
+  still refuses: the same file under two spellings, an existing target without
+  `overwrite=True`, a directory in the way. A move by copy and delete saves one
+  more.
 - **`full_match()` on a generic path treats the root as a component of its own.**
   `MemPath("/a/b.txt").full_match("*/*/*.txt")` was `True` (the first `*`
   matched the empty root), `MemPath("/").full_match("/**")` was `False`,
@@ -131,6 +139,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   A generic `Path` builds a `str` target with `with_segments()`, so a subclass
   with per-instance state (a `MemPath` backend) no longer receives a target
   bound to a fresh one.
+- **`LocalPath.copy()` and `move()` are `Path.copy()` and `Path.move()`**
+  (`LocalPath.copy is Path.copy`): the two forwarding methods are gone, and with
+  them one call frame. A subclass that overrode the private
+  `Path._is_junction_link()` overrides `is_dir_binding()` instead; the alias is
+  gone.
 - **The header no longer says `LocalPath.is_*()` return `False` for any
   `OSError` on every Python version.** `exists()` does; `is_dir()`, `is_file()`,
   `is_fifo()`, `is_socket()`, `is_block_device()` and `is_char_device()` are

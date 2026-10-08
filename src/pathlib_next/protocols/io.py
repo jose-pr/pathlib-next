@@ -8,6 +8,9 @@ from .. import utils as _utils
 
 __all__ = ["BinaryOpen"]
 
+#: `_copy_stream(total_size=)` default: ask `stat()` for the size.
+_ASK_STAT = object()
+
 
 def _canonical_mode(mode, buffering, encoding, errors, newline) -> str:
     """`open()`'s mode validation (CPython `_io.open`), returning the mode
@@ -174,18 +177,20 @@ class BinaryOpen(_ty.Protocol):
         *,
         progress: "_ty.Callable[[int, _ty.Optional[int]], None]" = None,
         chunk_size: int = _shutil.COPY_BUFSIZE,
+        total_size: "object" = _ASK_STAT,
     ):
         """Stream an already-open binary `input` into `output` (see `copy()`
-        for the `progress` contract; `self` supplies the total size)."""
+        for the `progress` contract). `total_size` is the size to report, or
+        None when unknown; by default `self.stat()` supplies it."""
         if progress is None:
             _shutil.copyfileobj(input, output, chunk_size)
             return
 
-        total_size = None
-        try:
-            total_size = self.stat().st_size
-        except (AttributeError, NotImplementedError, OSError):
-            total_size = None
+        if total_size is _ASK_STAT:
+            try:
+                total_size = self.stat().st_size
+            except (AttributeError, NotImplementedError, OSError):
+                total_size = None
 
         copied = 0
         while chunk := input.read(chunk_size):
