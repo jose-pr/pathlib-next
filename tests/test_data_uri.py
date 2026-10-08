@@ -75,3 +75,32 @@ def test_write_operations_raise_not_implemented(op):
     p = UriPath("data:text/plain,hi")
     with pytest.raises(NotImplementedError):
         op(p)
+
+
+@pytest.mark.parametrize(
+    "url, content",
+    [
+        ("data:,a?b", b"a?b"),
+        ("data:,a?b=c&d", b"a?b=c&d"),
+        (
+            'data:image/svg+xml,<?xml version="1.0"?><svg/>',
+            b'<?xml version="1.0"?><svg/>',
+        ),
+        ("data:,a%3Fb?c%20d", b"a?b?c d"),
+        ("data:text/plain;base64,YWJj", b"abc"),
+        ("data:,a#b", b"a"),
+        ("data:,a?b#c", b"a?b"),
+    ],
+)
+def test_a_question_mark_in_a_data_payload_is_payload(url, content):
+    path = UriPath(url)
+    assert path.read_bytes() == content
+    assert path.stat().st_size == len(content)
+
+
+def test_a_data_payload_with_a_query_reads_the_whole_text():
+    path = UriPath("data:,a?b")
+    assert path.read_text() == "a?b"
+    assert path.query == "b"
+    assert path.as_uri() == "data:,a?b"
+    assert path.stat().st_size == 3

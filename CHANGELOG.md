@@ -359,6 +359,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`urllib.parse.parse_qsl` reads form-encoded text as spaces). A program that
   compared the encoded text of a query holding `+` or `=` in a value must expect
   the escapes.
+- **A `data:` payload may hold an unescaped `?`.** `UriPath("data:,a?b")` read
+  `a`, and an SVG payload that starts `<?xml` read `<`, with the rest filed as
+  the URI's query; `stat().st_size` was short too. RFC 2397 has no query, so
+  the query is part of the payload (decoded like the path) and the full text is
+  read. A `#` still starts the fragment.
 
 ## [0.9.12] - 2026-10-08
 

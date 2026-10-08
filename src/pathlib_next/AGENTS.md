@@ -600,7 +600,9 @@ chained (their text can carry credentials).
   filename character, and every other scheme splits on `/` only.
 - **`DataUri`** (`data:`; `schemes.data`) — RFC 2397
   `data:[<mediatype>][;base64],<data>`. `mediatype` property (default
-  `text/plain;charset=US-ASCII`). Read-only single file: `open("r")` only,
+  `text/plain;charset=US-ASCII`). RFC 2397 has no query: an unescaped `?` and
+  what follows it are payload (`data:,a?b` reads `a?b`), while a `#` starts the
+  fragment. Read-only single file: `open("r")` only,
   `stat().st_size` is the decoded size, listing → `NotADirectoryError`.
 - **`HttpPath`** (`http:`/`https:`; `http` extra; `schemes.http`)
   - `with_session(session, write_method="PUT", append_mode="rewrite",

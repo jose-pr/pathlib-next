@@ -3,6 +3,8 @@ from __future__ import annotations
 import io as _io
 from base64 import b64decode as _b64decode
 
+import uritools as _uritools
+
 from ...utils.stat import FileStat
 from .. import UriPath
 from ..source import _ERRORS
@@ -13,9 +15,9 @@ _DEFAULT_MEDIATYPE = "text/plain;charset=US-ASCII"
 class DataUri(UriPath):
     """`data:` scheme (RFC 2397): a read-only "file" whose entire content is
     embedded in the URI itself (`data:[<mediatype>][;base64],<data>`) -- no
-    filesystem, no directories, no backend/connection. Percent-encoded
-    reserved characters (`?`/`#`) in the payload are only decoded correctly
-    if the URI was built with them escaped, per RFC 2397/3986."""
+    filesystem, no directories, no backend/connection. RFC 2397 has no query,
+    so an unescaped `?` and what follows it are payload; a `#` starts the
+    fragment, as in any URI, and is not."""
 
     __SCHEMES = ("data",)
     __slots__ = ()
@@ -47,7 +49,11 @@ class DataUri(UriPath):
         return header
 
     def _content(self) -> bytes:
-        header, sep, data = self.path.partition(",")
+        text = self.path
+        if self.query:
+            # Decoded like the path: `.query` is kept as received.
+            text += "?" + _uritools.uridecode(self.query, errors=_ERRORS)
+        header, sep, data = text.partition(",")
         if not sep:
             raise FileNotFoundError(self)
         # `.path` is already percent-decoded exactly once (and, for data:,
