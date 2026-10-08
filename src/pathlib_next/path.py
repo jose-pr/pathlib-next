@@ -50,6 +50,9 @@ def _os_error(exc_type: type, code: int, path: object) -> OSError:
     return exc_type(code, _os.strerror(code), str(path))
 
 
+# 3.13 refuses an empty stem on a name that has a suffix (`with_stem("")`).
+_STEM_KEEPS_SUFFIX = _sys.version_info >= (3, 13)
+
 # A final component's suffix split, following the running interpreter's
 # pathlib: 3.14 treats a trailing "." as a suffix ("a." -> ".") and ignores
 # leading dots; earlier versions do neither.
@@ -224,8 +227,13 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
 
     def with_stem(self, stem: str) -> _ty.Self:
         """Return a new path with the stem changed (validated like
-        `with_name()`)."""
-        return self.with_name(stem + self.suffix)
+        `with_name()`). From 3.13 on an empty stem is refused when the name
+        has a suffix, as `pathlib` does: it would leave a name made of the
+        suffix alone."""
+        suffix = self.suffix
+        if _STEM_KEEPS_SUFFIX and suffix and not stem:
+            raise ValueError("%r has a non-empty suffix" % (self,))
+        return self.with_name(stem + suffix)
 
     def with_suffix(self, suffix: str) -> _ty.Self:
         """Return a new path with the suffix changed or added."""
@@ -366,10 +374,10 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
         segments = self.segments
         return ("",) if segments and segments[0] == "" else ()
 
-    @_utils.notimplemented
     def is_absolute(self) -> bool:
-        """True if the path is absolute"""
-        ...
+        """True if the path is absolute: it has a root. A class whose paths
+        can be rooted without being absolute overrides it."""
+        return bool(self.root)
 
     def _match_parts(self) -> tuple[bool, list[str]]:
         """`(anchored, names)`: the path as `match()` sees it -- whether it
@@ -443,14 +451,23 @@ class Pathname(FsPathLike, _ty.Generic[_P]):
                 return False
         return True
 
-    def full_match(self, pattern: str, *, case_sensitive: bool = None) -> bool:
+    def full_match(
+        self, pattern: str | _os.PathLike, *, case_sensitive: bool | None = None
+    ) -> bool:
         """Return True if this path matches the glob-style `pattern`
         against the whole path (3.13 parity). Unlike match(), this isn't a
         right-anchored partial match, and "**" matches any number of path
-        segments (including zero).
+        segments (including zero). The root is a component of its own: a
+        rooted path needs a rooted pattern, or a leading "**" that reaches
+        past it (see `utils.glob.full_match`). Empty and "." components of
+        the pattern are ignored, as `pathlib` parses its pattern as a path.
         """
         if case_sensitive is None:
             case_sensitive = self._is_case_sensitive
+        if isinstance(pattern, Pathname):
+            pattern = "/".join(pattern.segments)
+        elif not isinstance(pattern, str):
+            pattern = _os.fspath(pattern)
         return _glob.full_match(self.segments, pattern, case_sensitive)
 
     def as_posix(self) -> str:
@@ -523,6 +540,11 @@ _OPERATION_NAMES = (
 _FNMATCH_SLICE = slice(len("(?s:"), -len(")\\Z"))
 
 
+#: 3.12 swaps in both directions, so a newline inside a name becomes a "/" and
+#: can never act as a separator.
+_SWAP_SEP_AND_NEWLINE = str.maketrans({"/": "\n", "\n": "/"})
+
+
 def _match_lines_312(
     anchored: bool,
     names: "_ty.Sequence[str]",
@@ -544,10 +566,12 @@ def _match_lines_312(
     import fnmatch as _fnmatch
 
     # pathlib spells an empty path "." and gives it no lines at all.
-    path_lines = (("/" if anchored else "") + "/".join(names)).replace("/", "\n")
+    path_lines = (("/" if anchored else "") + "/".join(names)).translate(
+        _SWAP_SEP_AND_NEWLINE
+    )
     pattern_lines = (
         ("/" if pattern_anchored else "") + "/".join(pattern_names)
-    ).replace("/", "\n")
+    ).translate(_SWAP_SEP_AND_NEWLINE)
     parts = ["^"]
     for part in pattern_lines.splitlines(keepends=True):
         if part == "*\n":
@@ -1371,11 +1395,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
 
         A `str` target is the **literal link target** -- whatever it says
         is what gets stored, verbatim and unresolved, exactly as
-        `pathlib.Path.symlink_to()` does. Override this wherever
-        `type(self)(str)` would reinterpret the string instead of taking
-        it literally (`UriPath` does; see `UriPath._symlink_target`).
+        `pathlib.Path.symlink_to()` does. The default builds it with
+        `with_segments()`, which keeps per-instance state (a `MemPath`'s
+        backend) but normalizes the text as this class parses a path;
+        override it wherever that would reinterpret the string instead of
+        taking it literally (`LocalPath` hands it on untouched, `UriPath`
+        does not parse it as a URI; see `UriPath._symlink_target`).
         """
-        return type(self)(target) if isinstance(target, str) else target
+        return self.with_segments(target) if isinstance(target, str) else target
 
     def symlink_to(
         self,

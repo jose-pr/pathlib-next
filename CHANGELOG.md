@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.9.12] - 2026-10-08
 
 ### Added
+- **`Pathname.is_absolute()` has a default**: the path has a root. It raised
+  `NotImplementedError` for `MemPath` and every `Pathname` subclass that did not
+  override it.
 - **Generic paths can be ordered.** `sorted()`, `<`, `<=`, `>` and `>=` raised
   `TypeError` for `MemPath`, `Uri`, `UriPath` and every custom `Path`.
   `Pathname` now orders two paths of the same exact type by the key its `==`
@@ -55,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   can drop a `# type: ignore[abstract]` on those four constructions.
   `FileStatLike.st_mtime` is annotated `float`, which is what every backend
   reports.
+- **`with_stem("")` raises on 3.13 and later when the name has a suffix**, as
+  `pathlib` does there (`MemPath("/a/c.txt").with_stem("")` was `/a/.txt`).
+  Before 3.13 it is unchanged.
 - **The scheme extras now declare version ranges.** `uritools`, `requests`,
   `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
   `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the
@@ -81,6 +87,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   before.
 
 ### Fixed
+- **`full_match()` on a generic path treats the root as a component of its own.**
+  `MemPath("/a/b.txt").full_match("*/*/*.txt")` was `True` (the first `*`
+  matched the empty root), `MemPath("/").full_match("/**")` was `False`,
+  `MemPath("a/b").full_match("a/./b")` was `False` and `MemPath("").full_match("")`
+  was `False`; `pathlib` 3.13 answers `False`, `True`, `True`, `True`. A rooted
+  path now needs a rooted pattern or a leading `**` that reaches past the root,
+  a lone `*` does not match it, and `.` and empty pattern components are
+  ignored. `Uri` shares the fix. A bracket expression still never matches a
+  separator (see `docs/divergences.md`). A path or `os.PathLike` is accepted as
+  the pattern.
+- **The 3.12 `match()` pass swaps newlines and separators in both directions.**
+  A newline inside a name was read as a separator, so on Python 3.12
+  `MemPath("a\nb").match("a/b")` was `True`. Other interpreters are unchanged.
+- **`LocalPath.symlink_to("./t/")` stores `./t/`**, as `pathlib` does; it
+  stored `t` (and `t//x` as `t/x`) because the text was parsed as a path first.
+  A generic `Path` builds a `str` target with `with_segments()`, so a subclass
+  with per-instance state (a `MemPath` backend) no longer receives a target
+  bound to a fresh one.
+- **The header no longer says `LocalPath.is_*()` return `False` for any
+  `OSError` on every Python version.** `exists()` does; `is_dir()`, `is_file()`,
+  `is_fifo()`, `is_socket()`, `is_block_device()` and `is_char_device()` are
+  stdlib's and, before 3.13, raise for an error such as `PermissionError`. The
+  behaviour is unchanged.
+- **A `..` or `.` name in a remote listing no longer escapes the tree.**### Fixed
 - **A `..` or `.` name in a remote listing no longer escapes the tree.** The
   `s3:`, `gs:`, `az:`, `github:` and `gitlab:` listings and the default
   `UriPath` listing yielded a name such as `..`, `.`, `a/b` or an empty one as

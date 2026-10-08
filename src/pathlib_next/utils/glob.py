@@ -71,42 +71,82 @@ def _collapse_recursive(parts: _ty.Iterable[str]) -> _ty.List[str]:
     return collapsed
 
 
+def _fields(segments: _ty.Sequence[str]) -> _ty.List[str]:
+    """`segments` as the fields of the path's "/"-joined text: the root is a
+    leading empty field (`["", ""]` for the root alone), the empty path has
+    none. Empty and "." segments are not names."""
+    rooted = bool(segments) and segments[0] == ""
+    names = [s for s in (segments[1:] if rooted else segments) if s and s != "."]
+    if rooted:
+        return ["", *names] if names else ["", ""]
+    return names
+
+
 def full_match(segments: _ty.Sequence[str], pattern: str, case_sensitive: bool) -> bool:
     """Match `segments` against a glob pattern that may contain "**"
     components (pathlib 3.13's PurePath.full_match semantics): a "**" matches
     zero or more segments, except a trailing "**" after other components,
     which needs at least one ("a/**" does not match "a").
 
+    The root is a field of its own, as in the path's text: a rooted pattern
+    names it with its leading "/", a lone "*" never matches it (a lone "*"
+    matches one or more characters), and a "**" followed by more components
+    reaches it only together with a name after it ("**/x" matches "/a/x",
+    not "/x"). Empty and "." components are dropped from the pattern. A
+    bracket expression never matches a separator (pathlib's regex lets a
+    negated one).
+
     Runs as a set-of-states automaton, O(len(segments) * len(pattern)), so
     repeated "**" cannot backtrack exponentially.
     """
-    pats = pattern.split("/")
-    pats = _collapse_recursive(p for i, p in enumerate(pats) if p or i == 0)
-    segs = [s for i, s in enumerate(segments) if s or i == 0]
+    fields = _fields(segments)
+    parts = [part for part in pattern.split("/") if part and part != "."]
+    if pattern.startswith("/"):
+        parts = ["", *parts] if parts else ["", ""]
+    pats = _collapse_recursive(parts)
     end = len(pats)
+    last = end - 1
 
-    def closure(states: _ty.Set[int]) -> _ty.Set[int]:
-        for i in sorted(states):
-            # A non-trailing (or sole) "**" may match zero segments.
-            if i < end and pats[i] == RECURSIVE and (i < end - 1 or end == 1):
-                states.add(i + 1)
+    # A state is (index, phase). Phase 0: about to match pats[index]. Phases
+    # 1 and 2 belong to a "**": 1 once it has taken a single empty field (the
+    # root), which does not yet count, 2 once it has taken enough and may
+    # take more or hand over to the next component.
+    def closure(states: _ty.Set[_ty.Tuple[int, int]]) -> _ty.Set[_ty.Tuple[int, int]]:
+        pending = list(states)
+        while pending:
+            i, phase = pending.pop()
+            if phase == 2 or (
+                phase == 0
+                and i < end
+                and pats[i] == RECURSIVE
+                # A non-trailing (or sole) "**" may match no field at all.
+                and (i < last or end == 1)
+            ):
+                following = (i + 1, 0)
+                if following not in states:
+                    states.add(following)
+                    pending.append(following)
         return states
 
-    states = closure({0})
-    for seg in segs:
-        advanced: _ty.Set[int] = set()
-        for i in states:
-            if i == end:
+    states = closure({(0, 0)})
+    for field in fields:
+        advanced: _ty.Set[_ty.Tuple[int, int]] = set()
+        for i, phase in states:
+            if phase:
+                advanced.add((i, 2))
+            elif i == end:
                 continue
-            pat = pats[i]
-            if pat == RECURSIVE:
-                advanced.update((i, i + 1))
-            elif compile_pattern(pat, case_sensitive).match(seg):
-                advanced.add(i + 1)
+            elif pats[i] == RECURSIVE:
+                advanced.add((i, 1 if field == "" and i < last else 2))
+            elif pats[i] == "*":
+                if field:
+                    advanced.add((i + 1, 0))
+            elif compile_pattern(pats[i], case_sensitive).match(field):
+                advanced.add((i + 1, 0))
         if not advanced:
             return False
         states = closure(advanced)
-    return end in states
+    return (end, 0) in states
 
 
 def parse_pattern(

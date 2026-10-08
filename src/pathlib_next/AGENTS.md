@@ -53,14 +53,18 @@ not by a checker.
   `parts`, `parent`, `with_segments(*segments)`, `as_uri()`,
   `relative_to(other)`. Derived: `name`, `suffix`, `suffixes`, `stem`
   (suffix rules of the running interpreter), `with_name`/`with_stem`/
-  `with_suffix` (`ValueError` for `""`, `.` or a separator), `parents`,
+  `with_suffix` (`ValueError` for `""`, `.` or a separator; from 3.13
+  `with_stem("")` also raises when the name has a suffix), `parents`,
   `is_relative_to(other)`, `joinpath(*args)`, `/` and `"prefix" / path`,
   `root`/`drive`/`anchor` (`root` is `"/"` when the first segment is empty;
   `drive` is `""`), `match(path_pattern, *, case_sensitive=None)` (pathlib's
   right-anchored per-segment match; empty pattern → `ValueError`),
-  `full_match(pattern, *, case_sensitive=None)` (3.13 semantics),
-  `as_posix()`, `has_glob_pattern()`. `is_absolute()` is a stub raising
-  `NotImplementedError` unless a subclass overrides it.
+  `full_match(pattern, *, case_sensitive=None)` (3.13 semantics: the root is
+  a component of its own, so a rooted path needs a rooted pattern or a leading
+  `**` that reaches past it, and a lone `*` never matches it; `.` and empty
+  components of the pattern are ignored; a bracket expression never matches a
+  separator), `as_posix()`, `has_glob_pattern()`, `is_absolute()` (the path
+  has a root; a class whose rooted paths are not all absolute overrides it).
   - `__eq__`/`__hash__` default to `(type(self), tuple(self.segments))`: exact
     type, so a subclass never equals its base. `LocalPath`/`PosixPathname`/
     `WindowsPathname` keep `pathlib.PurePath` equality; `Uri` compares its URI
@@ -217,9 +221,12 @@ not by a checker.
   - `_symlink_to(target, target_is_directory=False)` (stub; receives a path
     object) / `symlink_to(target, target_is_directory=False, *, force=False)`
     — `force=True` unlinks an existing non-directory entry first (not atomic;
-    never removes a directory). A `str` target is normalized by the
-    overridable `_symlink_target()` and stored verbatim; relative stays
-    relative. Implemented by `LocalPath` and `SftpPath` only.
+    never removes a directory). A `str` target goes through the overridable
+    `_symlink_target()` and is stored verbatim; relative stays relative:
+    `LocalPath` hands the text on untouched (`./t/` stays `./t/`, as
+    `pathlib` stores it), `UriPath` does not parse it as a URI, and any other
+    class normalizes it with `with_segments()`, which keeps per-instance
+    state. Implemented by `LocalPath` and `SftpPath` only.
   - `copy(target, *, overwrite=False, follow_symlinks=True,
     preserve_metadata=True, recursive=False, ignore_error=None,
     progress=None) -> None`
@@ -299,8 +306,12 @@ not by a checker.
   strings), `is_dir()`/`is_file()` (`follow_symlinks=` before 3.13),
   `_symlink_to()`, `_chown()` (`shutil.chown`; `NotImplementedError` where
   `os.chown` is missing, i.e. Windows), plus pathlib_next's `exists`,
-  `rglob`, `read_text`, `write_text`, `symlink_to`. `exists()`/`is_*()`
-  return `False` for any `OSError`/`ValueError` on every Python version. A
+  `rglob`, `read_text`, `write_text`, `symlink_to`.
+  `exists()` returns `False` for any `OSError`/`ValueError` on every Python
+  version; `is_dir()`, `is_file()`, `is_fifo()`, `is_socket()`,
+  `is_block_device()` and `is_char_device()` are stdlib's: before 3.13 they
+  raise for an error other than ENOENT, ENOTDIR, EBADF or ELOOP (a
+  `PermissionError` from `stat()`, say), from 3.13 they return `False`. A
   stdlib `pathlib.Path` is not a `pathlib_next.Path`, and `MemPath`/`Uri`/
   `UriPath` are not stdlib paths.
 - **`PosixPathname`** / **`WindowsPathname`** — pure classes over
@@ -320,7 +331,7 @@ not by a checker.
   - `open()` supports `r`, `w`, `x`, `a` (binary or text); `+` modes →
     `NotImplementedError`. Writes are visible after `flush()`/`close()`.
   - Not implemented (`NotImplementedError`): `relative_to()`,
-    `is_absolute()`, `rename()` (`move()` copies), `chmod()`, `symlink_to()`.
+    `rename()` (`move()` copies), `chmod()`, `symlink_to()`.
   - A `str` destination to `copy()`/`move()` stays on the same backend.
 - **`MemPathBackend(dict)`** — storage: `dict` value = directory,
   `bytearray` (`MemFile`, carrying `mtime`) = file. Pass one instance as

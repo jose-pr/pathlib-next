@@ -327,6 +327,10 @@ class LocalPath(
         # available on every supported Python version.
         return _proto.Path.move(self, target, overwrite=overwrite)
 
+    def _symlink_target(self, target):
+        # pathlib stores the text it is given: "./t/" stays "./t/".
+        return target
+
     def _symlink_to(
         self, target: _proto.Path | str, target_is_directory: bool = False
     ) -> None:
