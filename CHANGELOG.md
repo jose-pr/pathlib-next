@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the path, hashes alike, and for a URI path is placed on the same filesystem.
   An implementation whose paths cannot pickle sets `supports_pickle = False`
   on its test class and the test skips.
+- **`Uri(0)`, `Uri(5)` and other falsy non-text arguments raise `TypeError`.**
+  Only `None` and empty text are the empty URI; `Uri(0)` or `Uri([])` used to
+  be silently the empty URI, and `Uri(5)` said it got `NoneType`. The message
+  now names the type that was passed. Pass `None` or `""` for an empty part.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -364,6 +368,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the URI's query; `stat().st_size` was short too. RFC 2397 has no query, so
   the query is part of the payload (decoded like the path) and the full text is
   read. A `#` still starts the fragment.
+- **`with_path()` and `with_segments()` build a URI that prints.** On a URI with
+  an authority `with_path("y")` and `with_segments("y")` returned a path
+  without its leading `/`, and `repr()`, `hash()` and `==` of the result raised
+  `ValueError`; the slash is now added as the constructor adds it. `with_segments()`
+  and `with_path()` accept `bytes`, `PurePath` and `os.PathLike` too, so
+  `samefile(pathlib.Path(...))` no longer raises `TypeError`. A `str` given to
+  `samefile()` is still a path, not URI text.
+- **`Uri.query` is always a `Query` and `fragment` always a `str`.**
+  `Uri("http://h/x").query` was `None` (so `.query.to_dict()` raised
+  `AttributeError`) while the same URI joined with a name had `""`; both are
+  now an empty `Query` and `""`. `repr()` of a URI whose parts were never read
+  showed `<pathlib_next.uri.Uri object at 0x...>`; it shows the URI. An
+  explicit second initialization of a URI with other parts (`with_source()`
+  does one) left `as_uri()` and `normalized_path` of the old parts in their
+  caches, and one with the same parts reset the caches another thread had
+  filled; the first now clears every cache and the second none.
+- **`Source` slices and `Source.from_str("file:")` equals what a parse gives.**
+  `source[0:2]` raised `TypeError`; it is the tuple slice. `from_str("file:")`
+  had host `None` where `Uri("file:").source` has `""`, so the two compared
+  unequal.
 
 ## [0.9.12] - 2026-10-08
 

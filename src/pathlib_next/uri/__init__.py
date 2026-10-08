@@ -39,6 +39,7 @@ from .source import (
 UriLike: TypeAlias = "str | Uri | os.PathLike"
 
 _NOSOURCE = Source(None, None, None, None)
+_NO_QUERY = Query("")
 
 #: An RFC 3986 scheme followed by its colon, used to tell a URI destination
 #: from a path one (see `_looks_like_uri`).
@@ -139,6 +140,20 @@ def _remove_dots(path: str, scheme: "str | None") -> str:
     return _remove_dot_segments(path, drive=scheme == "file" and os.name == "nt")
 
 
+def _segment_text(item) -> str:
+    """The text of one `with_segments()` element."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, bytes):
+        return item.decode()
+    if isinstance(item, (_pathlib.PurePath, Pathname)):
+        return item.as_posix()
+    path = os.fspath(item)
+    if isinstance(path, bytes):
+        path = path.decode()
+    return _pathlib.PurePath(path).as_posix()
+
+
 def _has_dot_segment(path: str) -> bool:
     # A "." or ".." segment starts with a dot right after a "/" or at the
     # start; a cheap superset test that decides whether to run the real one.
@@ -185,7 +200,7 @@ class Uri(Pathname):
             return
         _uris: list[str | Uri] = []
         for uri in uris:
-            if not uri:
+            if uri is None or (isinstance(uri, (str, bytes)) and not uri):
                 uri = ""
             if isinstance(uri, Uri):
                 _uris.append(uri)
@@ -218,7 +233,7 @@ class Uri(Pathname):
                     raise TypeError(
                         "argument should be a str or an os.PathLike "
                         "object where __fspath__ returns a str, "
-                        f"not {type(path).__name__!r}"
+                        f"not {type(uri).__name__!r}"
                     )
                 # Only __fspath__ is guaranteed here -- posix-normalize the
                 # string itself rather than assuming an as_posix() method.
@@ -345,10 +360,26 @@ class Uri(Pathname):
         # `_initiated` is set LAST: the properties return the raw slots as
         # soon as it is truthy, so a thread reading a lazily parsed Uri
         # during another thread's first parse saw `path`/`source` as None.
+        if query.__class__ is not Query:
+            query = Query(query) if query else _NO_QUERY
+        fragment = fragment or ""
+        if (
+            self._initiated
+            and path == self._path
+            and fragment == self._fragment
+            and query == self._query
+            and source == self._source
+        ):
+            # A second thread finishing its own first parse stores what is
+            # already there: resetting the caches would undo the first
+            # thread's, and a reader between the two would find them empty.
+            return
         self._source = source
         self._path = path
         self._query = query
         self._fragment = fragment
+        self._uri = None
+        self._normalized_path = None
         self._segments_cache = None
         self._suffix_cache = None
         self._stem_cache = None
@@ -596,9 +627,10 @@ class Uri(Pathname):
         raise NotImplementedError(f"host_fspath for {self.source.scheme}")
 
     def __repr__(self):
-        if self._initiated:
+        try:
             return "{}({!r})".format(type(self).__name__, str(self))
-        else:
+        except Exception:
+            # A URI that does not parse still has to print.
             return super().__repr__()
 
     def as_uri(self, /, sanitize=False):
@@ -670,20 +702,25 @@ class Uri(Pathname):
         """Return a new URI with the source replaced."""
         return self._from_parsed_parts(source, self.path, self.query, self.fragment)
 
-    def with_segments(self, *segments: str):
-        """Return a new URI with the path segments replaced."""
+    def with_segments(self, *segments: "str | os.PathLike"):
+        """Return a new URI with the path segments replaced.
+
+        The segments are the spelling `segments` returns (a leading `""` is
+        the root), joined with `/`; an element may also be `bytes`, a
+        `PurePath`, a `Pathname` or an `os.PathLike`, whose posix text is
+        used."""
         if not segments:
             return self.with_path("")
-        return self.with_path("/".join(segments))
+        return self.with_path("/".join(_segment_text(item) for item in segments))
 
     def with_path(self, path: str | Pathname):
-        """Return a new URI with the path replaced."""
-        return self._from_parsed_parts(
-            self.source,
-            path.as_posix() if isinstance(path, Pathname) else path,
-            self.query,
-            self.fragment,
-        )
+        """Return a new URI with the path replaced; under an authority a
+        relative path gets the leading `/` the constructor gives it."""
+        if not isinstance(path, str):
+            path = _segment_text(path)
+        if path and not path.startswith("/") and self._has_authority():
+            path = "/" + path
+        return self._from_parsed_parts(self.source, path, self.query, self.fragment)
 
     def with_query(self, query: str):
         """Return a new URI with the query replaced.
@@ -699,26 +736,30 @@ class Uri(Pathname):
         """Return a new URI with the fragment replaced."""
         return self._from_parsed_parts(self.source, self.path, self.query, fragment)
 
+    # The cached properties return the local they computed, never the slot
+    # read back: another thread's `_init` may have reset it in between.
     @property
     def segments(self):
-        if self._segments_cache is None:
-            if not self.path:
-                self._segments_cache = ()
-            else:
-                self._segments_cache = tuple(self.path.split("/"))
-        return self._segments_cache
+        segments = self._segments_cache
+        if segments is None:
+            path = self.path
+            segments = tuple(path.split("/")) if path else ()
+            self._segments_cache = segments
+        return segments
 
     @property
     def suffix(self) -> str:
-        if self._suffix_cache is None:
-            self._suffix_cache = _name_suffix(self.name)
-        return self._suffix_cache
+        suffix = self._suffix_cache
+        if suffix is None:
+            suffix = self._suffix_cache = _name_suffix(self.name)
+        return suffix
 
     @property
     def stem(self) -> str:
-        if self._stem_cache is None:
-            self._stem_cache = _name_stem(self.name)
-        return self._stem_cache
+        stem = self._stem_cache
+        if stem is None:
+            stem = self._stem_cache = _name_stem(self.name)
+        return stem
 
     @property
     def parent(self):

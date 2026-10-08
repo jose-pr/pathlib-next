@@ -428,8 +428,9 @@ not by a checker.
 ## URIs (`pathlib_next.uri`, `uri` extra)
 
 - **`Uri(*uris, **options)`** — pure RFC 3986 URI, parsed lazily. Arguments
-  (`str`, `bytes`, `Uri`, `pathlib`/`pathlib_next` paths, `os.PathLike`) join
-  right to left like `joinpath` (an absolute one restarts); this is not RFC
+  (`str`, `bytes`, `Uri`, `pathlib`/`pathlib_next` paths, `os.PathLike`;
+  `None` and `""` are the empty URI, anything else is a `TypeError` naming its
+  type) join right to left like `joinpath` (an absolute one restarts); this is not RFC
   3986 reference resolution (`Uri("http://h/d") / "x"` is `http://h/d/x`),
   but the dot segments of the joined path are removed as RFC 3986 5.2.4
   says: `Uri("http://h/d/", "../x")`, `Uri("http://h/d/") / "../x"`,
@@ -451,15 +452,20 @@ not by a checker.
     dropped. Dot segments are removed from the joined result either way, but
     a `%2e%2e` in a `str` key is a literal name.
   - Properties: `source -> Source`, `path -> str` (percent-decoded),
-    `query -> Query` (**percent-encoded as received**, sent unchanged),
-    `fragment -> str`, `parts -> (source, path, query, fragment)` (not path
+    `query -> Query` (**percent-encoded as received**, sent unchanged; empty
+    when there is none), `fragment -> str` (`""` when there is none),
+    `parts -> (source, path, query, fragment)` (not path
     segments; use `segments`), `normalized_path`, `segments`, `parent`
     (`http://h/a` → `http://h/`; a trailing `/` is kept, so
     `Uri("http://h/d/").name == ""`).
   - Methods: `as_uri(sanitize=False)`, `with_source()`, `with_path()`,
     `with_segments()`, `with_query(str | mapping | pairs)` (a `str` is taken as
     already encoded), `with_fragment()`; `with_name`/`with_suffix`/`with_stem`
-    keep query and fragment. `is_absolute()` (path starts with `/`),
+    keep query and fragment. `with_path(path)` gives a relative path under an
+    authority the leading `/` the constructor gives it; `with_segments(*segments)`
+    joins the spelling `segments` returns (a leading `""` is the root) with `/`,
+    and an element may be `str`, `bytes`, a `PurePath` or an `os.PathLike`.
+    `is_absolute()` (path starts with `/`),
     `is_relative_to(other)`, `relative_to(other, *, walk_up=False)`
     (`s3://b`/`http://h` count as the root), `is_local()`
     (`Source.is_local()`), `as_posix()` (`user@host:path` when a host is
