@@ -17,6 +17,7 @@ import weakref as _weakref
 import netimps as _netimps
 
 from ... import utils as _utils
+from ...utils._commit import _CommitOnClose
 from ...utils.stat import FileStat
 from .. import Source, Uri, UriPath
 
@@ -310,49 +311,6 @@ def _facts_mode(facts: dict, is_dir: bool) -> "int | None":
     else:
         bits = (0o444 if "r" in perm else 0) | (0o200 if perm & set("aw") else 0)
     return kind | bits
-
-
-class _FtpWriteStream(_io.BytesIO):
-    """Buffers the whole write in memory, uploads on close() via
-    STOR/APPE. Simple and works with any ftplib client, at the cost of
-    holding the full file content in memory for the duration of the write.
-
-    The connection is looked up at close(), not captured at open(): a write
-    that outlasts the server's idle timeout still lands, on a reconnected
-    session. With `initial` (`open("r+")`) the buffer starts with the
-    file's content at position 0 and is uploaded only if it was modified."""
-
-    def __init__(
-        self, path: "FtpPath", append: bool = False, initial: "bytes | None" = None
-    ):
-        super().__init__(b"" if initial is None else initial)
-        self._path = path
-        self._cmd = "APPE" if append else "STOR"
-        self._dirty = initial is None
-
-    def write(self, data):
-        self._dirty = True
-        return super().write(data)
-
-    def writelines(self, lines):
-        self._dirty = True
-        return super().writelines(lines)
-
-    def truncate(self, size=None):
-        self._dirty = True
-        return super().truncate(size)
-
-    def close(self):
-        if self.closed:
-            return
-        try:
-            if self._dirty:
-                self.seek(0)
-                self._path._store(self._cmd, self)
-        finally:
-            # Closed even when the upload fails, so `IOBase.__del__` does not
-            # retry it (over newer content) at garbage collection.
-            super().close()
 
 
 class FtpPath(UriPath):
@@ -703,7 +661,7 @@ class FtpPath(UriPath):
                 raise self._translate(error, self._is_a_directory) from error
             if mode == "r+":
                 # Read-modify-write: what is written is uploaded on close.
-                return _FtpWriteStream(self, initial=buf.getvalue())
+                return self._upload_on_close("STOR", initial=buf.getvalue())
             buf.seek(0)
             # Read-only, like a local file opened "rb": a write raises
             # instead of landing in a buffer nobody uploads.
@@ -712,7 +670,19 @@ class FtpPath(UriPath):
             raise NotImplementedError(f"open(mode={mode!r})")
         if mode == "x" and self.exists():
             raise FileExistsError(self)
-        return _FtpWriteStream(self, append=(mode == "a"))
+        return self._upload_on_close("APPE" if mode == "a" else "STOR")
+
+    def _upload_on_close(self, cmd: str, initial: "bytes | None" = None):
+        """A write buffer that uploads with `cmd` (STOR/APPE) when it is
+        closed. The connection is looked up then, not when the file is opened:
+        a write that outlasts the server's idle timeout still lands, on a
+        reconnected session."""
+
+        def upload(buffer):
+            buffer.seek(0)
+            self._store(cmd, buffer)
+
+        return _CommitOnClose(upload, initial)
 
     def _store(self, cmd: str, fileobj) -> None:
         """Upload `fileobj` with STOR/APPE on a live connection."""
