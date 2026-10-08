@@ -388,7 +388,8 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
     those) is loaded read-only, and `hostkeypolicy` (default
     `paramiko.RejectPolicy()`) decides what happens to a key found in none
     of them. A key that differs from a known one always raises
-    `paramiko.BadHostKeyException`. **Opt-out**, in code only:
+    `SftpHostKeyError`, as one the policy refuses does. **Opt-out**, in code
+    only:
     `SftpBackend(connect_opts, paramiko.AutoAddPolicy(), known_hosts=None)`
     accepts any server key -- a network man-in-the-middle then receives the
     URI password.

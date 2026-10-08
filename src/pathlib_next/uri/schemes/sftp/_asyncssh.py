@@ -867,7 +867,7 @@ class AsyncsshSftpBackend(_checkfile.CheckFileSftpBackend):
 
     Host keys are verified by default: asyncssh checks the server key
     against `~/.ssh/known_hosts` and the ssh_config's `UserKnownHostsFile`,
-    and an unknown or changed key fails the connection. **Opt-out**, in code
+    and an unknown or changed key raises `SftpHostKeyError`. **Opt-out**, in code
     only: `AsyncsshSftpBackend(connect_opts={"known_hosts": None})` accepts
     any server key -- a network man-in-the-middle then receives the URI
     password. Any other asyncssh `known_hosts` value (a file, a list of
