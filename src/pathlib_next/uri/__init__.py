@@ -1343,7 +1343,14 @@ class UriPath(Uri, Path):
             # Given, or nothing to carry: the usual case before any I/O.
             inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
             if "backend" not in kwargs:
-                inst._derived_cell = self._family_for(source)
+                # A path that already has a family and stays on its own
+                # source hands the cell on without asking again.
+                cell = self._derived_cell
+                inst._derived_cell = (
+                    cell
+                    if cell is not None and source is self._source
+                    else self._family_for(source)
+                )
         else:
             backend, derived = self._backend_for(source)
             if backend is not None:
