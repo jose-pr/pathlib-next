@@ -566,9 +566,14 @@ not by a checker.
   kept for 60 seconds for at most 256 hosts, so a miss does DNS.
 - **`Query(query, *, encoding="utf-8", separator="&")`** (`uri.query`) —
   `str` subclass holding the encoded query; built from a `str` (taken as
-  encoded), a mapping (a sequence value repeats the key) or `(key, value)`
-  pairs. `decode() -> list[tuple[str, str | None]]`, iteration yields the
-  decoded pairs, `to_dict(*, single=False)`.
+  encoded and kept byte for byte), a mapping (a sequence value repeats the
+  key) or `(key, value)` pairs, which are encoded so that `decode()` returns
+  what was given: `+`, `=`, the separator, `#`, `%` and white space are
+  escaped (`{"sig": "ab+cd=="}` is `sig=ab%2Bcd%3D%3D`).
+  `decode() -> list[tuple[str, str | None]]` follows RFC 3986, not
+  form-urlencoding: only `%XX` escapes are decoded and a `+` stays a plus
+  (`urllib.parse.parse_qsl` reads form text). Iteration yields the decoded
+  pairs, `to_dict(*, single=False)`.
 
 ## Built-in schemes (`pathlib_next.uri.schemes`)
 

@@ -350,6 +350,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   alive for the life of the process; an answer never changed even if an
   interface came or went. The answer is now kept per host for 60 seconds, for at
   most 256 hosts.
+- **A query built from a mapping or pairs escapes `+` and `=`.** `Query({"sig":
+  "ab+cd=="})` was `sig=ab+cd==`, which a form-style reader on the server takes
+  as `ab cd==`; a base64 signature or an ISO-8601 offset (`+00:00`) reached it
+  altered. It is now `sig=ab%2Bcd%3D%3D`, and `decode()` returns exactly what
+  the encoder was given for any text. A `str` is still kept byte for byte, and
+  `decode()` still follows RFC 3986: a `+` in received text stays a plus
+  (`urllib.parse.parse_qsl` reads form-encoded text as spaces). A program that
+  compared the encoded text of a query holding `+` or `=` in a value must expect
+  the escapes.
 
 ## [0.9.12] - 2026-10-08
 

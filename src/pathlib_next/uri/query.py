@@ -13,10 +13,12 @@ _SAFE_QUERY = "!$&'()*+,;=:@/?"
 def _querylist(
     items: _ty.Sequence[_ty.Tuple[str, _ty.Any]], sep: str, encoding: str
 ) -> bytes:
-    safe = _SAFE_QUERY.replace(sep, "")
-    # "=" ends a name: a literal one in a key must be escaped, or
-    # {"a=b": "c"} decodes back as ("a", "b=c").
-    name_safe = safe.replace("=", "")
+    # Escaped in every name and value: the separator; "=", which ends a name
+    # ({"a=b": "c"} would decode as ("a", "b=c")); and "+", which a
+    # form-urlencoded reader takes for a space (a base64 signature or a
+    # "+00:00" offset would arrive altered).
+    safe = _SAFE_QUERY.replace(sep, "").replace("=", "").replace("+", "")
+    name_safe = safe
     terms = []
     for key, value in items:
         name = _uritools.uriencode(key, name_safe, encoding)
@@ -46,9 +48,16 @@ class Query(str):
     dict/list of pairs and decoded back with `to_dict()`/iteration.
 
     The string is always the percent-encoded form: a `str` argument is
-    taken as already encoded (it is what `Uri.query` holds, as received),
-    a mapping or pair sequence is encoded here, and `decode()`/`to_dict()`
-    decode each name and value exactly once."""
+    taken as already encoded and kept byte for byte (it is what `Uri.query`
+    holds, as received), a mapping or pair sequence is encoded here, and
+    `decode()`/`to_dict()` decode each name and value exactly once.
+
+    Encoding escapes `+`, `=`, `&` (the separator), `#`, `%` and white space
+    in names and values, so what `decode()` returns is what was given.
+    `decode()` follows RFC 3986, not `application/x-www-form-urlencoded`:
+    only `%XX` escapes are decoded and a `+` stays a plus. A query written
+    by an HTML form (`q=a+b` for "a b") decodes as `a+b`; read that with
+    `urllib.parse.parse_qsl`."""
 
     __slots__ = ("_encoding", "_separator")
     SEPARATOR = "&"
