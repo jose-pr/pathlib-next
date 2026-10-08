@@ -12,16 +12,40 @@ from __future__ import annotations
 import functools as _functools
 import getpass as _getpass
 import glob as _glob
+import importlib as _importlib
 import ipaddress as _ipaddress
 import pathlib as _pathlib
 import re as _re
 import shlex as _shlex
 import unicodedata as _unicodedata
 
-#: Sentinel meaning "use the default SSH config location(s)". A bare ``object()``
-#: so it is distinct from ``None`` (explicitly no config) and from any real path.
-#: Shared by both backends; kept paramiko-free on purpose (see module docstring).
-_DEFAULT_SSH_CONFIG = object()
+
+class _Sentinel:
+    """A named value that is only ever equal to itself, and is still itself
+    after it has been pickled or copied (the module attribute it was bound to
+    is looked up again)."""
+
+    __slots__ = ("module", "name")
+
+    def __init__(self, module: str, name: str):
+        self.module = module
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"<{self.name}>"
+
+    def __reduce__(self):
+        return (_find_sentinel, (self.module, self.name))
+
+
+def _find_sentinel(module: str, name: str) -> "_Sentinel":
+    return getattr(_importlib.import_module(module), name)
+
+
+#: Sentinel meaning "use the default SSH config location(s)". Distinct from
+#: ``None`` (explicitly no config) and from any real path. Shared by both
+#: backends; kept paramiko-free on purpose (see module docstring).
+_DEFAULT_SSH_CONFIG = _Sentinel(__name__, "_DEFAULT_SSH_CONFIG")
 
 # OpenSSH's own limit (readconf.c READCONF_MAX_DEPTH).
 _INCLUDE_MAX_DEPTH = 16

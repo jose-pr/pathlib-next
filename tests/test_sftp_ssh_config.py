@@ -615,3 +615,101 @@ def test_an_included_match_all_applies_wherever_the_enclosing_block_does(
 
     assert _lookup(config, "here")["user"] == "from-match-all"
     assert "user" not in _lookup(config, "elsewhere")
+
+
+# --- the URI user in an asyncssh ProxyCommand ----------------------------------------
+
+_PROXY_WITH_USER = "Host *\n  ProxyCommand ssh -W %h:%p -l %r bastion\n"
+_PROXY_WITHOUT_USER = "Host *\n  ProxyCommand ssh -W %h:%p bastion\n"
+# A no-break space is one asyncssh turns into a plain space (SASLprep).
+_SPLITTING_USERS = [
+    "a -oProxyCommand=calc",
+    "a b",
+    "-oProxyCommand=x",
+    "a;b",
+    "a\u00a0b",
+]
+
+
+@needs_asyncssh
+@pytest.mark.parametrize("user", _SPLITTING_USERS)
+def test_asyncssh_refuses_a_user_its_proxy_command_would_pass_on(
+    user, tmp_path, connects
+):
+    config = _write(tmp_path / "config", _PROXY_WITH_USER)
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=config)
+
+    with pytest.raises(ValueError, match="refusing SFTP user"):
+        backend.client(Source("sftp", user, "example.invalid", None))
+
+    # Refused before asyncssh was given the user, so nothing was expanded.
+    assert connects == []
+
+
+@needs_asyncssh
+def test_asyncssh_would_split_the_proxy_command_at_a_user_with_a_space(tmp_path):
+    # What the refusal above prevents: asyncssh's own expansion of `%r`.
+    config = _write(tmp_path / "config", _PROXY_WITH_USER)
+
+    options = asyncssh.SSHClientConnectionOptions(
+        config=[config],
+        host="example.invalid",
+        port=22,
+        username="a -oProxyCommand=calc",
+        known_hosts=None,
+    )
+
+    assert "-oProxyCommand=calc" in options.proxy_command
+
+
+@needs_asyncssh
+def test_asyncssh_refuses_the_user_of_a_path_before_it_connects(tmp_path, connects):
+    config = _write(tmp_path / "config", _PROXY_WITH_USER)
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=config)
+    path = SftpPath("sftp://a%20-oProxyCommand=calc@example.invalid/x", backend=backend)
+
+    with pytest.raises(ValueError, match="refusing SFTP user"):
+        path.stat()
+
+    assert connects == []
+
+
+@needs_asyncssh
+@pytest.mark.parametrize("user", _SPLITTING_USERS)
+def test_asyncssh_accepts_such_a_user_when_the_config_does_not_use_it(
+    user, tmp_path, connects
+):
+    config = _write(tmp_path / "config", _PROXY_WITHOUT_USER)
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=config)
+
+    with pytest.raises(_Stopped):
+        backend.client(Source("sftp", user, "example.invalid", None))
+
+    ((_args, kwargs),) = connects
+    assert kwargs["username"] == user
+
+
+@needs_asyncssh
+def test_asyncssh_accepts_such_a_user_when_no_config_is_read(connects):
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=None)
+
+    with pytest.raises(_Stopped):
+        backend.client(Source("sftp", "a b", "example.invalid", None))
+
+    ((_args, kwargs),) = connects
+    assert kwargs["username"] == "a b"
+
+
+@needs_asyncssh
+@pytest.mark.parametrize("user", ["alice", "svc.account", "j_doe"])
+def test_asyncssh_passes_an_ordinary_user_through_a_proxy_command(
+    user, tmp_path, connects
+):
+    config = _write(tmp_path / "config", _PROXY_WITH_USER)
+    backend = backend_mod.AsyncsshSftpBackend(ssh_config=config)
+
+    with pytest.raises(_Stopped):
+        backend.client(Source("sftp", user, "example.invalid", None))
+
+    ((_args, kwargs),) = connects
+    assert kwargs["username"] == user

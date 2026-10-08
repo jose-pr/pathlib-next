@@ -984,11 +984,11 @@ def _paramiko_backend_with(monkeypatch, client):
 
 
 def test_paramiko_checksum_refusal_is_cached_for_the_connection(monkeypatch):
-    # sftp-check-file-openssh-extension-does-not-exist: OpenSSH answers
-    # SSH_FX_OP_UNSUPPORTED (paramiko: OSError without errno). Only the
-    # first file pays the open + request + close; later ones send nothing.
+    # OpenSSH answers SSH_FX_OP_UNSUPPORTED (paramiko raises
+    # NotImplementedError for that status). Only the first file pays the
+    # open + request + close; later ones send nothing.
     def unsupported():
-        raise OSError("Operation unsupported")
+        raise NotImplementedError("Operation unsupported")
 
     client = _CountingParamikoClient(unsupported)
     backend = _paramiko_backend_with(monkeypatch, client)

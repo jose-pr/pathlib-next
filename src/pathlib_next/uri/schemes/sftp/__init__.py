@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import atexit as _atexit
 import errno as _errno
+import gc as _gc
+import io as _io
 import os as _os
+import threading as _threading
 import typing as _ty
 import weakref as _weakref
 
 from .... import utils as _utils
 from ....path import _check_follow, _contains
 from ....utils.stat import FileStat
-from ... import _NOSOURCE, Source, Uri, UriPath
+from ... import _NOSOURCE, Source, Uri, UriPath, _same_authority
 
 #: SFTP clients on which `posix-rename@openssh.com` proved unavailable (the
 #: extension request failed and a plain rename then succeeded), so later
@@ -28,6 +32,56 @@ def _mark_posix_rename_unsupported(client) -> None:
         _NO_POSIX_RENAME[client] = True
     except TypeError:
         pass
+
+
+#: Files `SftpPath._open()` handed out for writing and nobody has closed.
+_UNCLOSED: "_weakref.WeakSet" = _weakref.WeakSet()
+_exit_hook_registered = False
+
+#: Longest, in seconds, the exit hook waits for the unclosed files to be
+#: written: a connection that has gone away must not hold the interpreter.
+_EXIT_GRACE = 5.0
+
+
+def _track_unclosed(file) -> None:
+    global _exit_hook_registered
+    try:
+        _UNCLOSED.add(file)
+    except TypeError:
+        # A file that cannot be weakly referenced is not ours to flush.
+        return
+    if not _exit_hook_registered:
+        _exit_hook_registered = True
+        _atexit.register(_close_unclosed)
+
+
+def _close_unclosed() -> None:
+    """Write out the files left open at exit. It runs before the interpreter
+    stops its threads, while the connections can still be used; at finalization
+    it would be too late (the asyncssh loop no longer runs, and paramiko's
+    transport has stopped)."""
+
+    def close_all() -> None:
+        for file in list(_UNCLOSED):
+            # A text wrapper holds characters the file has not seen yet.
+            for holder in _gc.get_referrers(file):
+                if isinstance(holder, _io.TextIOWrapper) and holder.buffer is file:
+                    try:
+                        holder.flush()
+                    except Exception:
+                        pass
+            try:
+                file.close()
+            except (ConnectionError, TimeoutError):
+                return
+            except Exception:
+                pass
+
+    worker = _threading.Thread(
+        target=close_all, name="pathlib_next-sftp-exit", daemon=True
+    )
+    worker.start()
+    worker.join(_EXIT_GRACE)
 
 
 class BaseSftpBackend(object):
@@ -100,11 +154,19 @@ class BaseSftpBackend(object):
 # The default-config sentinel is paramiko-free (lives in `_sshconfig`) so
 # importing this scheme never pulls paramiko in just to have the sentinel.
 from ._errors import SftpAuthenticationError, SftpHostKeyError  # noqa: F401
-from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host
+from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host, _Sentinel
 
 # "No ssh_config argument given" -- distinct from _DEFAULT_SSH_CONFIG so a
 # later lazy `_init()` keeps a value captured at construction.
-_UNSET_SSH_CONFIG = object()
+_UNSET_SSH_CONFIG = _Sentinel(__name__, "_UNSET_SSH_CONFIG")
+
+
+def _same_config(a, b) -> bool:
+    """Whether two `ssh_config` values name the same configuration."""
+    return a is b or (
+        a is not _DEFAULT_SSH_CONFIG and b is not _DEFAULT_SSH_CONFIG and a == b
+    )
+
 
 # --- backend selection -----------------------------------------------------
 # Precedence, highest to lowest (each layer only consulted if the one above
@@ -231,7 +293,7 @@ class SftpPath(UriPath):
     server without that extension."""
 
     __SCHEMES = ("sftp",)
-    __slots__ = ("_ssh_config",)
+    __slots__ = ("_config",)
     _host_filesystem_path = True
 
     #: Class-level backend override, for a subclass to pin its own default
@@ -244,18 +306,63 @@ class SftpPath(UriPath):
 
     def __new__(cls, *args, ssh_config=_UNSET_SSH_CONFIG, **kwargs):
         # A direct `SftpPath(url, ssh_config=...)` parses lazily and never
-        # passes its keywords to `_init()`, so capture the value here.
+        # passes its keywords to `_init()`, so capture the value here. Without
+        # one, `_init()` takes it from the join segment the path inherits its
+        # backend from, once the path knows its endpoint.
         inst = super().__new__(cls, *args, **kwargs)
         if isinstance(inst, SftpPath):
-            if ssh_config is _UNSET_SSH_CONFIG:
-                # Inherit from a path segment, the way the backend is.
-                ssh_config = _DEFAULT_SSH_CONFIG
-                for segment in reversed(args):
-                    if isinstance(segment, SftpPath):
-                        ssh_config = segment._ssh_config
-                        break
-            inst._ssh_config = ssh_config
+            inst._config = ssh_config
         return inst
+
+    @property
+    def _ssh_config(self):
+        """The `ssh_config` of this path. A path still waiting to be parsed
+        takes it from the join it was made of when it is parsed."""
+        config = self._config
+        if config is _UNSET_SSH_CONFIG:
+            if self._raw_uris and not self._initiated:
+                self._load_parts()
+                config = self._config
+            if config is _UNSET_SSH_CONFIG:
+                return _DEFAULT_SSH_CONFIG
+        return config
+
+    @_ssh_config.setter
+    def _ssh_config(self, value) -> None:
+        self._config = value
+
+    def _config_for(self, source: Source):
+        """The `ssh_config` a path derived from this one at `source` has: this
+        one's on the same endpoint, else the default (a path on another host
+        takes neither this path's backend nor its configuration)."""
+        config = self._ssh_config
+        mine = self._source
+        if source is mine or _same_authority(source, mine):
+            return config
+        return _DEFAULT_SSH_CONFIG
+
+    def _joined_config(self, source: Source):
+        """The `ssh_config` of the join segment this path takes its backend or
+        shared slot from (`UriPath._inherit_backend()`), or the unset marker."""
+        winner = None
+        for segment, backend, _derived in reversed(self._backend_candidates or ()):
+            if isinstance(segment, SftpPath) and _same_authority(
+                segment.source, source
+            ):
+                if backend is not None:
+                    return segment._ssh_config
+                if winner is None:
+                    winner = segment
+        return _UNSET_SSH_CONFIG if winner is None else winner._ssh_config
+
+    def _own_family(self) -> None:
+        """Leave the connection family this path was derived into: it has an
+        `ssh_config` of its own, so a backend built for the others (or one
+        they will build) is not its backend."""
+        if self._backend_derived:
+            self._backend = None
+            self._backend_derived = None
+        self._derived_cell = None
 
     def _initbackend(self):
         cls = self._default_backend_cls or _resolve_default_backend_cls()
@@ -268,8 +375,30 @@ class SftpPath(UriPath):
         return {"ssh_config": self._ssh_config}
 
     def _from_parsed_parts(self, source, path, query, fragment, /, **kwargs):
-        kwargs.setdefault("ssh_config", self._ssh_config)
-        return super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+        given = kwargs.get("ssh_config", _UNSET_SSH_CONFIG)
+        kwargs["ssh_config"] = (
+            self._config_for(source) if given is _UNSET_SSH_CONFIG else given
+        )
+        inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+        if (
+            given is not _UNSET_SSH_CONFIG
+            and "backend" not in kwargs
+            and not _same_config(given, self._config_for(source))
+        ):
+            inst._own_family()
+        return inst
+
+    def with_source(self, source):
+        inst = super().with_source(source)
+        if isinstance(inst, SftpPath):
+            inst._ssh_config = self._config_for(source)
+        return inst
+
+    def _coerce_target(self, target):
+        destination = super()._coerce_target(target)
+        if isinstance(destination, SftpPath) and destination is not self:
+            destination._ssh_config = self._config_for(destination.source)
+        return destination
 
     def _init(
         self,
@@ -283,15 +412,21 @@ class SftpPath(UriPath):
         **kwargs,
     ):
         if ssh_config is not _UNSET_SSH_CONFIG:
-            self._ssh_config = ssh_config
-        return super()._init(
-            source,
-            path,
-            query,
-            fragment,
-            backend=backend,
-            **kwargs,
-        )
+            self._config = ssh_config
+        given = self._config
+        joined = self._joined_config(source)
+        if given is _UNSET_SSH_CONFIG:
+            self._config = (
+                _DEFAULT_SSH_CONFIG if joined is _UNSET_SSH_CONFIG else joined
+            )
+        super()._init(source, path, query, fragment, backend=backend, **kwargs)
+        if (
+            backend is None
+            and given is not _UNSET_SSH_CONFIG
+            and joined is not _UNSET_SSH_CONFIG
+            and not _same_config(given, joined)
+        ):
+            self._own_family()
 
     @property
     def _sftpclient(self):
@@ -399,9 +534,12 @@ class SftpPath(UriPath):
 
     def _open(self, mode="r", buffering=-1):
         try:
-            return self._sftpclient.open(
+            file = self._sftpclient.open(
                 self.path, self.backend._wire_open_mode(mode), buffering
             )
+            if any(char in mode for char in "wax+"):
+                _track_unclosed(file)
+            return file
         except OSError as error:
             # SFTPv3 has no dedicated "already exists" status code -- an
             # O_EXCL ("x" mode) failure comes back as a generic failure,
@@ -455,7 +593,22 @@ class SftpPath(UriPath):
         if not follow_symlinks:
             raise NotImplementedError("chown(follow_symlinks=False)")
         if uid is None or gid is None:
-            current = self.stat()
+            current = self._sftpclient.stat(self.path)
+            unknown = [
+                name
+                for name, wanted in (("uid", uid), ("gid", gid))
+                if wanted is None
+                and (
+                    getattr(current, f"st_{name}") is None
+                    or not getattr(current, f"{name}_known", True)
+                )
+            ]
+            if unknown:
+                raise NotImplementedError(
+                    f"chown() cannot leave the {' and '.join(unknown)} of {self} "
+                    "unchanged: the server reports it by name or not at all, "
+                    "and the request would have to name one"
+                )
             uid = current.st_uid if uid is None else uid
             gid = current.st_gid if gid is None else gid
         return self._sftpclient.chown(self.path, uid, gid)

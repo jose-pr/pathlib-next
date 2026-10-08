@@ -19,7 +19,7 @@ from ... import Source
 from .... import utils as _utils
 from ....utils.stat import FileStat
 from . import _checkfile, _errors
-from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host
+from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host, _check_proxy_user
 
 # --- shared background event loop -------------------------------------
 # asyncssh is asyncio-only end to end (connect(), every SFTPClient method,
@@ -303,6 +303,12 @@ _FILEXFER_TYPE_TO_S_IF = {
 }
 
 
+def _numeric_id(number: "int | None", name: "str | None") -> "int | None":
+    if number is not None:
+        return number
+    return int(name) if name and name.isdigit() else None
+
+
 class _StatAdapter:
     """Adapts an asyncssh `SFTPAttrs` to the `st_*`-shaped interface
     `FileStat.from_stat()` expects. Verified empirically (in-process
@@ -339,13 +345,24 @@ class _StatAdapter:
     def st_nlink(self) -> int:
         return self._attrs.nlink or 1
 
+    # An SFTP v4 server names the owner and the group ("owner"/"group") and
+    # leaves uid/gid out: a numeric name is the id, any other leaves it 0 here
+    # and `uid_known`/`gid_known` False, so `SftpPath._chown()` never sends it.
     @property
     def st_uid(self) -> int:
-        return self._attrs.uid or 0
+        return _numeric_id(self._attrs.uid, self._attrs.owner) or 0
 
     @property
     def st_gid(self) -> int:
-        return self._attrs.gid or 0
+        return _numeric_id(self._attrs.gid, self._attrs.group) or 0
+
+    @property
+    def uid_known(self) -> bool:
+        return _numeric_id(self._attrs.uid, self._attrs.owner) is not None
+
+    @property
+    def gid_known(self) -> bool:
+        return _numeric_id(self._attrs.gid, self._attrs.group) is not None
 
     @property
     def st_size(self) -> int:
@@ -418,6 +435,13 @@ class _SyncSftpFile(_io.RawIOBase):
     @_reraise_sftp_errors
     def write(self, data: bytes) -> int:
         return _run(self._afile.write(bytes(data)), None)
+
+    @_reraise_sftp_errors
+    def truncate(self, size: "int | None" = None) -> int:
+        if size is None:
+            size = self.tell()
+        _run(self._afile.truncate(size), self._timeout)
+        return size
 
     @_reraise_sftp_errors
     def seek(self, offset: int, whence: int = 0) -> int:
@@ -633,8 +657,17 @@ class _SyncSftpClient:
     def check_file(self, file: "_SyncSftpFile", algorithm: str) -> bytes:
         """The `check-file-handle` reply payload for `file`, an unbuffered
         handle from `open()`. The server hashes the whole file before it
-        answers, so the duration grows with the data: no wall-clock bound."""
-        return _run(_acheck_file(self._aclient, file._afile.handle, algorithm), None)
+        answers, so the duration grows with the data: no wall-clock bound.
+        A reply of a type the request does not have is
+        `NotImplementedError`, as an unsupported operation is."""
+        try:
+            return _run(
+                _acheck_file(self._aclient, file._afile.handle, algorithm), None
+            )
+        except _asyncssh.SFTPBadMessage:
+            raise NotImplementedError(
+                f"{_checkfile.EXTENSION}: unexpected reply type"
+            ) from None
 
 
 # --- connection cache --------------------------------------------------
@@ -762,6 +795,30 @@ class _ConnectionCache:
 _CACHE = _ConnectionCache()
 
 
+def _check_user_for_proxy(host: str, user: str, kwargs: "dict[str, _ty.Any]") -> None:
+    """Refuse `user` when asyncssh would put it into a ProxyCommand's argv.
+
+    asyncssh expands the ssh_config `ProxyCommand` tokens (`%r` is the user)
+    and splits the result into arguments afterwards, so a user holding white
+    space or a leading `-` adds arguments. A server accepts such a user, so
+    only the one the configuration for this host would pass on is refused:
+    the command is resolved with this user and with a safe one, and a
+    difference means the user is in it.
+    """
+    try:
+        _check_proxy_user(user)
+        return
+    except ValueError as refusal:
+        refused = refusal
+    options = {"host": host, "known_hosts": None, "client_keys": None}
+    for key in ("config", "port"):
+        if key in kwargs:
+            options[key] = kwargs[key]
+    resolve = _functools.partial(_asyncssh.SSHClientConnectionOptions, **options)
+    if resolve(username=user).proxy_command != resolve(username="user").proxy_command:
+        raise refused from None
+
+
 async def _aconnect(
     source: "Source",
     connect_opts: "_ty.Mapping[str, _ty.Any] | None" = None,
@@ -775,14 +832,15 @@ async def _aconnect(
     kwargs: "dict[str, _ty.Any]" = {}
     if connect_opts:
         kwargs.update(connect_opts)
-    if user:
-        kwargs["username"] = user
-    if password:
-        kwargs["password"] = password
     if source.port:
         # Only a port the URI names: an explicit one outranks the ssh_config
         # `Port`, which asyncssh applies when none is passed.
         kwargs["port"] = source.port
+    if user:
+        _check_user_for_proxy(str(source.host), user, kwargs)
+        kwargs["username"] = user
+    if password:
+        kwargs["password"] = password
     conn = await _asyncssh.connect(str(source.host), **kwargs)
     try:
         # asyncssh currently supports SFTP protocol versions 3 and 4 here --
@@ -894,9 +952,8 @@ class AsyncsshSftpBackend(_checkfile.CheckFileSftpBackend):
     def _check_file_request(
         self, client: _SyncSftpClient, file: "_SyncSftpFile", algorithm: str
     ) -> bytes:
-        # SSH_FX_OP_UNSUPPORTED arrives as NotImplementedError and an
-        # unexpected reply type as an OSError without an errno (both via
-        # `_translate`): `_checkfile.refused()` reads either as a refusal.
+        # SSH_FX_OP_UNSUPPORTED and an unexpected reply type both arrive as
+        # NotImplementedError, which `_checkfile.refused()` reads as a refusal.
         return client.check_file(file, algorithm)
 
     @classmethod

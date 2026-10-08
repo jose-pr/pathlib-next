@@ -22,6 +22,7 @@ from . import _checkfile, _errors
 # code did ``from ._paramiko import _DEFAULT_SSH_CONFIG``).
 from ._sshconfig import (
     _DEFAULT_SSH_CONFIG,
+    _Sentinel,
     _check_host,
     _expand_includes,
     _expand_proxy_command,
@@ -30,7 +31,7 @@ from ._sshconfig import (
 
 #: Sentinel for `SftpBackend(known_hosts=...)`: the user's `~/.ssh/known_hosts`
 #: plus every `UserKnownHostsFile` the ssh_config names for the host.
-_DEFAULT_KNOWN_HOSTS = object()
+_DEFAULT_KNOWN_HOSTS = _Sentinel(__name__, "_DEFAULT_KNOWN_HOSTS")
 
 
 class _SSHConfig(_paramiko.SSHConfig):
@@ -86,8 +87,9 @@ def _text(data: bytes) -> str:
 
 
 class _SFTPFile(_paramiko.SFTPFile):
-    """paramiko's file with the two `io` behaviours it lacks: `write()`
-    returns the number of bytes accepted, and `fileno()` says it has none."""
+    """paramiko's file with the `io` behaviours it lacks: `write()` returns
+    the number of bytes accepted, `truncate()` takes no size and flushes, and
+    `fileno()` says it has none."""
 
     def write(self, data):
         count = (
@@ -97,6 +99,15 @@ class _SFTPFile(_paramiko.SFTPFile):
         )
         super().write(data)
         return count
+
+    def truncate(self, size=None):
+        # `io` semantics: no size means the current position, and what was
+        # written is on the server before it is cut.
+        self.flush()
+        if size is None:
+            size = self.tell()
+        super().truncate(size)
+        return size
 
     def fileno(self):
         raise _io.UnsupportedOperation("fileno")
@@ -514,8 +525,8 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
     def _check_file_request(self, client, file, algorithm: str) -> bytes:
         # Not part of paramiko's public API -- the same low-level
         # `_request(CMD_EXTENDED, ...)` primitive paramiko itself uses for
-        # `posix-rename@openssh.com`. A failure status arrives as OSError,
-        # without an errno for SSH_FX_OP_UNSUPPORTED.
+        # `posix-rename@openssh.com`. SSH_FX_OP_UNSUPPORTED arrives as
+        # NotImplementedError, any other failure status as OSError.
         msg_type, msg = client._request(
             _paramiko_sftp.CMD_EXTENDED,
             _checkfile.EXTENSION,

@@ -12,7 +12,6 @@ primitive. Neither SSH library is imported here."""
 
 from __future__ import annotations
 
-import hashlib as _hashlib
 import struct as _struct
 import threading as _thread
 import typing as _ty
@@ -30,6 +29,18 @@ EXTENSION = "check-file-handle"
 #: PathSyncer's default, so the common case resolves in one round trip).
 ALGORITHMS = ("md5", "sha1", "sha256", "sha384", "sha512")
 
+#: Bytes of the digest each algorithm the draft names produces. A reply for
+#: any other name is not a digest this module can check, so none is requested.
+DIGEST_SIZES = {
+    "md5": 16,
+    "sha1": 20,
+    "sha224": 28,
+    "sha256": 32,
+    "sha384": 48,
+    "sha512": 64,
+    "crc32": 4,
+}
+
 #: The request's fixed fields after the handle and the algorithm list:
 #: uint64 start-offset, uint64 length (0: to the end of the file) and uint32
 #: block-size (0: one hash over the whole range).
@@ -37,47 +48,52 @@ START_OFFSET = 0
 LENGTH = 0
 BLOCK_SIZE = 0
 
-# Per-connection record of which algorithms the server supports -- keyed by
-# the backend's client object itself (WeakKeyDictionary, not id(): a plain
-# dict keyed by id() risks a stale hit if a client is GC'd and a new,
-# unrelated object gets the same id(), a real risk since both backends'
-# connection caches evict and replace clients over a long-running process).
-# A reconnect (a new client object) starts with a clean slate. Neither
-# library exposes the extension list the server sent during version
-# negotiation, so an actual attempt against a real file is the only source
-# of truth. An empty set is a definitive "unsupported": `checksum()` then
-# raises NotImplementedError without sending anything.
+# What one connection has shown about the extension, keyed by the backend's
+# client object itself (WeakKeyDictionary, not id(): a plain dict keyed by
+# id() risks a stale hit if a client is GC'd and a new, unrelated object gets
+# the same id(), a real risk since both backends' connection caches evict and
+# replace clients over a long-running process). A reconnect (a new client
+# object) starts with a clean slate. Neither library exposes the extension
+# list the server sent during version negotiation, so an actual attempt
+# against a real file is the only source of truth.
 _SUPPORT_CACHE: "_weakref.WeakKeyDictionary" = _weakref.WeakKeyDictionary()
 _SUPPORT_LOCK = _thread.Lock()
 
 
-def _cached_support(client) -> "frozenset[str] | None":
-    with _SUPPORT_LOCK:
-        try:
-            return _SUPPORT_CACHE.get(client)
-        except TypeError:
-            return None
+class _Support:
+    """The algorithms a connection has produced a digest for, the ones the
+    server answered "operation unsupported" for, and whether the probe of
+    `supported_checksums()` has run. A refusal is about one algorithm: a
+    server that has the extension may still refuse one (a FIPS build and
+    md5), and the same request for another file may work."""
+
+    __slots__ = ("produced", "refused", "probed")
+
+    def __init__(self) -> None:
+        self.produced: "set[str]" = set()
+        self.refused: "set[str]" = set()
+        self.probed = False
 
 
-def _cache_support(client, supported: "frozenset[str]") -> None:
+def _support(client) -> _Support:
     with _SUPPORT_LOCK:
         try:
-            _SUPPORT_CACHE[client] = supported
+            record = _SUPPORT_CACHE.get(client)
+            if record is None:
+                record = _SUPPORT_CACHE[client] = _Support()
+            return record
         except TypeError:
-            pass
+            # A client that cannot be weakly referenced keeps no record.
+            return _Support()
 
 
 def refused(error: BaseException) -> bool:
     """Whether `error`, raised by the extension request itself, says the
-    server does not implement it: `NotImplementedError` (asyncssh's
-    SSH_FX_OP_UNSUPPORTED, or a reply that is not SSH_FXP_EXTENDED_REPLY) or
-    an `OSError` without an errno -- paramiko renders SSH_FX_OP_UNSUPPORTED
-    and every other status without a POSIX equivalent that way. A status
-    with an errno (the file vanished, permission denied) says nothing about
-    the extension."""
-    if isinstance(error, NotImplementedError):
-        return True
-    return isinstance(error, OSError) and error.errno is None
+    server does not implement it for this algorithm: `NotImplementedError`
+    (SSH_FX_OP_UNSUPPORTED, or a reply that is not SSH_FXP_EXTENDED_REPLY).
+    Any other failure -- the file vanished, permission denied, a bare
+    SSH_FX_FAILURE for this one file -- says nothing about the extension."""
+    return isinstance(error, NotImplementedError)
 
 
 def _read_string(data: bytes) -> "tuple[bytes, bytes]":
@@ -93,7 +109,13 @@ def parse_reply(payload: bytes, algorithm: str) -> str:
     """The hex digest in a `check-file` reply's payload (the bytes after the
     request id): `[string "check-file"] string algorithm`, then the raw hash
     as the rest of the packet. Raises `NotImplementedError` for any reply
-    that does not carry exactly one `algorithm` digest."""
+    that does not carry exactly one `algorithm` digest of the size that
+    algorithm has (`DIGEST_SIZES`)."""
+    expected = DIGEST_SIZES.get(algorithm)
+    if expected is None:
+        raise NotImplementedError(
+            f"{EXTENSION}: no digest size known for {algorithm!r}"
+        )
     name, digest = _read_string(payload)
     if name == b"check-file":
         # Later filexfer drafts prefix the reply with the extension name.
@@ -105,11 +127,7 @@ def parse_reply(payload: bytes, algorithm: str) -> str:
         raise NotImplementedError(
             f"{EXTENSION} returned {reply_algorithm!r}, requested {algorithm!r}"
         )
-    try:
-        expected = _hashlib.new(algorithm).digest_size
-    except ValueError:
-        expected = None
-    if expected is not None and len(digest) != expected:
+    if len(digest) != expected:
         # Any other length means a reply shape this parser does not
         # understand (a length-prefixed or truncated hash).
         raise NotImplementedError(
@@ -138,14 +156,22 @@ class CheckFileSftpBackend(BaseSftpBackend):
         raise NotImplementedError(EXTENSION)
 
     def checksum(self, path: "SftpPath", algorithm: str) -> str:
-        """Server-side digest of `path` through `check-file-handle`. The
-        first refusal is cached for the connection, and every later call
-        raises `NotImplementedError` without a round trip. Other failures
-        propagate as raised; `SftpPath.checksum()` translates them to
-        `NotImplementedError`."""
+        """Server-side digest of `path` through `check-file-handle`. A server
+        that answers "operation unsupported" for `algorithm` is not asked for
+        it again on this connection (an OpenSSH server costs one request per
+        algorithm, not one per file); other algorithms are still asked for.
+        Other failures propagate as raised, and refuse nothing;
+        `SftpPath.checksum()` translates them to `NotImplementedError`."""
+        if algorithm not in DIGEST_SIZES:
+            raise NotImplementedError(
+                f"{EXTENSION}: {algorithm!r} is not an algorithm the draft names"
+            )
         client = self.client(path.source)
-        if _cached_support(client) == frozenset():
-            raise NotImplementedError(f"{EXTENSION}: not supported by this server")
+        record = _support(client)
+        if algorithm in record.refused:
+            raise NotImplementedError(
+                f"{EXTENSION}: the server does not support {algorithm}"
+            )
         # The extension hashes an *open handle*, not a bare path -- open
         # read-only and unbuffered (it is never read), and always close, so
         # an attempt never leaks a handle whether it succeeds or not.
@@ -155,41 +181,41 @@ class CheckFileSftpBackend(BaseSftpBackend):
                 payload = self._check_file_request(client, file, algorithm)
             except Exception as error:
                 if refused(error):
-                    _cache_support(client, frozenset())
+                    record.refused.add(algorithm)
                 raise
         finally:
             file.close()
-        return parse_reply(payload, algorithm)
+        digest = parse_reply(payload, algorithm)
+        record.produced.add(algorithm)
+        return digest
 
     def supported_checksums(self, path: "SftpPath") -> "frozenset[str]":
         """Per-connection probe: try `checksum()` against `path` once and
-        cache the answer for this connected client. `path` must already
+        remember the answer for this connected client. `path` must already
         exist and be readable, or the probe's own `open()` fails for an
         unrelated reason (a missing file), which is reported as empty here
-        but not cached -- this method is advisory, never raises.
+        but not remembered -- this method is advisory, never raises.
 
         Only the FIRST algorithm is actually attempted: a server either
         implements the extension (and then the draft's algorithm set) or it
-        doesn't. `checksum()` itself remains authoritative for any specific
-        algorithm and still raises `NotImplementedError` per call regardless
-        of what this advertises.
+        doesn't. Once any digest has been produced the answer is the draft's
+        set less the algorithms the server refused; before that it is empty,
+        and `checksum()` still asks for any algorithm not refused.
         """
         client = self.client(path.source)
-        cached = _cached_support(client)
-        if cached is not None:
-            return cached
-
-        try:
-            self.checksum(path, ALGORITHMS[0])
-        except NotImplementedError:
-            supported = frozenset()
-        except Exception:
-            # Any other failure (missing file, transport hiccup, ...) isn't
-            # evidence one way or the other about extension support --
-            # don't cache a negative result from an inconclusive probe.
-            return frozenset()
-        else:
-            supported = frozenset(ALGORITHMS)
-
-        _cache_support(client, supported)
-        return supported
+        record = _support(client)
+        if not record.produced and not record.probed:
+            if ALGORITHMS[0] not in record.refused:
+                try:
+                    self.checksum(path, ALGORITHMS[0])
+                except NotImplementedError:
+                    pass
+                except Exception:
+                    # Any other failure (missing file, transport hiccup, ...)
+                    # isn't evidence one way or the other about extension
+                    # support -- don't remember an inconclusive probe.
+                    return frozenset()
+            record.probed = True
+        if record.produced:
+            return frozenset(a for a in ALGORITHMS if a not in record.refused)
+        return frozenset()

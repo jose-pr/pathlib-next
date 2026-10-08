@@ -736,7 +736,12 @@ chained (their text can carry credentials).
 - **`SftpPath`** (`sftp:`; `sftp` or `sftp-async` extra; `schemes.sftp`)
   - `SftpPath(*uris, backend=None, ssh_config=<default>)` — `ssh_config`:
     default `~/.ssh/config`, `None` for none, a path or iterable of paths;
-    inherited by derived paths. A host that is not a plain host name or
+    carried to every path derived from it on the same endpoint (`/`, `parent`,
+    `with_name()`, `with_source()`, a join, a destination string), and dropped,
+    with the backend, when the derived path is on another host. Paths of one
+    endpoint share the backend they build for themselves unless their
+    `ssh_config` differs: one built with another `ssh_config` than the path it
+    derives from has a backend of its own. A host that is not a plain host name or
     address -- an IP address (an IPv6 one may carry a `%zone`), or ASCII
     letters, digits, `.`, `_`, `-` (not first) and the letters and digits of
     other scripts -- raises `ValueError` naming it where a connection or an
@@ -760,7 +765,9 @@ chained (their text can carry credentials).
     `NotImplementedError` unless `connect_opts["sock"]` is given. A
     `ProxyCommand` expands `%h`, `%n`, `%p`, `%r` and `%%` with the host,
     port and user this connection uses (a user with white space, a quote, a
-    shell metacharacter or a leading `-` is refused when `%r` is used); an
+    shell metacharacter or a leading `-` is refused when `%r` is used, on
+    asyncssh too: a `ValueError` before asyncssh is given the user, when the
+    config's `ProxyCommand` would pass it on); an
     `Include` inside a `Host` or `Match` block applies the included file's
     blocks only where the enclosing one does. Connections cached per
     (backend, source, thread), replaced when dropped.
@@ -791,7 +798,9 @@ chained (their text can carry credentials).
     library's exception. A server status is the pathlib exception with `errno`
     and `filename` (the remote path; `filename2` for the second path of
     `rename()` and `symlink_to()`); an "operation unsupported" status is
-    `NotImplementedError`. A connection that goes away, mid-request or
+    `NotImplementedError`. An error `SftpPath` builds itself (`mkdir()` of an
+    existing path, `rmdir()` or `iterdir()` of the wrong kind of entry) carries
+    the URI as `filename`. A connection that goes away, mid-request or
     mid-transfer, is `ConnectionResetError`; a refused login is
     `SftpAuthenticationError` (a `PermissionError`, `EACCES`); a host key that
     is unknown, changed or refused is `SftpHostKeyError` (a `ConnectionError`,
@@ -812,13 +821,26 @@ chained (their text can carry credentials).
   - `readlink() -> SftpPath` (verbatim target) and `symlink_to()` on both
     backends; `hardlink_to(target)` and `chmod(follow_symlinks=False)` on
     asyncssh only (paramiko → `NotImplementedError`); `chown()` with numeric
-    ids only.
+    ids only. A partial `chown()` (`chown(None, gid)`) needs the current id of
+    the field it leaves alone: a server that names owners instead of numbering
+    them (SFTP version 4) makes it `NotImplementedError` naming the field, and
+    nothing is sent (`st_uid`/`st_gid` are 0 for an owner name that is not a
+    number).
     `rename()` replaces an existing target via `posix-rename@openssh.com`
     where supported, else `FileExistsError`. `checksum()`/
     `supported_checksums()` (`NativeChecksum`): both backends send the
-    `check-file-handle` extension (OpenSSH lacks it); a refusal is remembered
-    per connection; every failure is `NotImplementedError`. `__fspath__()`/`host_fspath()`
-    return `.path`.
+    `check-file-handle` extension (OpenSSH lacks it); an "operation
+    unsupported" answer is remembered per connection and algorithm (one request
+    per algorithm, not per file) and a failure for one file refuses nothing;
+    an algorithm other than `md5`, `sha1`, `sha224`, `sha256`, `sha384`,
+    `sha512` or `crc32`, or a digest of the wrong size, is
+    `NotImplementedError` (no request for the first); every failure is
+    `NotImplementedError`. `supported_checksums()` is empty until a digest has
+    been produced. `__fspath__()`/`host_fspath()` return `.path`.
+  - A file opened for writing is flushed and closed when the interpreter exits
+    if the program left it open (a text wrapper's pending text included),
+    waiting at most five seconds; `write()` returns the number of bytes
+    written and `truncate()` works on both backends.
 - **`S3Path`** (`s3://bucket/key`; `s3` extra; `schemes.s3`) — `bucket`,
   `key` (one trailing `/` dropped: `s3://b/dir/` is `dir`).
   `S3Backend(**client_kwargs)` → one lazily built, thread-shared
