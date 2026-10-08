@@ -19,6 +19,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from server_loops import stop_server
 
 asyncssh = pytest.importorskip("asyncssh")
 
@@ -145,6 +146,8 @@ class _Loopback:
                 server_host_keys=[self.host_key],
                 sftp_factory=lambda chan: server_class(chan, chroot=root),
                 process_factory=None,
+                # No GSS: its default asks the resolver for this machine's own name.
+                gss_host=None,
             )
 
         self.thread.start()
@@ -153,17 +156,7 @@ class _Loopback:
         return self
 
     def stop(self):
-        async def _shutdown():
-            self._server.close()
-            for conn in list(self.live):
-                conn.abort()
-            await asyncio.sleep(0.05)
-
-        try:
-            self._call(_shutdown(), timeout=5)
-        finally:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(timeout=5)
+        stop_server(self.loop, self.thread, self._server, self.live)
 
     def url(self, path=""):
         return f"sftp://x:x@127.0.0.1:{self.port}/{path}"

@@ -12,12 +12,13 @@ import os
 import stat
 
 import pytest
+from capabilities import requires_posix_modes
 
 from pathlib_next import LocalPath
 from pathlib_next.mempath import MemPath
 from pathlib_next.utils.stat import FileStat
 
-posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+posix_only = requires_posix_modes
 
 
 def _symlink_or_skip(link, target, directory=False):

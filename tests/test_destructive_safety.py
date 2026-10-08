@@ -11,9 +11,9 @@ through Windows junctions and file: directory symlinks.
 import os
 import pathlib
 import subprocess
-import sys
 
 import pytest
+from capabilities import can_make_junctions, requires_junctions
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
@@ -451,8 +451,8 @@ def test_copy_overwrite_asks_the_target_to_unlink_with_missing_ok():
 
 
 def _junction_or_skip(link, target):
-    if sys.platform != "win32":
-        pytest.skip("junctions are Windows-only")
+    if not can_make_junctions():
+        pytest.skip("this system cannot create directory junctions")
     result = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         capture_output=True,
@@ -633,7 +633,7 @@ def test_is_windows_flavoured_matches_path_semantics(tmp_path):
 # --- a binding is not a symlink -------------------------------------------
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_a_junction_is_a_binding_not_a_symlink(tmp_path):
     """A junction is a second NAME for a directory -- the Windows spelling
     of a bind mount -- so `is_symlink()` is False and a non-following stat
@@ -659,7 +659,7 @@ def test_a_junction_is_a_binding_not_a_symlink(tmp_path):
         assert ordinary.is_dir_binding() is False
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_recursive_rm_removes_the_binding_not_the_tree_behind_it(tmp_path):
     import _winapi
 
@@ -892,7 +892,7 @@ def test_rm_of_a_symlink_without_recursion_removes_only_the_link(tmp_path):
     assert (outside / "precious.txt").read_text() == "P"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_rm_of_a_binding_named_directly_removes_the_binding(tmp_path):
     """Naming the binding itself removes it, not the tree behind it --
     `rm -r` semantics for the path the caller gave."""

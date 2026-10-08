@@ -37,6 +37,7 @@ import sys
 import types
 
 import pytest
+from capabilities import requires_junctions
 
 import pathlib_next
 from pathlib_next import Path, PosixPathname, WindowsPathname
@@ -399,7 +400,7 @@ def test_concrete_local_downstream_answers_is_mount_for_a_drive_root(tmp_path):
     assert DownstreamConcreteLocal(tmp_path).is_mount() is False
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_concrete_local_downstream_rm_does_not_follow_a_junction(tmp_path):
     import _winapi
 
@@ -415,7 +416,7 @@ def test_concrete_local_downstream_rm_does_not_follow_a_junction(tmp_path):
     assert (tmp_path / "target" / "keep.txt").read_text() == "PRECIOUS"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_concrete_local_downstream_rm_leaves_a_junction_when_told_to(tmp_path):
     import _winapi
 

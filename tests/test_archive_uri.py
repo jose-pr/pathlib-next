@@ -11,6 +11,7 @@ import tarfile
 import zipfile
 
 import pytest
+from capabilities import requires_posix_modes
 
 from pathlib_next import LocalPath
 from pathlib_next.uri import UriPath
@@ -375,7 +376,7 @@ def test_tar_has_no_mutation_support(tar_archive):
         p.rename("x.txt")
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+@requires_posix_modes
 def test_copy_of_a_tar_member_drops_the_setuid_bit(tmp_path):
     archive = tmp_path / "suid.tar"
     with tarfile.open(archive, "w") as tf:

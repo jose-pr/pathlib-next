@@ -10,6 +10,7 @@ import os
 import sys
 
 import pytest
+from capabilities import requires_fifos, requires_junctions
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
@@ -879,7 +880,7 @@ def test_special_source_entry_is_skipped_not_made_a_directory(
     assert SyncEvent.TypeMismatch not in fifo_events
 
 
-@pytest.mark.skipif(IS_WINDOWS, reason="named pipes via os.mkfifo are POSIX-only")
+@requires_fifos
 def test_real_fifo_is_skipped(tmp_path):
     source = tmp_path / "src"
     source.mkdir()
@@ -1056,7 +1057,7 @@ def _junction(target, link):
     _winapi.CreateJunction(str(target), str(link))
 
 
-@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+@requires_junctions
 @pytest.mark.parametrize("remove_missing", [True, False])
 def test_junction_in_target_is_replaced_and_what_it_names_is_untouched(
     tmp_path, remove_missing
@@ -1082,7 +1083,7 @@ def test_junction_in_target_is_replaced_and_what_it_names_is_untouched(
     assert mismatches == [str(dst / "sub")]
 
 
-@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+@requires_junctions
 def test_dry_run_leaves_a_junction_in_target_and_reports_its_replacement(tmp_path):
     outside = tmp_path / "outside"
     _write(outside / "unrelated.txt", "unrelated")
@@ -1107,7 +1108,7 @@ def test_dry_run_leaves_a_junction_in_target_and_reports_its_replacement(tmp_pat
     assert sorted(p.name for p in outside.iterdir()) == ["unrelated.txt"]
 
 
-@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+@requires_junctions
 def test_junction_missing_from_source_is_removed_without_emptying_what_it_names(
     tmp_path,
 ):
@@ -1174,7 +1175,7 @@ def test_mount_point_in_target_follows_remove_missing_like_a_directory(
     assert sorted(p.name for p in (dst / "mounted").iterdir()) == ["new.txt"]
 
 
-@pytest.mark.skipif(not IS_WINDOWS, reason="junctions are Windows")
+@requires_junctions
 def test_junction_that_is_a_mount_point_is_synced_into(tmp_path, mount_named_mounted):
     # A mounted volume is built from the same reparse point as a junction.
     outside = tmp_path / "volume"

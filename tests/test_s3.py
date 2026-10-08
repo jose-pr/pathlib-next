@@ -357,17 +357,13 @@ def test_rename_to_trailing_slash_destination_drops_the_slash():
 
 
 @pytest.fixture
-def moto_s3():
+def moto_s3(aws_test_credentials):
     boto3 = pytest.importorskip("boto3")
     pytest.importorskip("moto")
-    import os
 
     from moto import mock_aws
 
     with mock_aws():
-        os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket="bkt")
         yield client

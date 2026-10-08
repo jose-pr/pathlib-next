@@ -14,6 +14,8 @@ import warnings
 
 import pytest
 
+from waits import wait_until
+
 from pathlib_next import LocalPath
 from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes import ftp as ftp_mod
@@ -44,9 +46,13 @@ def ftp_factory(tmp_path):
 
         class Handler(FTPHandler):
             connections = 0
+            disconnections = 0
 
             def on_connect(self):
                 type(self).connections += 1
+
+            def on_disconnect(self):
+                type(self).disconnections += 1
 
         Handler.authorizer = authorizer
         if not mlsd:
@@ -146,7 +152,9 @@ def test_ftp_write_after_idle_timeout_reconnects_and_lands(ftp_factory):
     assert p.parent.is_dir()  # the session exists before the idle wait
     f = p.open("wb")
     f.write(b"important data")
-    time.sleep(2.5)  # the server drops the idle session
+    # The server drops the idle session; what the write must survive is that
+    # drop, however long the machine takes to notice it.
+    assert wait_until(lambda: handler.disconnections >= 1, timeout=60)
     f.close()
     assert (root / "late.txt").read_bytes() == b"important data"
     assert handler.connections == 2

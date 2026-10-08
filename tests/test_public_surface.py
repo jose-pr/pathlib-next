@@ -296,6 +296,7 @@ def test_mypy_accepts_the_constructors(tmp_path, monkeypatch):
     assert status == 0, out + err
 
 
+@pytest.mark.allow_program("pyright", "basedpyright")
 def test_pyright_accepts_the_constructors(tmp_path):
     checker = shutil.which("pyright") or shutil.which("basedpyright")
     if checker is None:

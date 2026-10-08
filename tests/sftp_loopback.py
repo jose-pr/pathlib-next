@@ -16,6 +16,7 @@ import sys
 import threading
 
 import asyncssh
+from server_loops import stop_server
 
 #: The server-side methods that are counted and can carry a hook.
 COUNTED = (
@@ -228,6 +229,8 @@ class Loopback:
                 sftp_factory=lambda chan: server_class(chan, chroot=root),
                 sftp_version=self.sftp_version,
                 process_factory=None,
+                # No GSS: its default asks the resolver for this machine's own name.
+                gss_host=None,
             )
 
         self.thread.start()
@@ -250,17 +253,7 @@ class Loopback:
             self.loop.call_soon_threadsafe(abort)
 
     def stop(self):
-        async def _shutdown():
-            self._server.close()
-            for conn in list(self.live):
-                conn.abort()
-            await asyncio.sleep(0.05)
-
-        try:
-            self._call(_shutdown(), timeout=5)
-        finally:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(timeout=5)
+        stop_server(self.loop, self.thread, self._server, self.live)
 
     @property
     def host(self):

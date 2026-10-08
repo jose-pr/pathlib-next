@@ -6,7 +6,6 @@ loopback server logs every command (tests/ftp_loopback.py)."""
 import errno
 import ftplib
 import threading
-import time
 
 import pytest
 
@@ -16,6 +15,7 @@ from pathlib_next.uri.schemes import ftp as ftp_mod
 from pathlib_next.uri.schemes.ftp import FtpBackend, FtpPath
 
 from ftp_loopback import LoopbackFtp
+from waits import wait_until
 
 
 def _mlsd(*lines):
@@ -48,15 +48,6 @@ def make():
             if key[1].port == server.port:
                 ftp_mod._CACHED_CLIENTS.discard(*key)
         server.close()
-
-
-def _wait_until(condition, seconds=15.0):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if condition():
-            return True
-        time.sleep(0.02)
-    return condition()
 
 
 FILE = "type=file;size=5;modify=20240101000000;"
@@ -302,7 +293,7 @@ def test_the_connection_of_a_thread_that_ended_is_closed(make):
         thread.start()
     for thread in threads:
         thread.join()
-    assert _wait_until(lambda: not server.live), f"{len(server.live)} still open"
+    assert wait_until(lambda: not server.live), f"{len(server.live)} still open"
     assert server.total == 20
     path("/d/f.txt").stat()
     assert len(server.live) == 1
@@ -333,7 +324,7 @@ def test_a_connection_dropped_by_another_thread_mid_transfer_finishes_it_then_cl
     release.set()
     thread.join(10)
     assert results == [b"x" * 1000]
-    assert _wait_until(lambda: not server.live)
+    assert wait_until(lambda: not server.live)
 
 
 def _slow(session, arg, started, release):

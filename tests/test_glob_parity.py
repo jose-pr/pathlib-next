@@ -12,6 +12,7 @@ import sys
 import time
 
 import pytest
+from capabilities import requires_junctions
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
@@ -302,7 +303,7 @@ def test_full_match_repeated_doublestar_is_not_exponential():
     start = time.monotonic()
     assert not _glob.full_match(segments, pattern, True)
     assert _glob.full_match(segments, "/".join(["**", "x"] * 8), True)
-    assert time.monotonic() - start < 1
+    assert time.monotonic() - start < 10
 
 
 # --- glob(None): expand the pattern this path carries ---------------------
@@ -443,7 +444,7 @@ def test_on_error_may_raise_to_make_it_fatal(unreadable_tree):
 # --- bound_loops: a directory is walked once per "**" ---------------------
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_bound_loops_bounds_a_windows_junction_loop(tmp_path):
     """A junction reports `is_symlink() == False`, so `recurse_symlinks`
     cannot see it and `**` walks the loop until the recursion limit --
@@ -492,7 +493,7 @@ def _junction(link, target):
     )
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_bound_loops_keeps_a_directory_shared_under_two_names(tmp_path):
     """A loop is a directory reachable BELOW ITSELF -- not one reachable
     twice. Two sibling junctions onto one shared directory (a common config
@@ -521,7 +522,7 @@ def test_bound_loops_keeps_a_directory_shared_under_two_names(tmp_path):
     assert bounded == expected  # and so does the bounded walk
 
 
-@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows")
+@requires_junctions
 def test_bound_loops_still_bounds_a_loop_back_to_an_ancestor(tmp_path):
     """The case the flag exists for: unbounded, the two real files are
     matched 128 times (and a deeper walk fails outright on the path

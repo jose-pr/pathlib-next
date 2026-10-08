@@ -142,7 +142,7 @@ def test_a_pickle_keeps_the_allow_list_of_schemes():
 
 def test_the_stat_hint_and_the_file_object_cache_are_not_pickled(tmp_path):
     (tmp_path / "f.txt").write_text("x")
-    child = next(iter(UriPath(tmp_path.as_uri()).iterdir()))
+    (child,) = UriPath(tmp_path.as_uri()).iterdir()
     assert child._stat_hint is not None
     child.filepath
     again = _roundtrip(child)
@@ -268,7 +268,7 @@ def test_a_copy_of_a_path_with_a_derived_backend_still_reads_as_derived(copier):
 @pytest.mark.parametrize("copier", [copy.copy, copy.deepcopy])
 def test_a_copy_does_not_carry_the_stat_hint(copier, tmp_path):
     (tmp_path / "f.txt").write_text("x")
-    child = next(iter(UriPath(tmp_path.as_uri()).iterdir()))
+    (child,) = UriPath(tmp_path.as_uri()).iterdir()
     assert child._stat_hint is not None
     assert copier(child)._stat_hint is None
 

@@ -16,6 +16,7 @@ import warnings
 import zipfile
 
 import pytest
+from capabilities import requires_posix_modes
 
 from pathlib_next import LocalPath
 from pathlib_next import path as path_module
@@ -231,7 +232,7 @@ def test_strip_zip64_extra_keeps_other_records():
     assert _strip_zip64_extra(b"") == b""
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+@requires_posix_modes
 def test_zip_rewrite_keeps_archive_file_mode(zip_archive):
     os.chmod(zip_archive, 0o644)
     (UriPath(_zip_uri(zip_archive)) / "top.txt").unlink()

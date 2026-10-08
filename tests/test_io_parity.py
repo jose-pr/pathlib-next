@@ -7,6 +7,7 @@ import os
 import stat
 
 import pytest
+from capabilities import requires_posix_modes
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
@@ -131,7 +132,7 @@ def test_fileuri_touch_does_not_chmod(tmp_path, monkeypatch):
     assert calls == []
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits and umask")
+@requires_posix_modes
 def test_fileuri_touch_mode_is_umask_masked_like_pathlib(tmp_path):
     old = os.umask(0o022)
     try:

@@ -452,10 +452,15 @@ class _FtpsServer:
         self.data_session_reused = []
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
+        self._wrapped = []
         threading.Thread(target=self._serve, daemon=True).start()
 
     def close(self):
         self.listener.close()
+        # `wrap_socket` detaches the plain socket, which `_handle` then
+        # closes to no effect: the TLS control sockets are closed here.
+        for control in self._wrapped:
+            control.close()
 
     def _serve(self):
         while True:
@@ -500,6 +505,7 @@ class _FtpsServer:
             if verb == "AUTH":
                 send("234 proceed")
                 sock = self.context.wrap_socket(sock, server_side=True)
+                self._wrapped.append(sock)
             elif verb == "USER":
                 send("331 password")
             elif verb == "PASS":

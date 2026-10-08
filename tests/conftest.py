@@ -1,11 +1,16 @@
 import contextlib
 import functools
 import http.server
+import tempfile
 import threading
 import time
 
 import pytest
 
+import census as census_module
+import hermetic
+from server_loops import stop_server
+from hermetic import NetworkAccessBlocked  # noqa: F401  (re-exported for tests)
 from pathlib_next.mempath import MemPath, MemPathBackend
 
 
@@ -55,6 +60,15 @@ def _uri_extra_collect_ignore():
 
 collect_ignore = _uri_extra_collect_ignore()
 
+try:
+    from hypothesis import settings as _hypothesis_settings
+except ImportError:  # hypothesis is a dev extra
+    pass
+else:
+    # A property that is slow on a busy runner is not a failure.
+    _hypothesis_settings.register_profile("pathlib-next", deadline=None)
+    _hypothesis_settings.load_profile("pathlib-next")
+
 
 @pytest.fixture
 def fixture_tree(tmp_path):
@@ -103,25 +117,54 @@ def serve_http():
     return _serve_http
 
 
-class NetworkAccessBlocked(RuntimeError):
-    """A test tried to reach a non-loopback host. Not an OSError on purpose:
-    code that treats a network failure as "offline" must not swallow it."""
+def pytest_addoption(parser):
+    parser.addoption(
+        "--leak-census",
+        nargs="?",
+        const="report",
+        choices=("report", "fail"),
+        default=None,
+        help="at the end of the session, list the sockets, event loops, "
+        "subprocesses and threads still alive; `fail` also exits non-zero "
+        "(add python -X tracemalloc=25 to name where each was created)",
+    )
 
 
-def _is_loopback_host(host) -> bool:
-    import ipaddress
+_SESSION = pytest.StashKey[object]()
 
-    if host is None:
-        return True
-    if isinstance(host, bytes):
-        host = host.decode("ascii", "replace")
-    host = str(host).strip("[]").split("%", 1)[0]
-    if host.lower() in ("", "localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+
+def pytest_sessionstart(session):
+    session.config.stash[_SESSION] = session
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    mode = config.getoption("--leak-census")
+    if not mode:
+        return
+    census = census_module.take_census()
+    terminalreporter.section("leak census")
+    if not census.items:
+        terminalreporter.write_line("nothing is still alive")
+        return
+    for line in census.lines():
+        terminalreporter.write_line(line)
+    terminalreporter.write_line(
+        f"{len(census.items)} alive, {len(census.library_owned())} created by "
+        "pathlib_next (known only under -X tracemalloc)"
+    )
+    if mode == "fail" and exitstatus == 0:
+        # The summary runs inside `pytest_sessionfinish`; the process exits
+        # with the status the session holds afterwards.
+        config.stash[_SESSION].exitstatus = 1
+
+
+def pytest_report_header(config):
+    if collect_ignore:
+        return (
+            f"the `uri` extra (uritools, netimps) is not installed: "
+            f"{len(collect_ignore)} test modules are not collected: "
+            + ", ".join(name[: -len(".py")] for name in collect_ignore)
+        )
 
 
 def pytest_configure(config):
@@ -130,68 +173,94 @@ def pytest_configure(config):
         "allow_network: lift the autouse non-loopback network guard for a test "
         "that deliberately resolves or connects to a real host",
     )
+    config.addinivalue_line(
+        "markers",
+        "allow_program(*names): let a test start these programs; any other "
+        "except the interpreter and the host probes raises ProcessSpawnBlocked",
+    )
+    # The session's environment is set before the first test's snapshot of it
+    # is taken, and put back when pytest exits.
+    home = tempfile.TemporaryDirectory(prefix="pathlib-next-home-")
+    patch = pytest.MonkeyPatch()
+    hermetic.isolate_environment(patch, home.name)
+    config.add_cleanup(home.cleanup)
+    config.add_cleanup(patch.undo)
+
+
+_ENV_BEFORE = pytest.StashKey[dict]()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item):
+    item.stash[_ENV_BEFORE] = hermetic.environment_snapshot()
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    result = yield
+    before = item.stash.get(_ENV_BEFORE, None)
+    changed = (
+        hermetic.changed_variables(before, hermetic.environment_snapshot())
+        if before is not None
+        else {}
+    )
+    if changed:
+        hermetic.restore_environment(before)
+        raise AssertionError(
+            "the test left the process environment changed (use monkeypatch): "
+            + ", ".join(f"{k}: {old!r} -> {new!r}" for k, (old, new) in changed.items())
+        )
+    return result
 
 
 @pytest.fixture(autouse=True)
 def _block_non_loopback_network(request, monkeypatch):
-    """Hermetic tests: any connect/sendto/getaddrinfo aimed at a host other
-    than loopback raises `NetworkAccessBlocked`, and a blocked attempt fails
-    the test at teardown even if the code under test swallowed the error.
+    """Hermetic tests: any connect/sendto/name lookup aimed at a host other
+    than loopback raises `NetworkAccessBlocked`, a program other than the
+    interpreter raises `ProcessSpawnBlocked`, and a blocked attempt fails the
+    test at teardown even if the code under test swallowed the error.
     Autouse rather than opt-in, because the failure it prevents (a refactor
     that quietly sends a monkeypatched HTTP test to the real internet, or a
     DNS lookup that stalls an offline CI runner) is only caught by a guard
     the test author did not have to remember. `@pytest.mark.allow_network`
-    lifts it for a test that means to use the network."""
-    if request.node.get_closest_marker("allow_network"):
-        yield
-        return
-    import socket
-
+    lifts the network half for a test that means to use the network."""
     blocked = []
-
-    def check(host, what):
-        if not _is_loopback_host(host):
-            blocked.append(f"{what} {host!r}")
-            raise NetworkAccessBlocked(
-                f"{what} to non-loopback host {host!r}; "
-                "mark the test @pytest.mark.allow_network if intended"
-            )
-
-    def address_host(address):
-        # AF_INET/AF_INET6 tuples carry the host first; AF_UNIX paths are local.
-        if isinstance(address, tuple) and address:
-            return address[0]
-        return None
-
-    real_connect = socket.socket.connect
-    real_connect_ex = socket.socket.connect_ex
-    real_sendto = socket.socket.sendto
-    real_getaddrinfo = socket.getaddrinfo
-
-    def connect(self, address):
-        check(address_host(address), "connect")
-        return real_connect(self, address)
-
-    def connect_ex(self, address):
-        check(address_host(address), "connect")
-        return real_connect_ex(self, address)
-
-    def sendto(self, data, *args):
-        check(address_host(args[-1]), "sendto")
-        return real_sendto(self, data, *args)
-
-    def getaddrinfo(host, *args, **kwargs):
-        check(host, "getaddrinfo")
-        return real_getaddrinfo(host, *args, **kwargs)
-
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
-    monkeypatch.setattr(socket.socket, "sendto", sendto)
-    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    if not request.node.get_closest_marker("allow_network"):
+        hermetic.install_network_guard(monkeypatch, blocked)
+    allowed = [
+        name
+        for marker in request.node.iter_markers("allow_program")
+        for name in marker.args
+    ]
+    hermetic.install_process_guard(monkeypatch, blocked, allowed)
     # Yielded so a test of the guard itself can inspect and clear it.
     yield blocked
     if blocked:
         pytest.fail(f"non-loopback network access attempted: {blocked}")
+
+
+@pytest.fixture(autouse=True)
+def _close_cached_ftp_connections():
+    """The FTP connection cache outlives a test, but the loopback server a
+    test started does not: close what the test left in it, so no socket
+    waits for the interpreter to exit."""
+    yield
+    import sys
+
+    ftp = sys.modules.get("pathlib_next.uri.schemes.ftp")
+    if ftp is not None:
+        for key in list(ftp._CACHED_CLIENTS.cache):
+            ftp._CACHED_CLIENTS.discard(*key)
+
+
+@pytest.fixture
+def aws_test_credentials(monkeypatch):
+    """The region and credentials a moto-backed client needs; the session
+    environment holds no AWS variable of its own."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
 
 
 @pytest.fixture
@@ -493,8 +562,12 @@ def ftp_server(fixture_tree):
 
     authorizer = DummyAuthorizer()
     authorizer.add_user("user", "12345", str(fixture_tree), perm="elradfmwMT")
-    handler = FTPHandler
-    handler.authorizer = authorizer
+
+    class Handler(FTPHandler):
+        pass
+
+    Handler.authorizer = authorizer
+    handler = Handler
     # Force the portable select-based loop for tests. pyftpdlib's macOS
     # kqueue loop can emit an unhandled thread exception if the server fd is
     # closed from the pytest thread while the server thread is polling it.
@@ -548,7 +621,10 @@ def dav_server(fixture_tree):
     server = wsgi.Server(("127.0.0.1", 0), app)
     thread = threading.Thread(target=server.start, daemon=True)
     thread.start()
+    deadline = time.monotonic() + 30
     while not server.ready:
+        assert thread.is_alive(), "dav_server thread died while starting"
+        assert time.monotonic() < deadline, "dav_server did not become ready"
         time.sleep(0.01)
     try:
         yield f"dav://127.0.0.1:{server.bind_addr[1]}"
@@ -558,13 +634,12 @@ def dav_server(fixture_tree):
 
 
 @pytest.fixture
-def s3_server(fixture_tree):
+def s3_server(fixture_tree, aws_test_credentials):
     """In-process moto S3 mock with a pre-populated 'test-bucket' matching
     the standard fixture_tree layout required by ReadPathContract/PathContract."""
     boto3 = pytest.importorskip("boto3")
     pytest.importorskip("moto")
     from moto import mock_aws
-    import os
     import pathlib
 
     def _upload_tree(client, bucket, local_dir, prefix=""):
@@ -579,9 +654,6 @@ def s3_server(fixture_tree):
                 client.put_object(Bucket=bucket, Key=rel, Body=entry.read_bytes())
 
     with mock_aws():
-        os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-        os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
-        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket="test-bucket")
         _upload_tree(client, "test-bucket", fixture_tree)
@@ -619,7 +691,16 @@ def sftp_server(fixture_tree, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
 
+    live = set()
+
     class _NoAuth(asyncssh.SSHServer):
+        def connection_made(self, conn):
+            self._conn = conn
+            live.add(conn)
+
+        def connection_lost(self, exc):
+            live.discard(self._conn)
+
         def begin_auth(self, username):
             return False
 
@@ -634,6 +715,8 @@ def sftp_server(fixture_tree, tmp_path_factory, monkeypatch):
             server_host_keys=[host_key],
             sftp_factory=_sftp_factory,
             process_factory=None,
+            # No GSS: its default asks the resolver for this machine's own name.
+            gss_host=None,
         )
 
     # SelectorEventLoop on Windows, not the WindowsProactorEventLoopPolicy
@@ -662,20 +745,10 @@ def sftp_server(fixture_tree, tmp_path_factory, monkeypatch):
         # methods available" client-side before ever reaching the server.
         yield f"sftp://x:x@127.0.0.1:{port}/"
     finally:
-        # server.close() must run ON THE LOOP'S OWN THREAD -- asyncio/
-        # asyncssh objects aren't thread-safe, and calling close() directly
-        # from this (test) thread races the loop thread still processing
-        # I/O, corrupting internal state (observed: TypeError from
-        # asyncio.Server._wakeup() on `self._waiters` -- not a double
-        # -close, a torn read of state being mutated concurrently).
-        # Not blocking on wait_closed(): it waits for every accepted
-        # connection to close too, and a long-lived cached client
-        # (paramiko's connection cache, or an asyncssh backend instance a
-        # test didn't explicitly tear down) can leave one open, hanging
-        # this indefinitely.
-        loop.call_soon_threadsafe(server.close)
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=5)
+        # asyncio and asyncssh objects are not thread-safe, so the server and
+        # its connections are closed on the loop's own thread. A connection a
+        # cached client left open is aborted, not waited for.
+        stop_server(loop, thread, server, live)
 
 
 def _build_git_tree(local_dir):
