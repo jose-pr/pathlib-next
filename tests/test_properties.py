@@ -591,3 +591,137 @@ def test_compose_uri_matches_uricompose_direct(
     assert (
         fast == oracle
     ), f"scheme={scheme!r} userinfo={userinfo!r} host={host!r} port={port!r}"
+
+
+# --- Names that URI syntax gives a meaning to ---------------------------------
+#
+# The properties above draw segments from letters, digits, "-" and "_". These
+# draw any text a POSIX file name may hold, and a set biased towards "?", "#",
+# "%", ":", space, "\", "[" and non-ASCII letters.
+
+BACKSLASH = chr(92)
+_any_name = st.text(
+    alphabet=st.characters(blacklist_characters="/\x00", blacklist_categories=("Cs",)),
+    min_size=1,
+    max_size=10,
+).filter(lambda s: s not in (".", ".."))
+_spicy_name = st.text(
+    alphabet="ab?#%20: @[]" + BACKSLASH + "+&=;~é.", min_size=1, max_size=8
+).filter(lambda s: s not in (".", ".."))
+_name = st.one_of(_any_name, _spicy_name)
+
+
+@given(name=_name)
+@settings(max_examples=300)
+def test_a_joined_child_keeps_the_name_it_was_given(name):
+    base = Uri("sftp://host/dir")
+    child = base / name
+    assert child.name == name
+    assert child.path == "/dir/" + name
+    assert child.parent == base
+
+
+@given(name=_name)
+@settings(max_examples=300)
+def test_a_joined_child_survives_its_own_uri_text(name):
+    child = Uri("sftp://host/dir") / name
+    assert Uri(child.as_uri()) == child
+    assert Uri(str(child)) == child
+
+
+@given(name=_name)
+@settings(max_examples=300)
+def test_a_mempath_child_keeps_the_name_it_was_given(name):
+    from pathlib_next.mempath import MemPath
+
+    assert (MemPath("/d") / name).name == name
+
+
+@given(
+    name=st.one_of(
+        _any_name,
+        st.text(alphabet="ab.: /~$%CONnul1*?<>|'" + BACKSLASH, min_size=1, max_size=8),
+    )
+)
+@settings(max_examples=300)
+def test_a_name_called_safe_is_one_component_on_both_path_flavours(name):
+    from pathlib_next.utils import is_safe_child_name
+
+    if is_safe_child_name(name):
+        joined = pathlib.PurePosixPath("/d") / name
+        assert joined.parent == pathlib.PurePosixPath("/d")
+        assert joined.name == name
+    if is_safe_child_name(name, windows=True):
+        joined = pathlib.PureWindowsPath("C:/d") / name
+        assert joined.parent == pathlib.PureWindowsPath("C:/d"), (name, joined)
+        assert joined.drive == "C:"
+
+
+@given(name=st.text(alphabet="ab./: " + BACKSLASH + chr(0), max_size=14))
+@settings(max_examples=300)
+def test_an_archive_member_name_normalizes_once_and_stays_inside(name):
+    from pathlib_next.uri.schemes.archive._base import _normalize_member_name
+
+    normal = _normalize_member_name(name)
+    if normal is None:
+        return
+    parts = normal.rstrip("/").split("/")
+    assert not normal.startswith("/")
+    assert ".." not in parts
+    assert "" not in parts or normal == ""
+    assert chr(0) not in normal
+    assert _normalize_member_name(normal) == normal
+
+
+_pairs = st.lists(
+    st.tuples(
+        st.text(alphabet="ab=&;%+ #?\u00e9/", min_size=1, max_size=5),
+        st.one_of(st.none(), st.text(alphabet="ab=&;%+ #?\u00e9/", max_size=5)),
+    ),
+    max_size=4,
+)
+
+
+@given(pairs=_pairs)
+@settings(max_examples=300)
+def test_query_pairs_survive_a_uri_round_trip(pairs):
+    from pathlib_next.uri import Query
+
+    assert Query(pairs).decode() == [(k, v) for k, v in pairs]
+    if pairs:
+        uri = Uri("http://host/p").with_query(Query(pairs))
+        assert Query(Uri(uri.as_uri()).query).decode() == [(k, v) for k, v in pairs]
+
+
+_userinfo = st.one_of(
+    st.none(), st.text(alphabet="abU:@/?#%" + chr(233) + " ", min_size=1, max_size=8)
+)
+_host = st.text(alphabet="abc.-", min_size=1, max_size=8).filter(
+    lambda h: not h.startswith((".", "-"))
+)
+
+
+@given(
+    userinfo=_userinfo,
+    host=_host,
+    port=st.one_of(st.none(), st.integers(min_value=1, max_value=65535)),
+)
+@settings(max_examples=300)
+def test_a_source_survives_its_unsanitized_text(userinfo, host, port):
+    source = Source("sftp", userinfo, host, port)
+    assert Source.from_str(source.as_str(sanitize=False)) == source
+
+
+@given(
+    user=st.text(alphabet="abU", min_size=1, max_size=4),
+    password=st.text(alphabet="xyz%@/#" + chr(233), min_size=3, max_size=8),
+    host=_host,
+)
+@settings(max_examples=300)
+def test_a_password_in_the_userinfo_is_not_in_the_text_a_log_would_show(
+    user, password, host
+):
+    source = Source("sftp", f"{user}:{password}", host, None)
+    assert password not in repr(source)
+    assert password not in str(source)
+    assert password not in str(Uri(source.as_str(sanitize=False) + "/x"))

@@ -407,3 +407,38 @@ def test_rm_recursive_accepts_os_direntry_listing(tmp_path):
     assert not isinstance(next(iter(target._scandir())), tuple)
     target.rm(recursive=True)
     assert not (tmp_path / "d").exists()
+
+
+class _LinkRecorder(MemPath):
+    """A path whose `unlink()` fails and whose `_symlink_to()` only records."""
+
+    links = []
+
+    def unlink(self, missing_ok=False):
+        raise PermissionError(13, "denied", str(self))
+
+    def _symlink_to(self, target, target_is_directory):
+        type(self).links.append((self, target))
+
+
+def test_symlink_to_force_reports_a_failed_unlink_of_a_file_and_makes_no_link():
+    root = MemPath("/")
+    (root / "f.txt").write_text("keep")
+    link = _LinkRecorder("/f.txt", backend=root.backend)
+    _LinkRecorder.links = []
+    with pytest.raises(PermissionError):
+        link.symlink_to("elsewhere", force=True)
+    assert _LinkRecorder.links == []
+    assert (root / "f.txt").read_text() == "keep"
+
+
+def test_symlink_to_force_leaves_a_directory_to_the_link_attempt():
+    root = MemPath("/")
+    (root / "d").mkdir()
+    link = _LinkRecorder("/d", backend=root.backend)
+    _LinkRecorder.links = []
+    link.symlink_to("elsewhere", force=True)
+    assert [(str(path), str(target)) for path, target in _LinkRecorder.links] == [
+        ("/d", "elsewhere")
+    ]
+    assert (root / "d").is_dir()

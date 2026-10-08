@@ -1590,3 +1590,17 @@ def test_a_listing_name_with_a_separator_is_dropped():
     backend = _client_listing(["a/b", "ok.txt"])
     directory = SftpPath("sftp://host/src", backend=backend)
     assert [p.name for p in directory.iterdir()] == ["ok.txt"]
+
+
+def test_check_file_reply_naming_another_algorithm_is_refused_at_the_requested_size():
+    # The digest has the length of the requested algorithm, so only the
+    # echoed name tells the server hashed something else.
+    from pathlib_next.uri.schemes.sftp import _checkfile
+
+    for payload in (
+        _string("md5") + bytes(32),
+        _string("check-file") + _string("sha1") + bytes(32),
+    ):
+        with pytest.raises(NotImplementedError, match="requested 'sha256'"):
+            _checkfile.parse_reply(payload, "sha256")
+    assert _checkfile.parse_reply(_string("sha256") + bytes(32), "sha256") == "00" * 32

@@ -259,3 +259,31 @@ def test_node_key_of_a_nested_target_is_inside_its_source():
     assert _contains(root / "d", inner)
     assert not _contains(inner, root / "d")
     assert _contains(root, inner)
+
+
+class _ByBackend(MemPath):
+    """A `MemPath` that decides "same file" by the base class defaults:
+    `_backend` identity, and no `_node_key()`."""
+
+    __slots__ = ()
+    _same_filesystem = Path._same_filesystem
+    _node_key = Path._node_key
+
+
+def test_the_default_tells_two_stores_apart_and_one_store_together():
+    from pathlib_next.mempath import MemPathBackend
+
+    a = _ByBackend("/x", backend=MemPathBackend())
+    b = _ByBackend("/x", backend=MemPathBackend())
+    a.write_text("from a")
+    b.write_text("from b")
+    assert not a._same_filesystem(b)
+    assert not b._same_filesystem(a)
+    a.copy(b, overwrite=True)
+    assert b.read_text() == "from a"
+
+    same = _ByBackend("/x", backend=a.backend)
+    assert a._same_filesystem(same)
+    with pytest.raises(OSError):
+        a.copy(same, overwrite=True)
+    assert a.read_text() == "from a"

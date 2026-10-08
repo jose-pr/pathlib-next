@@ -40,7 +40,9 @@ class _FakeS3Client:
         data = self.objects[Key]
         return {
             "ContentLength": len(data),
-            "LastModified": datetime.datetime(2026, 1, 1, 12, 0, 0),
+            "LastModified": datetime.datetime(
+                2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc
+            ),
         }
 
     def list_objects_v2(self, Bucket, Prefix="", Delimiter=None, MaxKeys=None):
@@ -53,7 +55,15 @@ class _FakeS3Client:
             if Delimiter and Delimiter in rest:
                 common.add(Prefix + rest.split(Delimiter, 1)[0] + Delimiter)
             else:
-                contents.append({"Key": key})
+                contents.append(
+                    {
+                        "Key": key,
+                        "Size": len(self.objects[key]),
+                        "LastModified": datetime.datetime(
+                            2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc
+                        ),
+                    }
+                )
         if MaxKeys:
             contents = contents[:MaxKeys]
         result = {"KeyCount": len(contents) + len(common)}
@@ -372,6 +382,28 @@ def moto_s3(aws_test_credentials):
 def _moto_keys(client):
     listing = client.list_objects_v2(Bucket="bkt").get("Contents", [])
     return sorted(obj["Key"] for obj in listing)
+
+
+def test_stat_and_listing_report_the_last_modified_time_as_an_epoch():
+    # The stores answer with timezone-aware UTC times; a naive reading would
+    # shift the epoch by the local offset.
+    backend = _FakeBackend()
+    backend._client.objects["dir/a.txt"] = b"abc"
+    assert _s3("s3://bucket/dir/a.txt", backend).stat().st_mtime == 1767268800
+    entries = dict(_s3("s3://bucket/dir", backend)._scandir())
+    assert entries["a.txt"].st_mtime == 1767268800
+    assert entries["a.txt"].st_size == 3
+
+
+def test_stat_and_listing_report_the_stored_time_moto(moto_s3):
+    moto_s3.put_object(Bucket="bkt", Key="dir/a.txt", Body=b"abc")
+    stored = int(
+        moto_s3.head_object(Bucket="bkt", Key="dir/a.txt")["LastModified"].timestamp()
+    )
+    assert stored > 1_500_000_000
+    assert S3Path("s3://bkt/dir/a.txt").stat().st_mtime == stored
+    entries = dict(S3Path("s3://bkt/dir")._scandir())
+    assert entries["a.txt"].st_mtime == stored
 
 
 def test_trailing_slash_dir_with_marker_moto(moto_s3):

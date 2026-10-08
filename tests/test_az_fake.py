@@ -39,7 +39,9 @@ class _FakeBlobItem:
     def __init__(self, name, data):
         self.name = name
         self.size = len(data)
-        self.last_modified = datetime.datetime(2026, 1, 1, 12, 0, 0)
+        self.last_modified = datetime.datetime(
+            2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc
+        )
 
 
 class _FakeDownloader:
@@ -63,7 +65,9 @@ class _FakeBlobClient:
             raise _Missing(self.name)
         return {
             "size": len(self._container.objects[self.name]),
-            "last_modified": datetime.datetime(2026, 1, 1, 12, 0, 0),
+            "last_modified": datetime.datetime(
+                2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc
+            ),
         }
 
     def delete_blob(self):
@@ -250,6 +254,23 @@ def walk_sdk(monkeypatch):
 
 def _az(uri, backend=None):
     return AzPath(uri, backend=backend or _FakeBackend())
+
+
+def test_stat_reports_the_last_modified_time_as_an_epoch():
+    # `last_modified` is a timezone-aware UTC datetime.
+    backend, _container = _container_with(**{"dir/a.txt": b"abc"})
+    assert (
+        _az("az://account/container/dir/a.txt", backend).stat().st_mtime == 1767268800
+    )
+
+
+def test_listing_reports_the_last_modified_time_as_an_epoch():
+    # The listing tells blobs from prefixes with the SDK's own `BlobPrefix`.
+    pytest.importorskip("azure.storage.blob")
+    backend, _container = _container_with(**{"dir/a.txt": b"abc"})
+    entries = dict(_az("az://account/container/dir", backend)._scandir())
+    assert entries["a.txt"].st_mtime == 1767268800
+    assert entries["a.txt"].st_size == 3
 
 
 def test_rm_recursive_deletes_prefix_tree_with_bulk_delete():

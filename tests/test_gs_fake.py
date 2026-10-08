@@ -41,7 +41,7 @@ class _FakeBlob:
 
     @property
     def updated(self):
-        return datetime.datetime(2026, 1, 1, 12, 0, 0)
+        return datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
     def reload(self):
         if self.name in self._bucket.reload_errors:
@@ -138,6 +138,16 @@ class _FakeBackend(BaseGsBackend):
 
 def _gs(uri, backend=None):
     return GsPath(uri, backend=backend or _FakeBackend())
+
+
+def test_stat_and_listing_report_the_updated_time_as_an_epoch():
+    # `Blob.updated` is a timezone-aware UTC datetime.
+    backend = _FakeBackend()
+    backend.client_obj.bucket_obj.objects["dir/a.txt"] = b"abc"
+    assert _gs("gs://bucket/dir/a.txt", backend).stat().st_mtime == 1767268800
+    entries = dict(_gs("gs://bucket/dir", backend)._scandir())
+    assert entries["a.txt"].st_mtime == 1767268800
+    assert entries["a.txt"].st_size == 3
 
 
 def test_rm_recursive_deletes_prefix_tree():

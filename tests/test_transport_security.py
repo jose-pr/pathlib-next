@@ -204,6 +204,61 @@ def test_http_error_text_and_traceback_carry_no_password(
     assert excinfo.value.__suppress_context__
 
 
+def test_http_refused_connection_carries_no_password(unused_tcp_port):
+    p = UriPath(f"http://alice:s3cr3t@127.0.0.1:{unused_tcp_port}/x")
+    with pytest.raises(ConnectionError) as excinfo:
+        p.read_bytes()
+    assert "s3cr3t" not in _formatted(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__
+
+
+def test_http_timeout_carries_no_password(http_status_server):
+    host = http_status_server.removeprefix("http://")
+    p = UriPath(f"http://alice:s3cr3t@{host}/timeout").with_session(
+        requests.Session(), timeout=0.5
+    )
+    with pytest.raises(TimeoutError) as excinfo:
+        p.read_bytes()
+    assert "s3cr3t" not in _formatted(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__
+
+
+class _RaisingSession:
+    auth = None
+
+    def __init__(self, error):
+        self.error = error
+
+    def request(self, method, url, **kwargs):
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "make, exc",
+    [
+        (requests.exceptions.ConnectionError, ConnectionError),
+        (requests.exceptions.ConnectTimeout, TimeoutError),
+        (requests.exceptions.ReadTimeout, TimeoutError),
+        (requests.exceptions.TooManyRedirects, OSError),
+    ],
+)
+def test_http_transport_error_text_never_reaches_the_raised_error(make, exc):
+    # A requests exception can quote a proxy URL taken from the environment,
+    # credentials included; none of it may be in the error or its traceback.
+    quoted = "http://proxyuser:pr0xyS3cret@proxy.example:3128"
+    session = _RaisingSession(make(f"ProxyError({quoted})"))
+    p = HttpPath("http://alice:s3cr3t@h/x", backend=HttpBackend(session, {}))
+    with pytest.raises(exc) as excinfo:
+        p.read_bytes()
+    text = _formatted(excinfo.value)
+    assert "pr0xyS3cret" not in text
+    assert "s3cr3t" not in text
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__
+
+
 def test_http_error_message_keeps_status():
     session = _FakeSession()
     session.responses[("GET", "http://h/x")] = _FakeResponse(502, reason="Bad Gateway")

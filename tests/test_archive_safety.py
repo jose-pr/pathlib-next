@@ -965,3 +965,20 @@ def test_unpack_onto_a_windows_disk_leaves_existing_files_alone(tmp_path):
     assert len(messages) == 2
     assert sorted(os.listdir(dest)) == ["ok.txt", "report.txt"]
     assert (dest / "report.txt").read_text() == "ORIGINAL"
+
+
+def test_a_member_name_with_a_nul_is_refused_and_the_archive_is_unchanged(tmp_path):
+    # A NUL ends a name in the archive formats and in most programs that read
+    # it, so "top.txt<NUL>.png" would become "top.txt".
+    nul = chr(0)
+    archive = tmp_path / "a.zip"
+    _write_zip(archive, [("top.txt", "top")])
+    before = archive.read_bytes()
+    root = UriPath(_zip_uri(archive))
+    with pytest.raises(ValueError, match="escapes the archive root"):
+        (root / f"top.txt{nul}.png").write_text("x")
+    with pytest.raises(ValueError, match="escapes the archive root"):
+        (root / f"a{nul}b").write_text("x")
+    assert not (root / f"a{nul}b").exists()
+    _release()
+    assert archive.read_bytes() == before
