@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-10-09
+
 ### Added
 - **`copy_into()`, `move_into()` and `replace()` on every `Path`.** pathlib 3.14
   has them and the generic classes did not (`MemPath`, `UriPath`, `DavPath`,
@@ -2941,7 +2943,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/jose-pr/pathlib-next/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/jose-pr/pathlib-next/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/jose-pr/pathlib-next/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/jose-pr/pathlib-next/compare/v0.9.9...v0.9.10
