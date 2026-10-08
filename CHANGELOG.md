@@ -408,6 +408,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `UriPath("file:///C:/d/") / UriPath("file:///D:/f")` was `file:/C:/d/D:/f`
   (the same join with a plain `Uri`, or with the `str` `"D:/f"`, was already
   `file:/D:/f`). The argument now restarts the join whichever class carries it.
+- **An error raised while a join is built is reported as that error.**
+  `Uri("x") / other` answered "unsupported operand type(s) for /" for any
+  `TypeError` or `NotImplementedError` raised anywhere in the construction of the
+  result, a bug in a scheme's `__init__` included; `UriPath` already told the two
+  apart. Only an argument the constructor cannot read is unsupported now, for
+  both classes, and `/`, `joinpath()` and `"prefix" / uri` are defined once.
 
 ## [0.9.12] - 2026-10-08
 

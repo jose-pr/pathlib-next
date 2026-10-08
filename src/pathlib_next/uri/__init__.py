@@ -196,6 +196,14 @@ def _slot_names(cls: type) -> "tuple[str, ...]":
     return tuple(names)
 
 
+def _as_uri(value) -> "Uri":
+    """`value` as the constructor reads one argument: a `TypeError` for
+    what it cannot read."""
+    converted = Uri.__new__(Uri)
+    converted.__init__(value)
+    return converted
+
+
 def _has_dot_segment(path: str) -> bool:
     # A "." or ".." segment starts with a dot right after a "/" or at the
     # start; a cheap superset test that decides whether to run the real one.
@@ -968,27 +976,39 @@ class Uri(Pathname):
     def _order_key(self):
         return self.as_uri()
 
+    def _join_object(self, *parts) -> "Uri":
+        """A new URI of this class from `parts`, joined as the constructor
+        joins them. `UriPath` also chooses the class from the result's
+        scheme, so joining an absolute local path gives a `FileUri`."""
+        return type(self)(*parts)
+
     def __truediv__(self, key):
         """`uri / "name"`. A `str` is a decoded path segment, never URI
-        syntax: "a?b.txt" is a filename, not a query (`Uri._join_arg`)."""
+        syntax: "a?b.txt" is a filename, not a query (`Uri._join_arg`). Any
+        other argument is joined as the constructor joins it."""
+        # Only converting `key` decides NotImplemented: catching TypeError
+        # around the whole construction would turn a bug inside a scheme's
+        # __new__/_init into "unsupported operand type(s) for /".
+        key = self._join_arg(key)
+        if isinstance(key, str):
+            return self._join_decoded(key)
         try:
-            key = self._join_arg(key)
-            if isinstance(key, str):
-                return self._join_decoded(key)
-            return type(self)(self, key)
+            converted = _as_uri(key)
         except (TypeError, NotImplementedError):
             return NotImplemented
+        return self._join_object(self, *converted._raw_uris)
 
     def joinpath(self, *args):
-        """Combine this URI with segments; a `str` is a decoded path."""
+        """Combine this URI with segments; a `str` is a decoded path (see
+        `Uri._join_arg`), anything else is joined as the constructor joins
+        it -- pass a `Uri` for a scheme-aware join."""
         result = self
         for arg in args:
             arg = result._join_arg(arg)
-            result = (
-                result._join_decoded(arg)
-                if isinstance(arg, str)
-                else type(result)(result, arg)
-            )
+            if isinstance(arg, str):
+                result = result._join_decoded(arg)
+            else:
+                result = result._join_object(result, *_as_uri(arg)._raw_uris)
         return result
 
     def __rtruediv__(self, key: str):
@@ -997,7 +1017,7 @@ class Uri(Pathname):
         if not isinstance(key, str):
             return NotImplemented
         # A plain Uri: building the prefix must not touch `self.backend`.
-        return type(self)(Uri()._from_decoded_path(key), self)
+        return self._join_object(Uri()._from_decoded_path(key), self)
 
     def as_posix(self):
         source = self.source
@@ -1404,57 +1424,9 @@ class UriPath(Uri, Path):
         inst = memo[id(self)] = self.__copy__()
         return inst
 
-    def __truediv__(self, key: str | Uri | os.PathLike):
-        # Only converting `key` decides NotImplemented. Catching TypeError
-        # around the whole construction turned a bug inside a scheme's
-        # __new__/_init into "unsupported operand type(s) for /".
-        key = self._join_arg(key)
-        if isinstance(key, str):
-            # A decoded path, not URI syntax (see `Uri._join_decoded`).
-            return self._join_decoded(key)
-        converted = Uri.__new__(Uri)
-        try:
-            converted.__init__(key)
-        except (TypeError, NotImplementedError):
-            return NotImplemented
-        return type(self)(
-            self,
-            *converted._raw_uris,
-            findclass=True,
-            schemesmap=self._schemes_in_use,
-        )
-
-    def __rtruediv__(self, key: str):
-        if not isinstance(key, str):
-            return NotImplemented
-        return type(self)(
-            Uri()._from_decoded_path(key),
-            self,
-            findclass=True,
-            schemesmap=self._schemes_in_use,
-        )
-
-    def joinpath(self, *args: str | Uri | os.PathLike) -> "UriPath":
-        """Combine this path with segments, choosing the result's class from
-        its scheme as `/` does: joining an absolute local path gives a
-        `FileUri`, not this class carrying a `file:` URI.
-
-        Each `str` argument is an already-decoded path (see
-        `Uri._join_arg`); pass a `Uri` for a scheme-aware join."""
-        result = self
-        for arg in args:
-            arg = result._join_arg(arg)
-            result = (
-                result._join_decoded(arg)
-                if isinstance(arg, str)
-                else type(result)(
-                    result,
-                    arg,
-                    findclass=True,
-                    schemesmap=result._schemes_in_use,
-                )
-            )
-        return result
+    def _join_object(self, *parts) -> "UriPath":
+        # The class comes from the joined scheme, and from the allow-list.
+        return type(self)(*parts, findclass=True, schemesmap=self._schemes_in_use)
 
     def with_source(self, source: Source):
         cls = type(self)

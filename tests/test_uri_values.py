@@ -263,3 +263,36 @@ def test_samefile_accepts_an_os_pathlike(tmp_path):
     assert path.samefile(str(tmp_path / "f.txt")) is True
     (tmp_path / "g.txt").write_text("y")
     assert path.samefile(tmp_path / "g.txt") is False
+
+
+# --- one join code ---------------------------------------------------------------------------
+
+
+def test_an_error_inside_the_construction_of_a_join_is_not_an_unsupported_operand():
+    class Boom(Uri):
+        __slots__ = ()
+
+        def _join_object(self, *parts):
+            raise TypeError("a bug in construction")
+
+    with pytest.raises(TypeError, match="a bug in construction"):
+        Boom("x") / Uri("y")
+    with pytest.raises(TypeError, match="a bug in construction"):
+        Boom("x").joinpath(Uri("y"))
+
+
+def test_what_cannot_be_joined_is_not_implemented_for_both_classes():
+    for cls in (Uri, UriPath):
+        with pytest.raises(TypeError, match="unsupported operand"):
+            cls("unk://h/x") / 5
+        with pytest.raises(TypeError, match="int"):
+            cls("unk://h/x").joinpath(5)
+        with pytest.raises(TypeError, match="unsupported operand"):
+            5 / cls("unk://h/x")
+
+
+def test_the_prefix_form_joins_a_decoded_path_in_front_for_both_classes():
+    assert ("pre" / Uri("x")).as_uri() == "pre/x"
+    assert ("C:/pre" / Uri("x")).as_uri() == "./C:/pre/x"
+    assert "pre" / UriPath("http://h/x") == UriPath("http://h/x")
+    assert type("pre" / UriPath("http://h/x")).__name__ == "HttpPath"
