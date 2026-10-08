@@ -626,6 +626,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   asyncssh is given the user, when the configuration for the host would pass it
   on; with no `%r` in the `ProxyCommand` (or no configuration) a user with a
   space still connects.
+- **Testing the children of a listed `sftp:` directory costs no request per
+  child.** `[c for c in d.iterdir() if c.is_dir()]` made one listing and one
+  `stat` per entry, because the listing's attributes were used only for
+  `lstat()`. A listed entry that is not a link now answers `stat()`,
+  `is_dir()`, `is_file()` and `exists()` from the listing (once, as before), so
+  21 entries cost one request; a link is still followed by a request of its
+  own. The asyncssh `copy(recursive=True)` and `rm(recursive=True)` also decide
+  file or directory from the listing: removing 128 files in 8 directories
+  made 301 requests and now makes 165, the number the generic `rm()` makes.
+- **`copy()` and `rm()` on the paramiko backend do not import asyncssh.** Both
+  imported it before looking at the backend, so forcing
+  `PATHLIB_NEXT_SFTP_BACKEND=paramiko` still loaded it on the first `copy()`
+  or `rm()`, and without it installed the failing import was retried on every
+  call. A backend now says whether it has native tree operations
+  (`BaseSftpBackend.supports_tree`, with `tree_copy()` and `tree_rm()`; False
+  unless a backend sets it); a custom backend needs no change.
+- **A paramiko connection of a thread that has ended is closed.** Entries were
+  closed only when the 128-entry cache evicted them, so a program that used
+  SFTP from many short-lived threads held a transport thread and a socket for
+  each until then. The next new connection closes the ones whose thread has
+  ended.
+- **An ssh_config that was edited is read again by the paramiko backend.** The
+  parsed file was cached by its path for the life of the process, so a changed
+  `Host` block was ignored until restart. The cache now also keys on the file's
+  modification time and size (a change to an `Include`d file alone is not
+  noticed).
 
 ## [0.9.12] - 2026-10-08
 
