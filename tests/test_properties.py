@@ -340,19 +340,26 @@ def _uri_string(draw):
 # * percent-escapes that are not UTF-8 decode with surrogateescape instead
 #   of raising UnicodeDecodeError;
 # * a data: path skips dot-segment removal (RFC 2397 payloads are opaque);
-# * the authority differs from uritools in two ways, both applied by
+# * the authority differs from uritools in three ways, all applied by
 #   `_oracle_authority` and nowhere else:
 #   - a host of ASCII digits alone (no ':' after it) is the host, as
 #     RFC 3986 3.2.2 has it; uritools reads it as a port and returns '';
 #   - a port above 65535 is a ValueError (RFC 3986 3.2.3 leaves the range
-#     open, TCP does not); uritools accepts any number of digits.
+#     open, TCP does not); uritools accepts any number of digits;
+#   - a ':' followed by anything but digits, after a name that is not a
+#     bracketed address, is an invalid port (ValueError); uritools makes the
+#     whole `h:abc` the host name.
 _ERRORS = "surrogateescape"
 
 
-def _oracle_authority(uri: str, host, port):
-    """`(host, port)` of uritools, with the two documented differences."""
-    authority = uritools.urisplit(uri).authority
+def _oracle_authority(uri: str, parsed):
+    """`(host, port)` of uritools, with the three documented differences."""
+    authority = parsed.authority
     hostinfo = "" if authority is None else authority.rpartition("@")[2]
+    _, colon, tail = hostinfo.rpartition(":")
+    if colon and tail.lstrip("0123456789") and not hostinfo.startswith("["):
+        raise ValueError("invalid port: it must be digits")
+    host, port = parsed.gethost(errors=_ERRORS) or "", parsed.getport()
     if hostinfo and ":" not in hostinfo and hostinfo.isascii() and hostinfo.isdigit():
         host = hostinfo
     if port is not None and port > 65535:
@@ -367,9 +374,7 @@ def _oracle_parse(uri: str):
         path = uritools.uridecode(parsed.path, errors=_ERRORS)
     else:
         path = parsed.getpath(errors=_ERRORS)
-    host, port = _oracle_authority(
-        uri, parsed.gethost(errors=_ERRORS) or "", parsed.getport()
-    )
+    host, port = _oracle_authority(uri, parsed)
     return (
         scheme,
         parsed.getuserinfo(errors=_ERRORS),
