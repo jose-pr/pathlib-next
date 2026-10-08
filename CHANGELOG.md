@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-10-08
+
 ### Added
 - **`Path._node_key()`, an override hook** answering where a path's node
   lives: `(namespace, names)`, the object two paths share when they resolve
@@ -2061,7 +2063,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Sync error handling.
 - Generic Path Protocol based pathlib implementation for URI paths with file access support for sftp, http, file schemes.
 
-[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/jose-pr/pathlib-next/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/jose-pr/pathlib-next/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/jose-pr/pathlib-next/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/jose-pr/pathlib-next/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/jose-pr/pathlib-next/compare/v0.9.8...v0.9.9
