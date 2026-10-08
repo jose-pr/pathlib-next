@@ -1100,13 +1100,16 @@ chained (their text can carry credentials).
 ## CLI (`uripath`, `pathlib_next.tools.uripath`)
 
 Console script `uripath` = `pathlib_next.tools.uripath:main`.
-`main(argv=None, *, stdin=None, stdout=None, stderr=None) -> int` (streams are
-binary; defaults are the process streams); `build_parser() ->
-argparse.ArgumentParser`. An argument with `://`, or with a scheme some class
-registers (`data:`, `zip:`, ...), is a `UriPath`; everything else (including
-`C:/x` and `notes:draft`) is a `LocalPath`. `-` is stdin/stdout where bytes
-are read or written. Without the `uri` extra local paths still work and a URI
-argument reports the extra to install.
+`main(argv=None, *, stdin=None, stdout=None, stderr=None) -> int` returns the
+exit status and never raises `SystemExit`; `stdin` and `stdout` are binary
+streams, `stderr` is a text or a binary stream (defaults: the process's), and
+the usage and help text of the parser go to the process's own stderr and stdout;
+`build_parser() -> argparse.ArgumentParser`. An argument with `://`, or with a
+scheme some class registers (`data:`, `zip:`, ...), is a `UriPath`; everything
+else (including `C:/x` and `notes:draft`) is a `LocalPath`. `-` is stdin/stdout
+where bytes are read or written. Without the `uri` extra local paths still work
+and a URI argument fails with `the '<scheme>' scheme needs the 'uri' extra`
+(the argument itself is never echoed, since it can carry a password).
 
 | Subcommand | Arguments and flags |
 | --- | --- |
@@ -1116,8 +1119,11 @@ argument reports the extra to install.
 | `cp SOURCE TARGET [-r/--recursive] [--overwrite] [--no-follow-symlinks] [--no-preserve-metadata]` | `Path.copy()`; with `-`, streams (an existing target needs `--overwrite`; no `-r`). |
 | `sync SOURCE TARGET [--dry-run] [--remove-missing] [--size-only] [-v/--verbose] [--no-follow-symlinks]` | `PathSyncer` with content comparison; `--size-only` compares sizes. `--dry-run` prints `would copy SRC -> DST`/`would remove`/`would mkdir`/`would replace`/`would symlink`; `-v` prints the changes made. |
 
-Errors print `uripath: <Type>: <message>` to stderr and return 1; a closed
-stdout returns 141, Ctrl-C 130.
+Exit status: 0 success (also `--help`); 1 the operation failed, with one line
+`uripath: <Type>: <message>` on stderr; 2 a wrong invocation, with the usage on
+stderr (a missing or unknown argument, `cp -r` with `-`, an unknown
+`--encoding`); 130 Ctrl-C; 141 the reader of stdout went away, quietly (on
+Windows too, where a closed pipe reports `EINVAL`).
 
 ## Testing helpers (`pathlib_next.testing`, needs `pytest`)
 

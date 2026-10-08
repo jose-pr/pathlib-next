@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import re
 import shutil
@@ -29,6 +30,9 @@ _SHIPPED_SCHEMES = None
 
 # RFC 3986 scheme, then the colon.
 _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+
+# Windows reports a write to a pipe whose reader has gone as EINVAL.
+_WINDOWS = os.name == "nt"
 
 #: Exit status after the reader of stdout went away (128 + SIGPIPE), as a
 #: POSIX tool killed by SIGPIPE reports it; and after Ctrl-C (128 + SIGINT).
@@ -86,13 +90,19 @@ def _looks_like_uri(value: str) -> bool:
         return True
 
 
+def _extra_needed(value: str) -> ImportError:
+    """The error for a URI argument when the `uri` extra is missing. It names
+    the scheme and never the argument, which can carry a password."""
+    scheme = value[: _SCHEME_RE.match(value).end() - 1].lower()
+    return ImportError(
+        f"the {scheme!r} scheme needs the 'uri' extra: pip install 'pathlib-next[uri]'"
+    )
+
+
 def _path(value: str):
     if _looks_like_uri(value):
         if UriPath is None:
-            raise ImportError(
-                f"{value!r} is a URI, which needs the 'uri' extra:"
-                " pip install 'pathlib-next[uri]'"
-            ) from _URI_IMPORT_ERROR
+            raise _extra_needed(value) from _URI_IMPORT_ERROR
         return UriPath(value, findclass=True)
     return LocalPath(value)
 
@@ -105,9 +115,15 @@ class _StdoutClosed(Exception):
     """The reader of stdout went away (`uripath read big | head`)."""
 
 
+def _is_closed_pipe(error: OSError) -> bool:
+    return isinstance(error, BrokenPipeError) or (
+        _WINDOWS and error.errno == errno.EINVAL
+    )
+
+
 class _StdoutWriter:
-    """Writes to stdout, turning a BrokenPipeError there -- and only there,
-    not one from a remote connection -- into `_StdoutClosed`."""
+    """Writes to stdout, turning a closed pipe there -- and only there, not
+    one from a remote connection -- into `_StdoutClosed`."""
 
     __slots__ = ("_raw",)
 
@@ -117,14 +133,18 @@ class _StdoutWriter:
     def write(self, data):
         try:
             return self._raw.write(data)
-        except BrokenPipeError as error:
-            raise _StdoutClosed() from error
+        except OSError as error:
+            if _is_closed_pipe(error):
+                raise _StdoutClosed() from error
+            raise
 
     def flush(self):
         try:
             self._raw.flush()
-        except BrokenPipeError as error:
-            raise _StdoutClosed() from error
+        except OSError as error:
+            if _is_closed_pipe(error):
+                raise _StdoutClosed() from error
+            raise
 
 
 def _stdout(stdout):
@@ -183,10 +203,13 @@ def _cmd_rm(args, *, stdin=None, stdout=None) -> int:
     return 0
 
 
+def _check_cp(args) -> None:
+    if args.recursive and "-" in (args.source, args.target):
+        args.parser.error("--recursive cannot copy from or to '-'")
+
+
 def _cmd_cp(args, *, stdin=None, stdout=None) -> int:
     if args.source == "-" or args.target == "-":
-        if args.recursive:
-            raise ValueError("--recursive cannot copy from or to '-'")
         # Without --overwrite an existing target is refused, as for a file
         # source (an exclusive create: no check-then-write race).
         _copy_stream(
@@ -249,61 +272,114 @@ def _cmd_sync(args, *, stdin=None, stdout=None) -> int:
     return 0
 
 
+def _encoding(name: str) -> str:
+    """An argparse type: `name` must be a text encoding."""
+    try:
+        "".encode(name)
+    except LookupError:
+        raise argparse.ArgumentTypeError(f"unknown text encoding: {name!r}") from None
+    return name
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """The argument parser of the `uripath` command, one subparser per command.
+
+    A subparser's defaults hold `func` (the command), `parser` (itself, for
+    `error()`) and, when the command validates its arguments, `check`.
+    """
     parser = argparse.ArgumentParser(
         prog="uripath",
         description="Read, write, copy, remove, and sync pathlib_next paths.",
+        epilog="A PATH is a local path or a URI; '-' is stdin or stdout where "
+        "bytes are read or written.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     read = subparsers.add_parser("read", help="write PATH bytes to stdout")
-    read.add_argument("path")
-    read.set_defaults(func=_cmd_read)
+    read.add_argument("path", help="file or URI to read; '-' is stdin")
+    read.set_defaults(func=_cmd_read, parser=read)
 
     write = subparsers.add_parser("write", help="write stdin or DATA to PATH")
-    write.add_argument("path")
-    write.add_argument("data", nargs="?")
-    write.add_argument("--encoding", default="utf-8")
-    write.set_defaults(func=_cmd_write)
+    write.add_argument("path", help="file or URI to write, replacing it; '-' is stdout")
+    write.add_argument(
+        "data",
+        nargs="?",
+        help="text to write; omitted: the bytes of stdin",
+    )
+    write.add_argument(
+        "--encoding",
+        default="utf-8",
+        type=_encoding,
+        help="encoding of DATA (default: %(default)s)",
+    )
+    write.set_defaults(func=_cmd_write, parser=write)
 
     rm = subparsers.add_parser("rm", help="remove PATH")
-    rm.add_argument("path")
-    rm.add_argument("-r", "--recursive", action="store_true")
-    rm.add_argument("--missing-ok", action="store_true")
-    rm.add_argument("--ignore-error", action="store_true")
-    rm.set_defaults(func=_cmd_rm)
+    rm.add_argument("path", help="file, empty directory or URI to remove")
+    rm.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="remove a directory with everything in it",
+    )
+    rm.add_argument(
+        "--missing-ok",
+        action="store_true",
+        help="succeed when PATH does not exist (default: fail)",
+    )
+    rm.add_argument(
+        "--ignore-error",
+        action="store_true",
+        help="keep removing after a failure (default: stop at the first)",
+    )
+    rm.set_defaults(func=_cmd_rm, parser=rm)
 
     cp = subparsers.add_parser("cp", help="copy SOURCE to TARGET")
-    cp.add_argument("source")
-    cp.add_argument("target")
-    cp.add_argument("-r", "--recursive", action="store_true")
-    cp.add_argument("--overwrite", action="store_true")
+    cp.add_argument("source", help="file, directory or URI to copy; '-' is stdin")
+    cp.add_argument("target", help="where to copy it to; '-' is stdout")
+    cp.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="copy a directory with everything in it (not with '-')",
+    )
+    cp.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing TARGET (default: refuse)",
+    )
     cp.add_argument(
         "--no-follow-symlinks",
         dest="follow_symlinks",
         action="store_false",
         default=True,
+        help="copy a symlink as a link (default: copy what it points to)",
     )
     cp.add_argument(
         "--no-preserve-metadata",
         dest="preserve_metadata",
         action="store_false",
         default=True,
+        help="leave out modes and times (default: copy them where possible)",
     )
-    cp.set_defaults(func=_cmd_cp)
+    cp.set_defaults(func=_cmd_cp, parser=cp, check=_check_cp)
 
     sync = subparsers.add_parser(
         "sync",
         help="sync SOURCE tree to TARGET, comparing file content",
     )
-    sync.add_argument("source")
-    sync.add_argument("target")
+    sync.add_argument("source", help="directory or URI to copy from")
+    sync.add_argument("target", help="directory or URI to make match SOURCE")
     sync.add_argument(
         "--dry-run",
         action="store_true",
         help="print what would change without changing anything",
     )
-    sync.add_argument("--remove-missing", action="store_true")
+    sync.add_argument(
+        "--remove-missing",
+        action="store_true",
+        help="delete TARGET entries that SOURCE does not have (default: keep)",
+    )
     sync.add_argument(
         "--size-only",
         action="store_true",
@@ -317,9 +393,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="follow_symlinks",
         action="store_false",
         default=True,
+        help="recreate symlinks of SOURCE as links (default: follow them)",
     )
-    sync.set_defaults(func=_cmd_sync)
+    sync.set_defaults(func=_cmd_sync, parser=sync)
     return parser
+
+
+def _report(stream, text: str) -> None:
+    """Write one line to a text stream, or to a binary one as UTF-8."""
+    try:
+        stream.write(text + "\n")
+    except TypeError:
+        stream.write((text + "\n").encode("utf-8", "backslashreplace"))
 
 
 def main(
@@ -329,8 +414,24 @@ def main(
     stdout=None,
     stderr=None,
 ) -> int:
+    """Run one `uripath` command and return its exit status.
+
+    `argv` defaults to `sys.argv[1:]`. `stdin` and `stdout` are binary streams
+    for the bytes the command reads and writes (default: the process's); the
+    one-line error message goes to `stderr`, a text or a binary stream (default:
+    `sys.stderr`). Usage and help text go to the process's streams.
+
+    Returns 0 on success, 1 when the operation failed, 2 for a wrong
+    invocation, 130 on Ctrl-C and 141 when the reader of stdout went away.
+    """
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+        check = getattr(args, "check", None)
+        if check is not None:
+            check(args)
+    except SystemExit as stop:
+        return stop.code if isinstance(stop.code, int) else 2
     try:
         return args.func(args, stdin=stdin, stdout=stdout)
     except _StdoutClosed:
@@ -342,8 +443,10 @@ def main(
     except KeyboardInterrupt:
         return _EXIT_INTERRUPTED
     except Exception as error:
-        stream = stderr if stderr is not None else sys.stderr
-        print(f"uripath: {type(error).__name__}: {error}", file=stream)
+        _report(
+            stderr if stderr is not None else sys.stderr,
+            f"uripath: {type(error).__name__}: {error}",
+        )
         return 1
 
 

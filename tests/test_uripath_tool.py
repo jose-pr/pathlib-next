@@ -1,5 +1,10 @@
+import argparse
+import errno
 import io
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -230,14 +235,11 @@ def test_cp_stdin_overwrites_with_overwrite(tmp_path):
     assert target.read_bytes() == b"replaced"
 
 
-def test_cp_recursive_with_dash_is_rejected(tmp_path):
+def test_cp_recursive_with_dash_is_rejected(tmp_path, capsys):
     target = tmp_path / "t.bin"
-    stderr = io.StringIO()
-    rc = uripath.main(
-        ["cp", "-r", "-", str(target)], stdin=io.BytesIO(b"x"), stderr=stderr
-    )
-    assert rc == 1
-    assert "--recursive" in stderr.getvalue()
+    rc = uripath.main(["cp", "-r", "-", str(target)], stdin=io.BytesIO(b"x"))
+    assert rc == 2
+    assert "--recursive" in capsys.readouterr().err
     assert not target.exists()
 
 
@@ -336,15 +338,26 @@ def test_keyboard_interrupt_exits_130_without_traceback(monkeypatch):
     assert stderr.getvalue() == ""
 
 
-def test_real_pipe_closed_by_reader_exits_quietly(tmp_path):
-    import subprocess
+_SRC = str(Path(__file__).resolve().parents[1] / "src")
 
+
+def _child_env():
+    """The environment of a child interpreter that imports this checkout."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [_SRC] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    return env
+
+
+def test_real_pipe_closed_by_reader_exits_quietly(tmp_path):
     source = tmp_path / "big.bin"
     source.write_bytes(b"y" * (8 * uripath._CHUNK_SIZE))
     proc = subprocess.Popen(
         [sys.executable, "-m", "pathlib_next.tools.uripath", "read", str(source)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=_child_env(),
     )
     assert proc.stdout.read(10) == b"y" * 10
     proc.stdout.close()
@@ -353,6 +366,148 @@ def test_real_pipe_closed_by_reader_exits_quietly(tmp_path):
     assert proc.wait(timeout=60) == 141
     assert b"Traceback" not in err
     assert b"BrokenPipeError" not in err
+
+
+# The child waits for one byte on stdin before it runs the command, so the
+# parent has closed its end of stdout before the command writes anything.
+_GATED = (
+    "import sys\n"
+    "sys.stdin.buffer.read(1)\n"
+    "from pathlib_next.tools.uripath import main\n"
+    "raise SystemExit(main(sys.argv[1:]))\n"
+)
+
+
+def _run_with_the_reader_gone(argv, stdin=b""):
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _GATED, *argv],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_child_env(),
+    )
+    proc.stdout.close()
+    try:
+        proc.stdin.write(b"g" + stdin)
+        proc.stdin.close()
+    except OSError:
+        pass  # The child exited before it read everything.
+    try:
+        err = proc.stderr.read()
+        return proc.wait(timeout=60), err
+    finally:
+        proc.stderr.close()
+        if not proc.stdin.closed:
+            proc.stdin.close()
+
+
+@pytest.mark.parametrize("size", [1, 64 * 1024, 3 * 1024 * 1024])
+def test_read_exits_141_when_stdout_closed_before_the_first_byte(size):
+    status, err = _run_with_the_reader_gone(["read", "-"], stdin=b"z" * size)
+    assert err == b""
+    assert status == 141
+
+
+def test_write_argument_exits_141_when_stdout_closed_before_the_first_byte():
+    status, err = _run_with_the_reader_gone(["write", "-", "hello"])
+    assert err == b""
+    assert status == 141
+
+
+def test_sync_dry_run_exits_141_when_stdout_closed_before_the_first_byte(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "a.txt").write_text("a", encoding="utf-8")
+    status, err = _run_with_the_reader_gone(
+        ["sync", "--dry-run", str(source), str(target)]
+    )
+    assert err == b""
+    assert status == 141
+    assert not (target / "a.txt").exists()
+
+
+class _InvalidArgumentPipe(io.BytesIO):
+    """The stdout of Windows after the reader closed: EINVAL, not EPIPE."""
+
+    def write(self, data):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    def flush(self):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+
+def test_einval_from_stdout_is_a_closed_pipe_on_windows(monkeypatch):
+    monkeypatch.setattr(uripath, "_WINDOWS", True)
+    stderr = io.StringIO()
+    argv = ["write", "-", "data"]
+    assert uripath.main(argv, stdout=_InvalidArgumentPipe(), stderr=stderr) == 141
+    assert stderr.getvalue() == ""
+
+
+def test_einval_from_stdout_is_an_error_elsewhere(monkeypatch):
+    monkeypatch.setattr(uripath, "_WINDOWS", False)
+    stderr = io.StringIO()
+    argv = ["write", "-", "data"]
+    assert uripath.main(argv, stdout=_InvalidArgumentPipe(), stderr=stderr) == 1
+    assert stderr.getvalue().startswith("uripath: OSError:")
+
+
+# --- the error line goes to a text or a binary stderr ---
+
+
+def test_error_line_goes_to_a_binary_stderr(tmp_path):
+    stderr = io.BytesIO()
+    missing = tmp_path / "missing.txt"
+    rc = uripath.main(["read", str(missing)], stdout=io.BytesIO(), stderr=stderr)
+    assert rc == 1
+    assert stderr.getvalue().startswith(b"uripath: FileNotFoundError: ")
+    assert stderr.getvalue().endswith(b"\n")
+
+
+# --- a wrong invocation is reported by the parser ---
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["nope"],
+        ["read"],
+        ["read", "a", "b"],
+        ["write", "f", "x", "--encoding", "no-such-codec"],
+        ["write", "f", "x", "--encoding", "hex"],
+        ["cp", "-r", "-", "x"],
+        ["cp", "-r", "x", "-"],
+    ],
+)
+def test_wrong_invocation_returns_2_and_changes_nothing(
+    argv, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    assert uripath.main(argv, stdin=io.BytesIO(b"q"), stdout=io.BytesIO()) == 2
+    assert "usage: uripath" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_help_returns_zero_instead_of_exiting(capsys):
+    assert uripath.main(["read", "--help"]) == 0
+    assert "file or URI to read" in capsys.readouterr().out
+
+
+def test_every_flag_and_positional_has_help_text():
+    parser = uripath.build_parser()
+    (subcommands,) = [
+        action.choices
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ]
+    assert set(subcommands) == {"read", "write", "rm", "cp", "sync"}
+    for name, subparser in subcommands.items():
+        for action in subparser._actions:
+            if not isinstance(action, argparse._HelpAction):
+                assert action.help, f"{name}: {action.dest} has no help text"
 
 
 # --- without the `uri` extra, only shipped schemes are URIs ---------------
@@ -431,3 +586,29 @@ def test_sync_dry_run_fails_for_a_link_the_target_cannot_hold_like_the_real_run(
     code, message = results["--dry-run"]
     assert code == 1
     assert "NotImplementedError" in message and "MemPath" in message
+
+
+@pytest.mark.parametrize(
+    ("value", "named"),
+    [
+        ("http://user:s3cr3t@127.0.0.1:9/x", "the 'http' scheme"),
+        ("ftp://user:s3cr3t@127.0.0.1:9/x", "the 'ftp' scheme"),
+        ("sftp://user:s3cr3t@127.0.0.1:9/x", "the 'sftp' scheme"),
+        ("dav://user:s3cr3t@127.0.0.1:9/x", "the 'dav' scheme"),
+        ("s3://user:s3cr3t@bucket/key", "the 's3' scheme"),
+        ("github://s3cr3t@host/owner/repo/file", "the 'github' scheme"),
+        ("unknown-scheme://user:s3cr3t@host/x", "the 'unknown-scheme' scheme"),
+    ],
+)
+def test_missing_extra_names_the_scheme_and_never_the_argument(
+    value, named, without_uri_extra, capsys
+):
+    for argv in (["read", value], ["cp", value, "out"], ["sync", value, "out"]):
+        stdout, stderr = io.BytesIO(), io.StringIO()
+        assert uripath.main(argv, stdout=stdout, stderr=stderr) == 1
+        assert stdout.getvalue() == b""
+        assert stderr.getvalue() == (
+            f"uripath: ImportError: {named} needs the 'uri' extra:"
+            " pip install 'pathlib-next[uri]'\n"
+        )
+    assert "s3cr3t" not in "".join(capsys.readouterr())

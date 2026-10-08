@@ -174,6 +174,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Paths constructed separately, on another endpoint, or with no source (the
   result of `relative_to()`) do not share; two `UriPath(url)` calls still make
   two connections, so build the root once and derive from it.
+- **`uripath.main()` returns the exit status of a wrong invocation and of
+  `--help`.** It raised `SystemExit(2)` and `SystemExit(0)`, although it is
+  documented to return an `int`. The console script's exit status is the same;
+  a program that called `main()` and caught `SystemExit` reads the returned
+  status instead.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -858,6 +863,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`AzPath.rename()` no longer waits for ever on a pending copy.** It waits at
   most `COPY_POLL_TIMEOUT`, aborts the copy and raises `TimeoutError`, the source
   untouched.
+- **`uripath` exits 141 when the reader of stdout went away, on Windows too.**
+  Windows reports a closed pipe as `OSError(EINVAL)`, so `read`, `write` and
+  `sync` printed `uripath: OSError: [Errno 22] Invalid argument` and exited 1 or
+  120 unless the reader left in the middle of a large write. They now exit 141
+  without a message, as the documentation says.
+- **Without the `uri` extra, `uripath` no longer echoes a URI argument.** The
+  error line quoted the whole argument, password included. It now reads `the
+  'http' scheme needs the 'uri' extra: pip install 'pathlib-next[uri]'`.
+- **`uripath` reports a wrong invocation with exit status 2 and the usage.**
+  `cp -r` with `-` and an unknown `--encoding` exited 1 as if the operation had
+  failed. Every flag and positional now has a help line.
+- **`uripath.main(stderr=)` accepts a binary stream.** The error line was written
+  as text, so a `BytesIO` raised `TypeError` instead of returning 1.
 
 ## [0.9.12] - 2026-10-08
 
