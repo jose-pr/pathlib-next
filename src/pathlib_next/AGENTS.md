@@ -702,7 +702,8 @@ chained (their text can carry credentials).
   `rmdir()` checks emptiness first; `rm(recursive=True)` is one recursive
   `DELETE` (failed members of a 207 raise). `rename()` = `MOVE` with
   `Overwrite: F` (existing target → `FileExistsError`), no credentials in
-  `Destination`. 423 → `PermissionError`. `PROPFIND`, `PUT`, `MKCOL`, `DELETE`
+  `Destination`, which carries the target's own query (never the source's)
+  and no fragment. 423 → `PermissionError`. `PROPFIND`, `PUT`, `MKCOL`, `DELETE`
   and `MOVE` follow the `HttpPath` redirect rule above (a listing is scoped to
   the URL that answered it). No `chmod()`.
 - **`FtpPath`** (`ftp:`/`ftps:`; `uri` extra; `schemes.ftp`)

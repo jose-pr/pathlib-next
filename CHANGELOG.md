@@ -539,6 +539,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was text broke `stat()`. Each reply is decoded and checked in one place per
   provider now, `exists()` answers `False` and `stat()` raises `OSError`. A
   raw file body has no shape to check and is returned as sent.
+- **`DavPath.rename()` no longer puts the source's query in `Destination`.** A
+  source such as `dav://h/d/f.txt?sig=...` sent `Destination: .../d/g.txt?sig=...`,
+  handing a signature meant for the source to the destination URL. The header
+  carries the target's own query (none for a `str` target) and no fragment, and
+  `rename()` returns the target path with that query. Pass a `Uri` target that
+  carries the query a server needs on the destination.
 
 ## [0.9.12] - 2026-10-08
 
