@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `pathlib_next.uri.schemes._gitrepo`, `.github` and `.gitlab`); the request is
   still sent. Use an `https://` `api_base`, or filter the warning for a
   trusted network.
+- **`SftpAuthenticationError` and `SftpHostKeyError`.** Importable from
+  `pathlib_next.uri.schemes.sftp`. A refused login is the first (a
+  `PermissionError`, `EACCES`) and a host key that is unknown, changed or
+  refused the second (a `ConnectionError`, `ECONNABORTED`), on both SFTP
+  backends. Catch `OSError`, or these two to tell a login from a host key.
 
 ### Changed
 - **`from pathlib_next import *` publishes only the documented names.** It also
@@ -545,6 +550,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carries the target's own query (none for a `str` target) and no fragment, and
   `rename()` returns the target path with that query. Pass a `Uri` target that
   carries the query a server needs on the destination.
+- **A lost connection, a refused login and an untrusted host key are `OSError`,
+  on both SFTP backends.** `asyncssh.ConnectionLost`, `HostKeyNotVerifiable` and
+  `PermissionDenied`, `paramiko.AuthenticationException`, `BadHostKeyException`
+  and the `SSHException` of a rejected key crossed the API, and a translated
+  server status was chained to the library's exception. The dropped connection
+  is now `ConnectionResetError`, the login `SftpAuthenticationError`, the key
+  `SftpHostKeyError`, any other failure of the handshake `ConnectionAbortedError`
+  and a refused connection `ConnectionRefusedError` on both; nothing is chained
+  (the library's text can carry credentials). A caller that caught
+  `paramiko.AuthenticationException` or `asyncssh.PermissionDenied` catches
+  `SftpAuthenticationError` or `PermissionError`; one that caught
+  `paramiko.SSHException` for a refused key catches `SftpHostKeyError`. After a
+  lost connection no second request is made to find out whether the entry
+  exists (`mkdir()` of a directory that was created could answer
+  `FileExistsError`).
+- **A directory holding a name that is not UTF-8 lists on both SFTP backends.**
+  With paramiko one such name raised `UnicodeDecodeError` out of `iterdir()`,
+  `walk()`, `glob()` and `copy()`; with asyncssh it raised `OSError`, which
+  `walk()` and `glob()` swallowed into an empty result, and `rm(recursive=True)`
+  could not remove the tree. The name is now the lone-surrogate string of its
+  bytes, beside its siblings, and reads, stats, unlinks and copies by the same
+  bytes.
+- **paramiko's SFTP errors agree with asyncssh's.** An "operation unsupported"
+  status was an `OSError` without an `errno` (so `copy()` to a server that
+  refuses `SETSTAT` raised after the data had been copied and a recursive copy
+  stopped at the first file); it is `NotImplementedError`, which `copy()`
+  tolerates. Errors now carry the remote path in `filename` (and `filename2` for
+  `rename()`), and the two-path error of asyncssh no longer prints
+  `[WinError None]` on Windows.
 
 ## [0.9.12] - 2026-10-08
 
