@@ -635,9 +635,15 @@ chained (their text can carry credentials).
     re-sent once with the same method, headers and body; any other 3xx,
     another origin or a second redirect raises `OSError(EIO)` naming the
     status and the `Location` (userinfo removed). A body that is not bytes or
-    `str` cannot be re-sent, so it raises too.
+    `str` cannot be re-sent, so it raises too. A followed `GET`/`HEAD` redirect
+    to another host drops `Authorization` only (`requests`' rule): headers
+    other than `Authorization` from `with_session(headers=...)` (`X-Api-Key`,
+    a vendor token header) are sent to the new host as well, so keep a secret
+    in `Authorization` or `auth=`, or point the path at the final URL.
   - URL userinfo is sent as Basic `auth=` (not in the URL) unless
     `requests_args`/`session.auth` set auth; it takes priority over `~/.netrc`.
+    Percent-escapes stand for octets, and those octets are the credential:
+    `caf%C3%A9` is sent as UTF-8 bytes, `%FF` as the byte `FF`.
   - `stat(*, follow_symlinks=True, walk_up_last_modified=False)` — `HEAD`
     (`GET` on 405); a redirect is followed once, at its `Location`; a final
     URL whose path ends in `/` is a directory (a query or fragment does not
@@ -654,7 +660,9 @@ chained (their text can carry credentials).
     larger number to allow more) is `OSError(EFBIG)`. A name that is not
     UTF-8 (`caf%E9`) keeps its bytes (`surrogateescape`) and is requested as
     listed.
-  - `open("r")` streams `GET` with `Accept-Encoding: identity`. `"w"`/`"x"`
+  - `open("r")` streams `GET` with `Accept-Encoding: identity`; the mode is
+    matched exactly, so `"r+"`, `"w+"` and `"a+"` raise `NotImplementedError`.
+    `"w"`/`"x"`
     buffer and send `write_method` on close. `"x"` first calls `stat()`: found
     → `FileExistsError`, a failure other than not-found raises with nothing
     sent; the upload then carries `If-None-Match: *`, and a 412 reply →
@@ -681,8 +689,9 @@ chained (their text can carry credentials).
   href, resolved against the collection, names the same host and a direct
   child, and a `getcontentlength` that is not a plain number is unknown (`0`).
   `open("r")` on a collection → `IsADirectoryError`;
-  `"w"`/`"x"` `PUT` on close (`"x"` as for `HttpPath`, probing with
-  `PROPFIND`); `"a"` unsupported. `mkdir()` = `MKCOL`
+  `"w"`/`"x"` send `write_method` (default `PUT`) on close (`"x"` as for
+  `HttpPath`, probing with `PROPFIND`); `"a"` unsupported, so `append_mode`
+  has no effect. `mkdir()` = `MKCOL`
   (missing parent → `FileNotFoundError`). `unlink()` refuses a collection;
   `rmdir()` checks emptiness first; `rm(recursive=True)` is one recursive
   `DELETE` (failed members of a 207 raise). `rename()` = `MOVE` with
@@ -845,9 +854,19 @@ chained (their text can carry credentials).
     (`schemes._gitrepo`): `Authorization: Bearer <token>`, timeout default
     `(10, 60)`, `cache` dict; `api_base` overrides the API root;
     `BaseRepoBackend.request(method, url, **kwargs)` is the override point.
+    A request that carries `Authorization` (the token, or one given in
+    `headers=`) to a plain `http://` URL on a host other than loopback is
+    still sent, with an `InsecureTransportWarning` (a `UserWarning`,
+    importable from `schemes._gitrepo`, `schemes.github` and
+    `schemes.gitlab`).
     Without `backend=`, the token is the userinfo password
     (`x-access-token:TOKEN@`) or else the bare user (`TOKEN@`).
-  - `str()`, `repr()` and `as_uri(sanitize=True)` drop the whole userinfo.
+  - `str()`, `repr()`, `as_posix()` and `as_uri(sanitize=True)` drop the whole
+    userinfo. Owner, repository and every path segment are percent-encoded
+    into the API URL, so none can add a query or a segment, and a `.` or `..`
+    segment in the path or the ref (made with `with_name("..")` or
+    `with_path()`; a URI's own dot segments are already resolved) raises
+    `ValueError` instead of leaving the repository's API root.
   - API root `https://api.github.com` for `github.com`, else
     `https://host[:port]/api/v3`. Contents API listings (a directory at the
     1,000-entry cap is re-read through the Git Trees API); file bodies use

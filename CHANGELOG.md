@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (with `fs`, `io` and `checksum`), `utils`, `utils.stat` and `utils.glob`
   declare `__all__` with the names `src/pathlib_next/AGENTS.md` documents for
   them. Nothing documented moved.
+- **`InsecureTransportWarning`.** A `RepoBackend` (`github:`, `gitlab:`, `git:`)
+  that is about to send an `Authorization` header (its token, or one passed as
+  `headers=`) to a plain `http://` API root on a host other than loopback now
+  warns with this `UserWarning` subclass (importable from
+  `pathlib_next.uri.schemes._gitrepo`, `.github` and `.gitlab`); the request is
+  still sent. Use an `https://` `api_base`, or filter the warning for a
+  trusted network.
 
 ### Changed
 - **`from pathlib_next import *` publishes only the documented names.** It also
@@ -106,6 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   directory of a `walk()`), falling back to the path as given on a 404, and
   `stat()` follows the `Location` of the first answer instead of repeating the
   request that was redirected.
+- **The header and the schemes guide say that only `Authorization` is dropped
+  from a redirected `GET`/`HEAD`.** `with_session(headers={"X-Api-Key": ...})`
+  has always been sent to the new host when `requests` follows a redirect to
+  another one; nothing changed in the code. Keep a secret in `Authorization`
+  or `auth=`, or point the path at the final URL.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -471,6 +483,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Location` for another origin, a second redirect or any other 3xx. A `dav:`
   URL that redirects to another origin (`http:` to `https:`, say) must be
   spelled with its final scheme and host (`davs:`).
+- **URL passwords outside Latin-1 are sent as the octets the URL carried.**
+  `http://user:caf%C3%A9@host/` went out as the single byte E9 (`requests`
+  encodes a text credential as Latin-1) and `%FF` raised `UnicodeEncodeError`
+  from `stat()` before anything was sent, so `exists()` said `False`. The
+  percent-escapes are now decoded to bytes and `requests` sends those bytes;
+  an ASCII credential is passed as text as before.
+- **`as_posix()` of a `github:`, `gitlab:` or `git:` path no longer shows the
+  userinfo.** `str()`, `repr()` and `as_uri(sanitize=True)` dropped it but
+  `as_posix()` rendered `TOKEN@github.com:/o/r/f`. It is `github.com:/o/r/f`
+  now; `as_uri()` still round-trips the userinfo.
+- **A `github:` path cannot add to its API URL.** Owner and repository were put
+  into the URL raw (`github://github.com/o/r%3Fx=1/a.txt` asked for
+  `/repos/o/r?x=1/contents/a.txt`) and a `..` segment made with `with_name("..")`
+  or `with_path()` was collapsed by the client into another repository's
+  address, with the token attached. Owner, repository and every path segment
+  are percent-encoded now, and a `.` or `..` segment in the path or the ref
+  raises `ValueError` (`exists()` answers `False`); the same check covers
+  `gitlab:`'s file path.
+- **`open("r+")`, `open("r+b")` on `http:` and `dav:` raise
+  `NotImplementedError`.** They returned a read-only stream whose first write
+  failed. Open with `"rb"` to read. The `github:` and `gitlab:` paths already
+  refused them.
+- **`dav:` uploads with the `write_method` given to `with_session()`.** It was
+  accepted and ignored (`PUT` always went out). `DavPath.stat()` also accepts
+  `walk_up_last_modified=` like `HttpPath.stat()`; the PROPFIND reply already
+  carries the modification time, so it changes nothing.
 
 ## [0.9.12] - 2026-10-08
 

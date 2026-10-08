@@ -111,7 +111,16 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
     a second redirect raise `OSError` (`EIO`) naming the status and the
     `Location`. Point the path at the final URL if the server redirects.
   - Credentials in the URL (`https://user:pw@host/`) are sent as Basic
-    `auth=`, never inside the request URL, and take priority over `~/.netrc`.
+    `auth=`, never inside the request URL, and take priority over `~/.netrc`;
+    the octets of the percent-escapes are the credential (`caf%C3%A9` goes out
+    as UTF-8 bytes).
+  - When a `GET` or `HEAD` is redirected to another host, `requests` drops
+    `Authorization` and nothing else: headers other than `Authorization` from
+    `with_session(headers=...)` (`X-Api-Key`, a vendor token header) go to the
+    new host too. Keep a secret in `Authorization` or `auth=`, or point the
+    path at the final URL.
+  - The mode of `open()` is matched exactly: `"r+"`, `"w+"` and `"a+"` raise
+    `NotImplementedError`.
 - **`dav(s):`** (`DavPath`) is WebDAV (RFC 4918) over the equivalent
   `http(s):` URL, with the same `with_session()`. `PROPFIND` gives real
   directory metadata, `MKCOL`/`PUT`/`DELETE`/`MOVE` full writes. A reply that
@@ -121,7 +130,8 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
   refuses a collection and `rmdir()` checks that it is empty (WebDAV
   `DELETE` is recursive); `rm(recursive=True)` is a single `DELETE`.
   `rename()` does not overwrite an existing target (`FileExistsError`).
-  Append mode is not supported.
+  Uploads use `write_method` (default `PUT`) from `with_session()`; append
+  mode is not supported, so `append_mode` has no effect.
 
 ## FTP
 
@@ -270,7 +280,12 @@ are read-only views of a repository over the REST APIs, using plain
 - Authentication: `RepoBackend(token=...)`, or the token in the URI userinfo,
   as the password (`github://x-access-token:TOKEN@github.com/owner/repo`) or
   bare (`github://TOKEN@github.com/...`). These schemes redact the whole
-  userinfo from `str()`, `repr()` and error messages.
+  userinfo from `str()`, `repr()`, `as_posix()` and error messages. A token
+  sent over plain `http://` to a host other than loopback (an `api_base` you
+  set) is still sent, with an `InsecureTransportWarning`.
+- Owner, repository and every path segment are percent-encoded into the API
+  URL, and a `.` or `..` segment (made with `with_name("..")`, say) raises
+  `ValueError` rather than leaving the repository's API root.
 - Requests time out after `(10, 60)` seconds (`RepoBackend(timeout=...)`).
   Rate-limit replies raise `OSError(EAGAIN)`.
 - GitHub listings come from the contents API (with its type and size) and
