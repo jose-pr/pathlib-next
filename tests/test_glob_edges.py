@@ -497,6 +497,8 @@ def test_localpath_raises_the_audit_events_pathlib_raises(tree):
         timeout=120,
     )
     assert done.returncode == 0, done.stderr
+    # The event of the call itself. What stdlib raises after it comes from its
+    # own implementation of the walk and differs from version to version.
     for call, (stdlib, ours) in json.loads(done.stdout).items():
         assert stdlib, f"pathlib raised no event for {call}"
-        assert ours == stdlib, call
+        assert ours[:1] == stdlib[:1], call
