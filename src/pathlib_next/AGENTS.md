@@ -538,7 +538,7 @@ not by a checker.
     derived, and never duplicate a connection. None of them carries the stat
     hint. `==`, `hash()`, `_same_filesystem()` and `_node_key()` answer as
     before, except that a pickle which dropped a supplied backend leaves a path
-    with none, which `_same_filesystem()` no longer tells from another host's.
+    with none, which `_same_filesystem()` cannot tell from another host's.
     A subclass with per-path state that is not a secret returns it from
     `_reduce_options()` (constructor keywords).
   - Listing: implement `_listdir() -> Iterator[str]` or override
