@@ -36,6 +36,8 @@ affected tests then report as skipped, never as passed:
 - `ReadPathContract.distinguishes_file_types` -- listing a file raises
   `NotADirectoryError` and reading a directory raises (plain HTTP cannot
   tell: one URL serves an index page or a file).
+- `ReadPathContract.supports_pickle` -- a path pickles, and the copy is equal
+  to it and hashes alike.
 - `PathContract.supports_rename` -- `rename()`.
 - `PathContract.supports_append` -- `open("a")`/`open("ab")`.
 - `PathContract.supports_exclusive_create` -- `open("x")`.
@@ -48,6 +50,7 @@ affected tests then report as skipped, never as passed:
 from __future__ import annotations
 
 import errno as _errno
+import pickle
 
 import pytest
 
@@ -146,12 +149,14 @@ class ReadPathContract(PurePathContract):
 
     Capability attributes (all default True; set one False only for a
     documented gap, and the affected tests skip): `supports_listing`,
-    `supports_empty_directories`, `distinguishes_file_types`.
+    `supports_empty_directories`, `distinguishes_file_types`,
+    `supports_pickle`.
     """
 
     supports_listing = True
     supports_empty_directories = True
     distinguishes_file_types = True
+    supports_pickle = True
 
     def _require(self, capability):
         if not getattr(self, capability):
@@ -174,6 +179,20 @@ class ReadPathContract(PurePathContract):
         assert not (root / "nonexistent").exists()
         assert not (root / "nonexistent").is_file()
         assert not (root / "nonexistent").is_dir()
+
+    def test_a_pickled_path_is_equal_to_the_original(self, root):
+        # A worker process receives a path by pickle. The copy must be the
+        # same value: equal, hashing alike, and for a URI path placed on the
+        # same filesystem as the original.
+        self._require("supports_pickle")
+        path = root / "a.txt"
+        again = pickle.loads(pickle.dumps(path))
+        assert type(again) is type(path)
+        assert again == path
+        assert hash(again) == hash(path)
+        if hasattr(path, "_supplied_backend"):
+            assert again._same_filesystem(path)
+            assert path._same_filesystem(again)
 
     def test_read_text_and_bytes(self, root):
         assert (root / "a.txt").read_text() == "a"

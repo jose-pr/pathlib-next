@@ -247,6 +247,7 @@ A backend that genuinely cannot meet a rule sets the matching class attribute to
 | `supports_listing` | `ReadPathContract` | `iterdir()`, `glob()`, `walk()` | `DataUri` (a single resource) |
 | `supports_empty_directories` | `ReadPathContract` | `empty_dir/` lists as empty | `GitHubPath`, `GitLabPath` (git trees cannot hold an empty directory) |
 | `distinguishes_file_types` | `ReadPathContract` | listing a file raises `NotADirectoryError`; reading a directory raises | `HttpPath` (one URL serves an index page or a file) |
+| `supports_pickle` | `ReadPathContract` | `pickle.loads(pickle.dumps(path))` is equal to the path and hashes alike | none |
 | `supports_rename` | `PathContract` | `rename()` | `MemPath` (`move()` copies instead) |
 | `supports_append` | `PathContract` | `open("a")` | `ZipUri`, `DavPath`, `S3Path`, `GsPath`, `AzPath` |
 | `supports_exclusive_create` | `PathContract` | `open("x")` | none |

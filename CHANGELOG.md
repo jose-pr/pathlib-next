@@ -84,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `schemesmap` as `dict` with a default of `None`, which pyright rejects for
   every construction (`UriPath("sftp://h/x")`); it is now an optional mapping of
   scheme to class.
+- **`ReadPathContract` has a pickle test and a `supports_pickle` switch.** A
+  contract subclass checks that `pickle.loads(pickle.dumps(path))` is equal to
+  the path, hashes alike, and for a URI path is placed on the same filesystem.
+  An implementation whose paths cannot pickle sets `supports_pickle = False`
+  on its test class and the test skips.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -324,6 +329,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   an archive path does not reuse a handle another path opened through
   `file:`. The map restricts dispatch only: it does not stop code that holds a
   built path or class from using it.
+- **A pickled `UriPath` holds its URI and nothing else.** The pickle of a path
+  that had a backend carried it: the URI password, the session headers of
+  `with_session()`, S3 `client_kwargs` and an SFTP `connect_opts` password were
+  all in the bytes, a `zip:` path did not pickle at all, and an `s3:` or `gs:`
+  path stopped pickling once its client existed. A path now pickles as its URI
+  text (a URI with userinfo pickles with it, since that is the URI) and its
+  `schemesmap`; the stat hint is not part of it, a backend the path built for
+  itself is built again when needed, and a backend you supplied is dropped
+  unless its class sets `picklable = True`. A program that
+  sent a path with a supplied backend to another process and relied on the
+  backend arriving must set `picklable = True` on the backend class or call
+  `with_backend()` on the unpickled path. `copy.copy()` and `copy.deepcopy()`
+  share the backend object (supplied or built by the path) instead of copying a
+  connection, so a deep copy (`dataclasses.asdict()` makes one) no longer fails
+  on a `zip:` path.
 
 ## [0.9.12] - 2026-10-08
 

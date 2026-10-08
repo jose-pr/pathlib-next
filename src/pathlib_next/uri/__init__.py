@@ -888,6 +888,15 @@ class Uri(Pathname):
         return posix
 
 
+def _rebuild_path(cls, uri, options, backend, schemesmap):
+    """Unpickle a `UriPath`: the class built from its URI text again."""
+    if backend is not None:
+        options = {**options, "backend": backend}
+    if schemesmap is not None:
+        options = {**options, "schemesmap": schemesmap}
+    return cls(uri, **options)
+
+
 def _looks_like_uri(value: str, schemesmap=None) -> bool:
     """Whether a destination string is URI syntax rather than a path.
 
@@ -1228,6 +1237,42 @@ class UriPath(Uri, Path):
     def with_backend(self, backend):
         """Return a new path instance sharing the same backend state."""
         return self._from_parsed_parts(*self.parts, backend=backend)
+
+    def _reduce_options(self) -> dict:
+        """Constructor keywords a pickle rebuilds this path with, beside its
+        URI text. A scheme with per-path state that is not a secret returns
+        it here; the backend and the stat hint are never part of it."""
+        return {}
+
+    def __reduce__(self):
+        # A path pickles as its URI text (userinfo included: that is the
+        # URI), never its connection or session. A backend the caller
+        # supplied goes along only if it declares `picklable = True`; a
+        # derived one is rebuilt on demand.
+        backend = self._supplied_backend()
+        if backend is not None and getattr(backend, "picklable", False) is not True:
+            backend = None
+        return (
+            _rebuild_path,
+            (
+                type(self),
+                self.as_uri(sanitize=False),
+                self._reduce_options(),
+                backend,
+                self._schemes_in_use,
+            ),
+        )
+
+    def __copy__(self):
+        # The same URI on the same backend object, supplied or derived: a
+        # copy must not open a second connection or change which paths
+        # `_same_filesystem()` places together.
+        return self._from_parsed_parts(*self.parts)
+
+    def __deepcopy__(self, memo):
+        # A connection is not part of the value, so it is shared here too.
+        inst = memo[id(self)] = self.__copy__()
+        return inst
 
     def __truediv__(self, key: str | Uri | os.PathLike):
         # Only converting `key` decides NotImplemented. Catching TypeError

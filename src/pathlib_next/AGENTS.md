@@ -518,6 +518,17 @@ not by a checker.
     on through `backend=` (as a `with_source()` override does) is recognised
     as derived when the object is weakly referenceable (every built-in
     `Base*Backend` is) and `_initbackend()` built it.
+    Copies: `pickle` holds the URI text (userinfo included, since that is the
+    URI) and the `schemesmap`, and nothing else: no session headers, client
+    kwargs or live client. A supplied backend goes along only if its class
+    sets `picklable = True`; a derived one is built again on demand.
+    `copy.copy()` and `copy.deepcopy()` share the backend object, supplied or
+    derived, and never duplicate a connection. None of them carries the stat
+    hint. `==`, `hash()`, `_same_filesystem()` and `_node_key()` answer as
+    before, except that a pickle which dropped a supplied backend leaves a path
+    with none, which `_same_filesystem()` no longer tells from another host's.
+    A subclass with per-path state that is not a secret returns it from
+    `_reduce_options()` (constructor keywords).
   - Listing: implement `_listdir() -> Iterator[str]` or override
     `_scandir()`; `iterdir()` wraps each name with the entry's stat as a
     single-use hint (the child's first `stat()` returns it, later calls
@@ -909,8 +920,9 @@ stdout returns 141, Ctrl-C 130.
   `root` fixture only.
 - **`ReadPathContract(PurePathContract)`** — exists/types, reads and read
   modes, `iterdir()`, `stat()`, `glob()`/`rglob()`, `walk()`, with pathlib's
-  exception types. Capability attributes: `supports_listing`,
-  `supports_empty_directories`, `distinguishes_file_types`.
+  exception types, and a pickle round trip that keeps `==` and `hash()`.
+  Capability attributes: `supports_listing`, `supports_empty_directories`,
+  `distinguishes_file_types`, `supports_pickle`.
 - **`PathContract(ReadPathContract)`** — `mkdir()`, writes and write/append/
   exclusive modes, `unlink()`, `rmdir()`, `rm()` (also with
   `follow_symlinks=`/`follow_binds=`: an implementation that overrides
