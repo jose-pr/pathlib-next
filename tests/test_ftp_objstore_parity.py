@@ -628,6 +628,7 @@ def test_ftp_listing_refused_with_a_4xx_is_a_transient_oserror(ftp_factory):
         self.respond("425 Can't open data connection.")
 
     handler.ftp_MLSD = refuse
+    handler.ftp_MLST = refuse  # stat() asks MLST where the server offers it
     backend = FtpBackend(timeout=5)
     directory = FtpPath(f"{url}d", backend=backend)
     with pytest.raises(OSError) as raised:

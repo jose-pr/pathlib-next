@@ -5,12 +5,14 @@ import contextlib as _contextlib
 import errno as _errno
 import ftplib as _ftplib
 import io as _io
+import itertools as _itertools
 import ssl as _ssl
 import stat as _stat
 import threading as _thread
 import time as _time
 import types as _types
 import typing as _ty
+import weakref as _weakref
 
 import netimps as _netimps
 
@@ -121,24 +123,94 @@ class FtpBackend(BaseFtpBackend):
         return client
 
 
-def _create_ftpclient(
-    backend: BaseFtpBackend, source: Source, tls: bool, thread_id: int
-):
+IDLE_PROBE_SECONDS = 1.0
+"""A cached control connection that carried a command within this many seconds
+is used as it is. One that has been idle longer, or has not carried a command
+yet, is probed with `NOOP` first and replaced if the server dropped it.
+Servers close idle sessions after tens of seconds at the least, so a run of
+operations pays no probe and a pause long enough to lose the session pays one."""
+
+_now = _time.monotonic
+
+
+class _Session:
+    """What is known of one cached connection: when it last answered, whether
+    the server offers `MLST`, and whether a command is running on it. A
+    connection dropped from the cache while a command runs on it is closed
+    when that command ends."""
+
+    __slots__ = ("last_used", "mlst", "busy", "retired")
+
+    def __init__(self):
+        self.last_used: "float | None" = None
+        self.mlst: "bool | None" = None
+        self.busy = 0
+        self.retired = False
+
+
+_SESSION_ATTR = "_pathlib_next_session"
+_SESSION_LOCK = _thread.Lock()
+
+
+def _session_of(client) -> "_Session | None":
+    session = getattr(client, _SESSION_ATTR, None)
+    if session is None:
+        session = _Session()
+        try:
+            setattr(client, _SESSION_ATTR, session)
+        except AttributeError:
+            return None  # a client that takes no attributes is always probed
+    return session
+
+
+def _create_ftpclient(backend: BaseFtpBackend, source: Source, tls: bool, scope: int):
     return backend.client(source, tls)
 
 
 def _close_ftpclient(key: tuple, client: "_ftplib.FTP") -> None:
-    # Only the calling thread's own connections are closed here: an LRU
-    # overflow can evict another thread's entry while that thread is in the
-    # middle of a transfer on it. Those are dropped from the cache and close
-    # when their last user lets go of them.
-    if key[3] == _thread.get_ident():
-        client.close()
+    session = getattr(client, _SESSION_ATTR, None)
+    if session is not None:
+        with _SESSION_LOCK:
+            if session.busy:
+                # Dropped from the cache while a command is running on it
+                # (another thread's LRU overflow): its user closes it.
+                session.retired = True
+                return
+    client.close()
 
 
-# Keyed by (backend, source, tls, thread): ftplib clients are not
-# thread-safe. Evicted and discarded clients of the calling thread are
-# closed (`_close_ftpclient`), not left logged in.
+_THREAD_SCOPE = _thread.local()
+_SCOPE_IDS = _itertools.count(1)
+
+
+def _drop_scope(scope: int) -> None:
+    with _CACHED_CLIENTS.lock:
+        keys = [key for key in _CACHED_CLIENTS.cache if key[3] == scope]
+    for key in keys:
+        _CACHED_CLIENTS.discard(*key)
+
+
+class _ThreadScope:
+    """Held in the thread's own storage, so it is released when the thread
+    ends and takes the thread's cached connections with it."""
+
+    def __init__(self):
+        self.id = next(_SCOPE_IDS)
+        _weakref.finalize(self, _drop_scope, self.id).atexit = False
+
+
+def _scope_id() -> int:
+    """The calling thread's key in `_CACHED_CLIENTS`. Not the thread
+    identifier, which the operating system reuses for a later thread."""
+    scope = getattr(_THREAD_SCOPE, "scope", None)
+    if scope is None:
+        scope = _THREAD_SCOPE.scope = _ThreadScope()
+    return scope.id
+
+
+# Keyed by (backend, source, tls, thread scope): ftplib clients are not
+# thread-safe. Evicted and discarded clients are closed (`_close_ftpclient`),
+# not left logged in, and a thread's clients are dropped when it ends.
 _CACHED_CLIENTS = _utils.LRU(_create_ftpclient, maxsize=128, on_evict=_close_ftpclient)
 
 _DEFAULT_BACKEND = FtpBackend()
@@ -174,6 +246,48 @@ def _parse_mlsd_time(value: str) -> int:
         return _calendar.timegm(_time.strptime(value[:14], "%Y%m%d%H%M%S"))
     except ValueError:
         return 0
+
+
+def _facts_size(value) -> int:
+    """`st_size` from an MLSD `size` fact. A value that is not a plain
+    non-negative decimal number, or too large for any file, is unknown (0), as
+    a missing fact is."""
+    text = str(value or "")
+    if not (text.isascii() and text.isdigit()):
+        return 0
+    size = int(text)
+    return size if size < 1 << 63 else 0
+
+
+def _parse_fact_line(line: str) -> "tuple[str, dict]":
+    """`(name, facts)` of one RFC 3659 `facts SP name` line; fact names are
+    lower-cased, as `ftplib.FTP.mlsd()` does."""
+    found, _, name = line.rstrip("\r\n").partition(" ")
+    facts = {}
+    for fact in found[:-1].split(";") if found else ():
+        key, _, value = fact.partition("=")
+        facts[key.lower()] = value
+    return name, facts
+
+
+def _lists_mlst(reply: str) -> bool:
+    """Whether a `FEAT` reply has an `MLST` feature line (RFC 2389)."""
+    for line in reply.splitlines():
+        words = line.split(None, 1)
+        if line[:1] == " " and words and words[0].upper() == "MLST":
+            return True
+    return False
+
+
+def _mlst_facts(reply: str) -> "dict | None":
+    """The facts of the entry in an `MLST` reply (RFC 3659 7.2: `250-` line,
+    one entry line starting with a space, `250` line), or None when it holds
+    no entry that says what it is."""
+    for line in reply.splitlines()[1:]:
+        if line[:1] == " ":
+            _name, facts = _parse_fact_line(line[1:])
+            return facts if "type" in facts else None
+    return None
 
 
 def _facts_mode(facts: dict, is_dir: bool) -> "int | None":
@@ -244,10 +358,12 @@ class _FtpWriteStream(_io.BytesIO):
 class FtpPath(UriPath):
     """`ftp:`/`ftps:` scheme: full read/write access via stdlib `ftplib`,
     with a thread-keyed LRU connection cache (`_CACHED_CLIENTS`, mirroring
-    `sftp.py`). Directory listing and stat prefer MLSD (RFC 3659 -- gives
-    type/size/modify facts in one round trip); servers that don't support it
-    fall back to NLST for listing (names only) and SIZE for file stat
-    (no portable "not found vs. is a directory" distinction in that path)."""
+    `sftp.py`; a thread's connections close when it ends). A listing prefers
+    MLSD (RFC 3659 -- type/size/modify facts in one round trip) and a stat
+    MLST of the entry itself where FEAT lists it, else its parent's MLSD;
+    servers that don't support them fall back to NLST for listing (names
+    only) and SIZE/CWD for stat (no portable "not found vs. is a directory"
+    distinction in that path)."""
 
     __SCHEMES = ("ftp", "ftps")
     __slots__ = ()
@@ -262,10 +378,20 @@ class FtpPath(UriPath):
     def _tls(self):
         return self.source.scheme == "ftps"
 
+    def _cache_key(self) -> tuple:
+        return (self.backend, self.source, self._tls, _scope_id())
+
     @property
     def _ftpclient(self) -> "_ftplib.FTP":
-        thread_id = _thread.get_ident()
-        client = _CACHED_CLIENTS(self.backend, self.source, self._tls, thread_id)
+        key = self._cache_key()
+        client = _CACHED_CLIENTS(*key)
+        session = _session_of(client)
+        if (
+            session is not None
+            and session.last_used is not None
+            and _now() - session.last_used <= IDLE_PROBE_SECONDS
+        ):
+            return client
         try:
             client.voidcmd("NOOP")
         except (
@@ -276,9 +402,7 @@ class FtpPath(UriPath):
             _ftplib.error_reply,
         ):
             # Replaced and closed (`_close_ftpclient`), not abandoned.
-            client = _CACHED_CLIENTS.invalidate(
-                self.backend, self.source, self._tls, thread_id
-            )
+            client = _CACHED_CLIENTS.invalidate(*key)
         return client
 
     @_contextlib.contextmanager
@@ -293,7 +417,7 @@ class FtpPath(UriPath):
         leaves it out of step, so the client is dropped from the cache and
         closed; the next operation reconnects. Protocol errors and EOF are
         re-raised as ConnectionError."""
-        key = (self.backend, self.source, self._tls, _thread.get_ident())
+        key = self._cache_key()
         try:
             client = self._ftpclient
         except _ftplib.error_perm as error:
@@ -306,9 +430,18 @@ class FtpPath(UriPath):
             raise ConnectionError(
                 _errno.ECONNREFUSED, f"FTP connection failed: {error!r}", str(self)
             ) from error
+        session = _session_of(client)
+        if session is not None:
+            with _SESSION_LOCK:
+                session.busy += 1
         try:
             yield client
+            if session is not None:
+                session.last_used = _now()
         except (_ftplib.error_perm, _ftplib.error_temp):
+            # A complete reply: the connection is in step.
+            if session is not None:
+                session.last_used = _now()
             raise
         except BaseException as error:
             with _CACHED_CLIENTS.lock:
@@ -329,6 +462,13 @@ class FtpPath(UriPath):
                     str(self),
                 ) from error
             raise
+        finally:
+            if session is not None:
+                with _SESSION_LOCK:
+                    session.busy -= 1
+                    closing = session.retired and not session.busy
+                if closing:
+                    client.close()
 
     def _call(self, method: str, *args):
         """`client.<method>(*args)` through `_wire()`. Only `error_perm` is
@@ -375,8 +515,8 @@ class FtpPath(UriPath):
 
     def _mlsd_entry(self):
         """This entry's MLSD facts from its parent's listing, or None if
-        not found, the parent can't be listed, or the server doesn't
-        support MLSD."""
+        not found, the parent can't be listed (a name in it the client cannot
+        decode included), or the server doesn't support MLSD."""
         parent = self.path.rsplit("/", 1)[0] or "/"
         try:
             for name, facts in self._call("mlsd", parent):
@@ -384,12 +524,72 @@ class FtpPath(UriPath):
                     return facts
         except _ftplib.error_perm:
             return None
+        except OSError as error:
+            if error.errno == _errno.EILSEQ:
+                return None
+            raise
         return None
+
+    def _offers_mlst(self) -> bool:
+        """Whether the server of this path's connection lists `MLST` in its
+        `FEAT` reply, asked once per connection."""
+        try:
+            with self._wire() as client:
+                session = _session_of(client)
+                if session is not None and session.mlst is not None:
+                    return session.mlst
+                send = getattr(client, "sendcmd", None)
+                offered = False
+                if send is not None:
+                    try:
+                        offered = _lists_mlst(send("FEAT"))
+                    except _ftplib.error_perm:
+                        pass  # 500/502: the server has no FEAT
+                if session is not None:
+                    session.mlst = offered
+                return offered
+        except _ftplib.error_temp:
+            return False  # not remembered: the next stat asks again
+
+    def _stat_entry(self):
+        """This entry's facts, asked of the server in the fewest replies it
+        allows: `MLST` of the entry itself where `FEAT` offers it (RFC 3659
+        7.2), else its parent's `MLSD` listing. None when the server has no
+        such entry, or will not say."""
+        if self._offers_mlst():
+            try:
+                reply = self._control(f"MLST {self._wirepath}")
+            except _ftplib.error_perm:
+                return None
+            facts = None if reply is None else _mlst_facts(reply)
+            if facts is not None:
+                return facts
+            # An MLST that answers without an entry is no use on this
+            # connection: use the listing, and do not ask again.
+            session = self._cached_session()
+            if session is not None:
+                session.mlst = False
+        return self._mlsd_entry()
+
+    def _cached_session(self) -> "_Session | None":
+        client = _CACHED_CLIENTS.cache.get(self._cache_key())
+        return None if client is None else _session_of(client)
+
+    def _control(self, command: str) -> "str | None":
+        """The reply to a raw `command` on the control connection, or None for
+        a client that cannot send one. `error_perm` is left for the caller; a
+        transient `error_temp` becomes OSError."""
+        try:
+            with self._wire() as client:
+                send = getattr(client, "sendcmd", None)
+                return None if send is None else send(command)
+        except _ftplib.error_temp as error:
+            raise OSError(_errno.EAGAIN, str(error), str(self)) from error
 
     def _facts_to_filestat(self, facts: dict) -> FileStat:
         # Fact values are case-insensitive (RFC 3659 7.5.1).
         kind = str(facts.get("type", "file")).lower()
-        size = int(facts.get("size", 0) or 0)
+        size = _facts_size(facts.get("size"))
         modify = facts.get("modify")
         mtime = _parse_mlsd_time(modify) if modify else 0
         is_dir = kind in ("dir", "cdir", "pdir")
@@ -473,10 +673,10 @@ class FtpPath(UriPath):
                 return FileStat(is_dir=True)
             except _ftplib.error_perm as error:
                 raise FileNotFoundError(self) from error
-        facts = self._mlsd_entry()
+        facts = self._stat_entry()
         if facts is not None:
             return self._facts_to_filestat(facts)
-        # MLSD unsupported, the parent unlistable, or the entry not in it.
+        # MLST/MLSD unsupported, the parent unlistable, or the entry not there.
         # SIZE answers for a file -- in binary mode: servers refuse it in
         # the ASCII mode a fresh or listing session is in. CWD answers for
         # a directory (every path here is absolute, so the changed working
@@ -590,12 +790,33 @@ class FtpPath(UriPath):
         # A plain str target is a sibling rename (relative to self's
         # parent), matching sftp.py's rename() semantics.
         target = self._rename_target(target)
+        destination = self.with_path(target.path)
         try:
             self._call("rename", self._wirepath, target.path or "/")
         except _ftplib.error_perm as error:
-            raise self._translate(error) from error
+            raise self._rename_error(error, destination) from error
         # pathlib returns the new path.
-        return self.with_path(target.path)
+        return destination
+
+    def _rename_error(
+        self, error: "_ftplib.error_perm", destination: "FtpPath"
+    ) -> OSError:
+        """OSError for a refused rename. Whether a server replaces an existing
+        target is its own business (POSIX ones do, Windows ones answer `550
+        File exists`), so a refusal that does not read as a permission one,
+        with the source there and the target too, is `FileExistsError`."""
+        refused = self._translate(error)
+        if isinstance(refused, FileNotFoundError) or any(
+            word in str(error).lower() for word in _PERMISSION_WORDS
+        ):
+            return refused
+        try:
+            destination._fresh_stat()
+        except OSError:
+            return refused
+        return FileExistsError(
+            _errno.EEXIST, f"File exists ({error})", str(destination)
+        )
 
     def chmod(self, mode: int | str, *, follow_symlinks: bool = True):
         # SITE CHMOD is a non-standard FTP extension; pyftpdlib and many real
@@ -608,8 +829,13 @@ class FtpPath(UriPath):
         try:
             self._call("voidcmd", f"SITE CHMOD {mode:o} {self._wirepath}")
         except _ftplib.error_perm as error:
-            if _reply_code(error) not in _UNSUPPORTED_REPLIES:
-                translated = self._translate(error)
-                if isinstance(translated, FileNotFoundError):
-                    raise translated from error
-            raise NotImplementedError("SITE CHMOD not supported by this server")
+            if _reply_code(error) in _UNSUPPORTED_REPLIES:
+                raise NotImplementedError(
+                    f"SITE CHMOD not supported by this server ({error})"
+                ) from error
+            translated = self._translate(error)
+            if isinstance(translated, FileNotFoundError):
+                raise translated from error
+            raise NotImplementedError(
+                f"SITE CHMOD refused by the server ({error})"
+            ) from error

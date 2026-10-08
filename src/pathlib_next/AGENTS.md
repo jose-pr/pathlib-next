@@ -718,21 +718,33 @@ chained (their text can carry credentials).
     connections.
   - Paths without `backend=` share one default `FtpBackend()`. Connections
     are cached per (backend, source, tls, thread) (LRU of 128, closed on
-    eviction), probed with `NOOP` and replaced when dead.
-  - Listing/stat use `MLSD` (UTC `modify`; mode from `unix.mode` or the
-    `perm` fact); servers without it fall back to `NLST`/`SIZE`. A listing is
+    eviction, and closed when their thread ends). A connection that carried
+    a command within the last `schemes.ftp.IDLE_PROBE_SECONDS` (1 second) is
+    used as it is; one idle for longer, or not yet used, is probed with `NOOP`
+    and replaced when dead.
+  - A listing uses `MLSD` (UTC `modify`; mode from `unix.mode` or the `perm`
+    fact); `stat()` uses `MLST` of the entry itself where the server's `FEAT`
+    lists it (one reply on the control connection, `FEAT` asked once per
+    connection), else the parent's `MLSD`; a server without `MLSD` falls back
+    to `NLST` for a listing and `SIZE`/`CWD` for a stat. A `size` fact that is
+    not a plain non-negative number is unknown (`st_size` 0). A listing is
     read whole inside the guarded call: a transient `4xx` reply is
-    `OSError(EAGAIN)`, a name the client cannot decode is `OSError(EILSEQ)`,
-    and a listing that dies mid-transfer drops the connection, so the next
-    request reconnects.
+    `OSError(EAGAIN)`, a name the client cannot decode is `OSError(EILSEQ)`
+    for that directory only, and a listing that dies mid-transfer drops the
+    connection, so the next request reconnects. `stat()` of another entry in
+    a directory that holds an undecodable name is answered by `MLST`, or on a
+    server with `MLSD` and no `MLST` by `SIZE`/`CWD` (after a reconnect).
   - An empty path (`ftp://host`) is the root, as `ftp://host/` is: `/` is
     sent in every command that takes a path, never an empty argument (which a
     server reads as its working directory).
   - Reads download the whole file into memory; `"w"`/`"x"`/`"a"` (`APPE`)/
     `"r+"` buffer in memory and upload on close (`"x"` checks then writes).
-  - `rename()` on the same server. `chmod()` via `SITE CHMOD`
-    (`NotImplementedError` when the server lacks it or
-    `follow_symlinks=False`).
+  - `rename()` on the same server. Whether an existing target is replaced
+    is the server's: a POSIX one replaces it, a Windows one answers `550 File
+    exists`, which is `FileExistsError` when the target is there (a reply that
+    names a permission problem stays `PermissionError`). `chmod()` via `SITE
+    CHMOD` (`NotImplementedError`, chained to the server's reply, when the
+    server lacks it or refuses it, or `follow_symlinks=False`).
 - **`SftpPath`** (`sftp:`; `sftp` or `sftp-async` extra; `schemes.sftp`)
   - `SftpPath(*uris, backend=None, ssh_config=<default>)` — `ssh_config`:
     default `~/.ssh/config`, `None` for none, a path or iterable of paths;
