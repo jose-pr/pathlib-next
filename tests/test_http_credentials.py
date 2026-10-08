@@ -164,8 +164,8 @@ def test_dav_stat_accepts_the_keyword_of_its_base(recorder):
 def test_headers_other_than_authorization_follow_a_redirect(recorder):
     other = _start()
     try:
-        # `localhost` is another host name than 127.0.0.1 for `requests`.
-        recorder.redirect_to = f"http://localhost:{other.server_port}/landing"
+        # Another port is another origin to `requests`: it drops `Authorization`.
+        recorder.redirect_to = f"http://127.0.0.1:{other.server_port}/landing"
         path = UriPath(f"http://{recorder.base}/redirect").with_session(
             requests.Session(),
             headers={"Authorization": "Bearer T", "X-Api-Key": "K"},
