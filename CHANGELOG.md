@@ -153,9 +153,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`LocalPath.symlink_to("./t/")` stores `./t/` on POSIX**, as `pathlib` does; it
   stored `t` (and `t//x` as `t/x`) because the text was parsed as a path first.
   Windows still rewrites a relative target into its own separators, without
-  which the link would not resolve. A generic `Path` builds a `str` target with `with_segments()`, so a subclass
-  with per-instance state (a `MemPath` backend) no longer receives a target
-  bound to a fresh one.
+  which the link would not resolve. A generic `Path` builds a `str` target with
+  `with_segments()`, so a subclass with per-instance state (a `MemPath`
+  backend) no longer receives a target bound to a fresh one.
 - **`utils.parsedate()` says what it accepts.** `bytes`, a `datetime` and a
   tuple of fewer than six items raise, and "31 Feb" rolls over to March; the
   docstring and the header now say so. Nothing else changed.
@@ -169,7 +169,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `is_fifo()`, `is_socket()`, `is_block_device()` and `is_char_device()` are
   stdlib's and, before 3.13, raise for an error such as `PermissionError`. The
   behaviour is unchanged.
-- **A `..` or `.` name in a remote listing no longer escapes the tree.**### Fixed
 - **A `..` or `.` name in a remote listing no longer escapes the tree.** The
   `s3:`, `gs:`, `az:`, `github:` and `gitlab:` listings and the default
   `UriPath` listing yielded a name such as `..`, `.`, `a/b` or an empty one as
