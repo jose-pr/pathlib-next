@@ -160,6 +160,22 @@ def test_a_listed_link_is_still_followed_by_a_stat_of_its_own(
     assert by_name["link"].is_symlink()
 
 
+def test_a_listed_entry_that_does_not_say_what_it_is_is_asked_about(
+    server, root, wire, backend
+):
+    (root / "dir").mkdir()
+    wire.listing = lambda path: [
+        asyncssh.SFTPName(b"typeless", attrs=asyncssh.SFTPAttrs(size=3))
+    ]
+    directory = SftpPath(server.url("dir"), backend=backend)
+    (child,) = [c for c in directory.iterdir() if c.name == "typeless"]
+    wire.reset()
+
+    assert not child.is_dir()
+
+    assert wire.calls["stat"] == 1
+
+
 def test_a_hint_is_used_once(server, root, wire, backend):
     (root / "dir").mkdir()
     (root / "dir" / "a").write_bytes(b"x")

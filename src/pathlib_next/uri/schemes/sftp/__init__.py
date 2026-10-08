@@ -5,6 +5,7 @@ import errno as _errno
 import gc as _gc
 import io as _io
 import os as _os
+import stat as _stat
 import threading as _threading
 import typing as _ty
 import weakref as _weakref
@@ -545,10 +546,13 @@ class SftpPath(UriPath):
 
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
-        if hint is not None and not (follow_symlinks and hint.is_symlink()):
+        if hint is not None and (
+            not follow_symlinks
             # The hint comes from listdir_attr(), which never resolves
-            # symlinks: it is the answer to an lstat, and for anything that is
-            # not a link that is the answer to a stat too.
+            # symlinks: it is the answer to an lstat, and for an entry that
+            # says what it is and is not a link that is the answer to a stat.
+            or (_stat.S_IFMT(hint.st_mode) and not hint.is_symlink())
+        ):
             return hint
         if follow_symlinks:
             return self._sftpclient.stat(self.path)
