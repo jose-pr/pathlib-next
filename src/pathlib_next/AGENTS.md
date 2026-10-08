@@ -438,8 +438,11 @@ not by a checker.
   that would pass the root of an absolute path is dropped; a relative path
   keeps its leading `..` (`Uri("a") / "../../x"` is `../x`). A
   percent-encoded dot segment (`%2e%2e`) is removed after decoding. An
-  absolute local path becomes `file:`; a relative one joins like a
-  `PurePath`.
+  absolute local path **object** (`pathlib.Path`, `LocalPath`) becomes
+  `file:`; a relative one joins like a `PurePath`. A `str` argument is always
+  URI text: wrap a path string (`LocalPath(s)`), because `UriPath("/abs/x")`
+  is a path with no scheme whose I/O raises `NotImplementedError` and
+  `UriPath("C:/Temp/x")` has the scheme `c`.
   - `/` and `joinpath()` take a `str` as an **already-decoded path**: `?`,
     `#`, `%` and a leading `C:` are ordinary filename characters
     (`base / "cache?v=2"` names that file), which is what `iterdir()` builds.
