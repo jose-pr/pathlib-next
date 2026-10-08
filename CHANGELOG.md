@@ -692,6 +692,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   is replaced by a new file; they raise `PermissionError` before anything is
   written, as on Windows. Replacing the archive still gives it a new inode:
   another hard link to it keeps the old content.
+- **`stat()` on `ftp:` is one reply where the server offers `MLST`, and a
+  connection is probed with `NOOP` only after it has been idle.** A stat sent
+  `NOOP`, `TYPE`, `PASV` and `MLSD` of the parent directory over a new data
+  connection (the whole listing, so N stats in a directory of N entries were
+  quadratic), and `exists()` of a missing file sent 10 commands. A server whose
+  `FEAT` lists `MLST` (RFC 3659) is now asked `MLST` of the entry itself, a
+  single reply on the control connection; `exists()` of a missing file is
+  `MLST`, `TYPE`, `SIZE`, `CWD`. A connection that carried a command within
+  `schemes.ftp.IDLE_PROBE_SECONDS` (1 second) is used without a `NOOP`; one that
+  has been idle longer, or has not been used yet, is probed and replaced if the
+  server dropped it, as before. A server without `MLST` is read as before: the
+  parent's `MLSD`, then `SIZE`/`CWD`.
+- **`stat()`, `exists()` and `is_file()` of an `ftp:` file work when its
+  directory holds a name the client cannot decode.** The parent's listing
+  failed with `OSError(EILSEQ)` for every call and each call reconnected. With
+  `MLST` no listing is read; on a server with `MLSD` and no `MLST` the error
+  makes `SIZE`/`CWD` answer (the listing still drops the connection, so each
+  such stat reconnects). `iterdir()` of that directory still raises
+  `OSError(EILSEQ)`.
+- **A malformed `size` fact no longer makes a directory unlistable.** `size=abc`
+  or `size=1.5` raised `ValueError` from `iterdir()`, a negative size was
+  reported as is, and a size of 400 digits became an `int`. A `size` that is not
+  a plain non-negative decimal below 2**63 is unknown (`st_size` is 0), as a
+  missing one is.
+- **`rename()` on `ftp:` onto an existing target is `FileExistsError`.** A server
+  that does not replace it (a Windows one answers `550 File exists`) raised
+  `PermissionError` with both files intact. The refusal is `FileExistsError`
+  when the target is there, and `PermissionError` still when the reply names a
+  permission problem or the target is not there. A POSIX server replaces the
+  target, as before.
+- **The connections of a thread that has ended are closed.** Twenty short-lived
+  threads that each used one `ftp:` path left twenty logged-in control
+  connections open until 128 newer ones pushed them out, which a server's
+  per-client connection limit can refuse. A thread's connections are now closed
+  when the thread ends, and one that another thread's cache overflow drops while
+  a command is running on it is closed when that command ends.
+- **A `chmod()` the FTP server refuses says why.** A refused `SITE CHMOD`
+  ("550 Not enough privileges") raised `NotImplementedError("SITE CHMOD not
+  supported by this server")` without the reply. It is still
+  `NotImplementedError` (so `copy()` skips it), now with the server's reply in
+  the message and as `__cause__`.
 
 ## [0.9.12] - 2026-10-08
 

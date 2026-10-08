@@ -147,9 +147,12 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
   `FtpBackend(ssl_context=ssl.create_default_context(cafile=...))`;
   `FtpBackend(verify=False)` turns verification off.
 - Paths built without `backend=` share one default backend, with one cached
-  connection per server and thread; dead connections are replaced.
-- Listing and `stat()` prefer `MLSD` (type, size and UTC modification time in
-  one round trip) and fall back to `NLST`/`SIZE`.
+  connection per server and thread, closed when the thread ends. A connection
+  idle for more than `IDLE_PROBE_SECONDS` (1 second) is probed with `NOOP`
+  before use and replaced if the server dropped it.
+- A listing uses `MLSD` (type, size and UTC modification time in one round
+  trip) and `stat()` uses `MLST` where the server offers it; without them the
+  listing falls back to `NLST` and the stat to `SIZE`/`CWD`.
 - Reads download the whole file into memory; writes are buffered in memory
   and uploaded on close. `chmod()` uses `SITE CHMOD` and raises
   `NotImplementedError` when the server lacks it.
