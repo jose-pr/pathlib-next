@@ -107,16 +107,16 @@ def full_match(segments: _ty.Sequence[str], pattern: str, case_sensitive: bool) 
     end = len(pats)
     last = end - 1
 
-    # A state is (index, phase). Phase 0: about to match pats[index]. Phases
+    # A state is (index, stage). Stage 0: about to match pats[index]. Stages
     # 1 and 2 belong to a "**": 1 once it has taken a single empty field (the
     # root), which does not yet count, 2 once it has taken enough and may
     # take more or hand over to the next component.
     def closure(states: _ty.Set[_ty.Tuple[int, int]]) -> _ty.Set[_ty.Tuple[int, int]]:
         pending = list(states)
         while pending:
-            i, phase = pending.pop()
-            if phase == 2 or (
-                phase == 0
+            i, stage = pending.pop()
+            if stage == 2 or (
+                stage == 0
                 and i < end
                 and pats[i] == RECURSIVE
                 # A non-trailing (or sole) "**" may match no field at all.
@@ -131,8 +131,8 @@ def full_match(segments: _ty.Sequence[str], pattern: str, case_sensitive: bool) 
     states = closure({(0, 0)})
     for field in fields:
         advanced: _ty.Set[_ty.Tuple[int, int]] = set()
-        for i, phase in states:
-            if phase:
+        for i, stage in states:
+            if stage:
                 advanced.add((i, 2))
             elif i == end:
                 continue

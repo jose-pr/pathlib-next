@@ -510,6 +510,12 @@ PurePathLike = _ty.Union[str, Pathname]
 #     with stdlib's different metadata semantics (it preserves timestamps,
 #     ours preserves st_mode only). That makes mtime-based syncs converge
 #     on 3.14 and never converge on <=3.13.
+#   * 3.14's `copy_into`/`move_into` call `copy()`/`move()` with stdlib's own
+#     keywords and defaults (`preserve_metadata=False`, no `overwrite`) and
+#     return what those return, so a `LocalPath` would answer differently on
+#     3.14 than on every other version and backend. `replace` is not here:
+#     `LocalPath` keeps stdlib's `os.replace`, which is what `move()` uses to
+#     swap a local file atomically.
 #   * OLD stdlib lacking our keywords: `exists(follow_symlinks=)` is 3.12+
 #     and `read_text`/`write_text`'s `newline=` is 3.13+ in CPython, and
 #     `rglob`'s `include_hidden=`/`recursive=`/`dironly=` extensions never
@@ -526,6 +532,8 @@ PurePathLike = _ty.Union[str, Pathname]
 _OPERATION_NAMES = (
     "copy",
     "move",
+    "copy_into",
+    "move_into",
     "exists",
     "rglob",
     "read_text",
@@ -1617,6 +1625,74 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         if preserve_metadata:
             _copy_mode(src, target, follow_symlinks)
 
+    def _into(self, target_dir: "Path | str") -> "Path":
+        """`target_dir / self.name`, the target of `copy_into()` and
+        `move_into()`. A `str` directory is a path on this backend, as for
+        `copy()`'s `str` target."""
+        name = self.name
+        if not name:
+            raise ValueError("%r has an empty name" % (self,))
+        if isinstance(target_dir, str):
+            target_dir = self._coerce_target(target_dir)
+        return target_dir / name
+
+    def copy_into(
+        self,
+        target_dir: "Path | str",
+        *,
+        overwrite=False,
+        follow_symlinks=True,
+        preserve_metadata=True,
+        recursive=False,
+        ignore_error=None,
+        progress: "_ty.Callable[[_ty.Self, int, _ty.Optional[int]], None]" = None,
+    ) -> "Path":
+        """Copy this file or directory into the directory `target_dir`, under
+        its own name, and return the new path (pathlib 3.14 parity).
+
+        `copy(target_dir / self.name, ...)` with the same keywords and the
+        same defaults as `copy()`: an existing target needs `overwrite=True`
+        and a directory source needs `recursive=True`. `ValueError` for a
+        path with no name."""
+        target = self._into(target_dir)
+        self.copy(
+            target,
+            overwrite=overwrite,
+            follow_symlinks=follow_symlinks,
+            preserve_metadata=preserve_metadata,
+            recursive=recursive,
+            ignore_error=ignore_error,
+            progress=progress,
+        )
+        return target
+
+    def move_into(self, target_dir: "Path | str", *, overwrite=False) -> "Path":
+        """Move this file or directory into the directory `target_dir`, under
+        its own name, and return the new path (pathlib 3.14 parity).
+
+        `move(target_dir / self.name, overwrite=overwrite)`: an existing
+        target needs `overwrite=True`. `ValueError` for a path with no name."""
+        target = self._into(target_dir)
+        self.move(target, overwrite=overwrite)
+        return target
+
+    def replace(self, target: "Path | str") -> "Path":
+        """Rename this file or directory to `target`, replacing what is
+        there, and return `target` as a path (pathlib parity).
+
+        A file replaces a file and a directory replaces an empty directory;
+        a directory or a file standing in the way of the other kind raises
+        as `os.replace()` does, and a directory that holds anything raises
+        `OSError(ENOTEMPTY)` rather than being removed. Built on `move()`, so
+        it works between any two paths `move()` accepts; `LocalPath` keeps
+        stdlib's `os.replace()`."""
+        if isinstance(target, str):
+            target = self._coerce_target(target)
+        if target.is_dir() and next(iter(target._scandir()), None) is not None:
+            raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(target))
+        self.move(target, overwrite=True)
+        return target
+
     def _copy_symlink(self, target: "Path", *, overwrite=False):
         """`copy(follow_symlinks=False)` of a symlink: create a link at
         `target` with the same (unresolved) target text. Raises
@@ -1692,10 +1768,12 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 elif (
                     native
                     and type(target) is type(src)
-                    and callable(getattr(src, "replace", None))
+                    and getattr(type(src), "replace", Path.replace) is not Path.replace
                 ):
-                    # Local paths: os.replace() swaps atomically and leaves
-                    # the target untouched if it fails (e.g. a locked source).
+                    # A class with its own replace() (local paths: os.replace()
+                    # swaps atomically and leaves the target untouched if it
+                    # fails, e.g. a locked source). Path.replace() is built on
+                    # move(), so calling it from here would never end.
                     try:
                         return src.replace(target)
                     except OSError as error:

@@ -82,8 +82,8 @@ not by a checker.
 - **`Path(Pathname, Chmod, Stat, BinaryOpen)`** — base class for I/O paths.
   `Path(*args)` on the bare class constructs a `LocalPath`.
   - Operation precedence: `Path.__init_subclass__` re-asserts pathlib_next's
-    `copy`, `move`, `exists`, `rglob`, `read_text`, `write_text` and
-    `symlink_to` on any subclass that would otherwise inherit stdlib
+    `copy`, `move`, `copy_into`, `move_into`, `exists`, `rglob`, `read_text`,
+    `write_text` and `symlink_to` on any subclass that would otherwise inherit stdlib
     `pathlib`'s. A class mixing a concrete stdlib path with `Path` but not
     `LocalPath` is a local class too: it gets every function `LocalPath`
     defines (`stat`, `chmod`, `is_junction`, `is_mount`, `glob`, `walk`,
@@ -274,6 +274,21 @@ not by a checker.
     - A `str` target goes through `_coerce_target()`: `with_segments()` by
       default, a URI parse on `UriPath` (so `copy("s3://b/k")` crosses
       schemes).
+  - `copy_into(target_dir, *, overwrite=False, follow_symlinks=True,
+    preserve_metadata=True, recursive=False, ignore_error=None,
+    progress=None) -> Path` — `copy(target_dir / self.name, ...)`: the same
+    keywords and defaults as `copy()`, and the new path is returned (pathlib
+    3.14 returns it too). A `str` directory is a path on this backend, as for
+    `copy()`. `ValueError` for a path with no name. Present on every backend
+    and version; on 3.14 it replaces stdlib's, which overwrote and copied
+    trees by default.
+  - `move_into(target_dir, *, overwrite=False) -> Path` — `move(target_dir /
+    self.name, overwrite=overwrite)`, returning the new path.
+  - `replace(target) -> Path` — `move(target, overwrite=True)`, returning
+    `target` as a path. A file replaces a file and a directory an empty
+    directory; a directory that holds anything raises `OSError(ENOTEMPTY)`
+    and a file onto a directory `IsADirectoryError`, both before anything is
+    removed. `LocalPath` keeps stdlib's `os.replace()`.
   - `move(target, *, overwrite=False)` — validates first (missing source →
     `FileNotFoundError`, file onto directory → `IsADirectoryError`, existing
     target without `overwrite` → `FileExistsError`; a same-file spelling is
@@ -306,7 +321,7 @@ not by a checker.
   strings), `is_dir()`/`is_file()` (`follow_symlinks=` before 3.13),
   `_symlink_to()`, `_chown()` (`shutil.chown`; `NotImplementedError` where
   `os.chown` is missing, i.e. Windows), plus pathlib_next's `exists`,
-  `rglob`, `read_text`, `write_text`, `symlink_to`.
+  `rglob`, `read_text`, `write_text`, `symlink_to`, `copy_into`, `move_into`.
   `exists()` returns `False` for any `OSError`/`ValueError` on every Python
   version; `is_dir()`, `is_file()`, `is_fifo()`, `is_socket()`,
   `is_block_device()` and `is_char_device()` are stdlib's: before 3.13 they

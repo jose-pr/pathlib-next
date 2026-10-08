@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.9.12] - 2026-10-08
 
 ### Added
+- **`copy_into()`, `move_into()` and `replace()` on every `Path`.** pathlib 3.14
+  has them and the generic classes did not (`MemPath`, `UriPath`, `DavPath`,
+  `SftpPath`, ... raised `AttributeError`; `LocalPath` had `copy_into()` and
+  `move_into()` on 3.14 only). `copy_into(target_dir, ...)` copies under the
+  same name with `copy()`'s keywords and defaults, `move_into(target_dir, *,
+  overwrite=False)` moves with `move()`'s, and both return the new path.
+  `replace(target)` is `move(target, overwrite=True)` and returns `target`; a
+  directory is replaced only when empty (`OSError(ENOTEMPTY)` otherwise, and
+  nothing is removed). A `str` directory or target stays on the same backend.
+  `info` is not added.
 - **`Pathname.is_absolute()` has a default**: the path has a root. It raised
   `NotImplementedError` for `MemPath` and every `Pathname` subclass that did not
   override it.
@@ -58,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   can drop a `# type: ignore[abstract]` on those four constructions.
   `FileStatLike.st_mtime` is annotated `float`, which is what every backend
   reports.
+- **On Python 3.14 `LocalPath.copy_into()` and `move_into()` are this
+  library's, not stdlib's.** Stdlib's overwrote an existing file, copied
+  directories without being asked and `LocalPath` answered differently from
+  every other backend. They now behave as `MemPath`'s do: an existing target
+  raises `FileExistsError` unless `overwrite=True`, a directory needs
+  `recursive=True`, and the new path is returned. Pass `overwrite=True,
+  recursive=True` for the stdlib behaviour. `LocalPath.replace()` stays
+  stdlib's `os.replace()` on every version.
 - **`with_stem("")` raises on 3.13 and later when the name has a suffix**, as
   `pathlib` does there (`MemPath("/a/c.txt").with_stem("")` was `/a/.txt`).
   Before 3.13 it is unchanged.
