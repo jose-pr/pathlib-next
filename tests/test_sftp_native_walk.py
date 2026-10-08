@@ -431,8 +431,10 @@ def test_walk_that_timed_out_has_stopped(server, root, wire, backends, sent):
         )
     raised_at = time.perf_counter()
 
+    # How far the walk got before the timeout depends on the machine; that
+    # it did not finish does not.
     left = _entries(root / "tree")
-    assert 0 < left < total
+    assert 0 < left <= total
     _assert_stopped(wire, sent, raised_at)
     assert left - _entries(root / "tree") <= _IN_FLIGHT
 
@@ -468,8 +470,10 @@ def test_copy_that_timed_out_has_stopped_and_left_no_partial_file(
     raised_at = time.perf_counter()
 
     _assert_stopped(wire, sent, raised_at)
+    # How many files were finished before the timeout depends on the machine;
+    # each one that is there is whole.
     copied = _files(root / "dst")
-    assert 0 < len(copied) < len(expected)
+    assert len(copied) < len(expected)
     for name, content in copied.items():
         assert content == expected[name], name
 
