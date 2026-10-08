@@ -86,6 +86,7 @@ or trees, override it -- otherwise a transfer between two of them that happen
 to be spelled alike fails with `OSError: [Errno 22] Source and target are the
 same file`, or `ValueError: ... source and target overlap` from `PathSyncer`:
 
+<!-- example: skip: a method of the class being written, not a program -->
 ```python
 def _same_filesystem(self, other):
     return self._connection is other._connection
@@ -109,6 +110,7 @@ moved onto itself under another spelling, and a directory is never moved onto
 its own ancestor or into itself. The default returns `None`, and two paths of
 one type are then compared with `==`.
 
+<!-- example: skip: a method of the class being written, not a program -->
 ```python
 def _node_key(self):
     return self._connection, tuple(self._normalized_names())
@@ -223,6 +225,7 @@ Both I/O levels need a `root` fixture pointing at a **fresh, function-scoped** d
 
 ### Example: Running the full contract
 
+<!-- example: skip: a pytest module, run by tests/test_contract_helpers.py -->
 ```python
 import pytest
 
@@ -242,7 +245,7 @@ This example runs verbatim in the project's own suite (`tests/test_contract_help
 
 ### Capability attributes
 
-A backend that genuinely cannot meet a rule sets the matching class attribute to `False` on its test class. The affected tests then report as skipped, never as passed. Every attribute defaults to `True`; set one only for a documented gap.
+A backend that genuinely cannot meet a rule sets the matching class attribute to `False` on its test class. The affected tests then report as skipped, never as passed. Every attribute defaults to `True` except `supports_question_mark_names`; set one only for a documented gap.
 
 | Attribute | Contract | Covers | Built-in schemes that set it `False` |
 | --- | --- | --- | --- |
@@ -253,13 +256,18 @@ A backend that genuinely cannot meet a rule sets the matching class attribute to
 | `supports_rename` | `PathContract` | `rename()` | `MemPath` (`move()` copies instead) |
 | `supports_append` | `PathContract` | `open("a")` | `ZipUri`, `DavPath`, `S3Path`, `GsPath`, `AzPath` |
 | `supports_exclusive_create` | `PathContract` | `open("x")` | none |
-| `enforces_directory_hierarchy` | `PathContract` | `mkdir()`/writes below a missing parent raise `FileNotFoundError`; writing a file over a directory raises | `S3Path`, `GsPath`, `AzPath` (directories are key prefixes) |
+| `enforces_directory_hierarchy` | `PathContract` | `mkdir()`/writes below a missing parent raise `FileNotFoundError`; writing a file over a directory raises; `rename()` onto a non-empty directory raises | `S3Path`, `GsPath`, `AzPath` (directories are key prefixes) |
+| `supports_mkdir` | `PathContract` | `mkdir()`, and every test that creates a directory | none (a transport with no directories, such as TFTP, sets it) |
+| `supports_delete` | `PathContract` | `unlink()`, `rmdir()`, `rm()`, and replacing a file in `copy(overwrite=True)` | none (TFTP sets it) |
+| `supports_move` | `PathContract` | `move()`, by `rename()` or by copying and deleting | none (TFTP sets it) |
+| `supports_unusual_names` | `PathContract` | names holding a space, `#`, `%`, `+`, `&`, `=` and mixed case are stored and listed as written | none |
+| `supports_question_mark_names` | `PathContract` | the same for names holding `?`. **Defaults to `False`**: a Windows file system cannot store such a name | `True` for `MemPath`, `ZipUri`, `S3Path`, `GsPath`, `AzPath`, and where the machine can store one for `LocalPath`, `FileUri`, `FtpPath`, `DavPath`, `SftpPath` |
 
 ### Which contract runs against the built-in schemes?
 
 `tests/test_contract.py` runs:
 
-- **Full `PathContract`**: `LocalPath`, `MemPath`, `FileUri`, `ZipUri` (local outer archive), `FtpPath` (in-process pyftpdlib), `DavPath` (in-process WsgiDAV), `S3Path` (moto), `SftpPath` (in-process asyncssh server, with both the paramiko and asyncssh client backends), and `GsPath`/`AzPath` (in-process fake REST servers; they skip when the SDK is not installed).
-- **`ReadPathContract`**: `HttpPath` (local HTTP server), `TarUri`, `DataUri` (listing skipped), and `GitHubPath`/`GitLabPath` (in-process fake APIs).
+- **Full `PathContract`**: `LocalPath`, `MemPath`, `FileUri`, `ZipUri` and `archive:`/`archive+zip:` (local outer archive), `FtpPath` (in-process pyftpdlib), `DavPath` (in-process WsgiDAV), `S3Path` (moto), `SftpPath` (in-process asyncssh server, with both the paramiko and asyncssh client backends), and `GsPath`/`AzPath` (in-process fake REST servers; they skip when the SDK is not installed).
+- **`ReadPathContract`**: `HttpPath` (local HTTP server), `TarUri` and `archive:`/`archive+tar:`, `DataUri` (listing skipped), and `GitHubPath`/`GitLabPath` and their `git+github:`/`git+gitlab:` spellings (in-process fake APIs).
 
 See `tests/test_contract.py` for how each scheme's `root` fixture is wired.

@@ -82,6 +82,7 @@ print(member.read_text())
 
 **Remote schemes** share the same contract (these need a reachable server):
 
+<!-- example: skip: reads from remote hosts -->
 ```python
 from pathlib_next.uri import UriPath
 

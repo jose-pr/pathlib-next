@@ -1130,23 +1130,36 @@ stdout returns 141, Ctrl-C 130.
 - **`PurePathContract`** — name/suffix/stem, parents, join, `match()`; needs a
   `root` fixture only.
 - **`ReadPathContract(PurePathContract)`** — exists/types, reads and read
-  modes, `iterdir()`, `stat()`, `glob()`/`rglob()`, `walk()`, with pathlib's
-  exception types, and a pickle round trip that keeps `==` and `hash()`.
-  Capability attributes: `supports_listing`, `supports_empty_directories`,
-  `distinguishes_file_types`, `supports_pickle`.
+  modes, partial `read(n)`, `iterdir()`, `stat()` (the size of a longer file, a
+  directory told from a file, a numeric `st_mtime`), `_scandir()` agreeing with
+  `stat()` for every child, nothing existing below a file, `glob()`/`rglob()`,
+  `walk()`, with pathlib's exception types, and a pickle round trip that keeps
+  `==` and `hash()`. Capability attributes: `supports_listing`,
+  `supports_empty_directories`, `distinguishes_file_types`, `supports_pickle`.
 - **`PathContract(ReadPathContract)`** — `mkdir()`, writes and write/append/
-  exclusive modes, `unlink()`, `rmdir()`, `rm()` (also with
-  `follow_symlinks=`/`follow_binds=`: an implementation that overrides
-  `rm()` must accept both), `copy()` (recursive),
-  `move()`, `rename()`, `touch()`, copying a file onto a separately built
-  spelling of itself (`OSError`, content kept) and `_same_filesystem()`
-  within one root. Capability attributes: `supports_rename`,
-  `supports_append`, `supports_exclusive_create`,
-  `enforces_directory_hierarchy`.
+  exclusive modes, a payload of about 290 KiB holding every byte value and
+  runs of CR/LF written whole and in pieces and read back whole and in parts,
+  names holding a space, `#`, `%`, `+`, `&`, `=` and mixed case written,
+  listed, renamed and removed as written, `unlink()`, `rmdir()`, `rm()` (also
+  with `follow_symlinks=`/`follow_binds=`: an implementation that overrides
+  `rm()` must accept both), `copy()` (recursive), `move()`, `rename()` (also
+  onto a non-empty directory, which must raise), `touch()`, copying a file
+  onto a separately built spelling of itself (`OSError`, content kept) and
+  `_same_filesystem()` within one root. Capability attributes:
+  `supports_rename`, `supports_append`, `supports_exclusive_create`,
+  `enforces_directory_hierarchy` (also covers rename onto a directory),
+  `supports_mkdir` (every test that creates a directory), `supports_delete`
+  (`unlink()`, `rmdir()`, `rm()`, and the overwriting half of `copy()`),
+  `supports_move` (`move()`, by `rename()` or copy and delete),
+  `supports_unusual_names`, and `supports_question_mark_names` (names holding
+  `?`; **False by default**, because a Windows file system cannot store one:
+  set it `True` for a URI scheme or a remote store).
 - Both I/O contracts need `root` to be a **fresh, function-scoped** directory
-  populated with `populate_fixture_tree()`; two contract classes must not
-  share one. Capability attributes default to `True`; setting one `False`
-  makes the tests it covers skip. `DIRECTORY_ERRORS = (IsADirectoryError,
+  populated with `populate_fixture_tree()` (which uses `mkdir()` and
+  `write_text()`: a backend without them seeds `root` another way); two
+  contract classes must not share one. Capability attributes default to
+  `True` except `supports_question_mark_names`; setting one `False` makes the
+  tests it covers skip. `DIRECTORY_ERRORS = (IsADirectoryError,
   PermissionError)` and `NOT_EMPTY_ERRNOS = (ENOTEMPTY, EEXIST)` are the
   accepted platform variants.
 

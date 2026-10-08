@@ -58,6 +58,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   two minutes. A custom `BaseGsBackend` adds options through `call_options()`.
 - **`schemes.az.COPY_POLL_TIMEOUT`.** How long `AzPath.rename()` waits for the
   server-side copy (300 seconds); set it before the call to change it.
+- **`pathlib_next.testing`: five capability switches and eight tests.** For a
+  contract class that subclasses `PathContract`, the new tests are:
+  a payload of about 290 KiB holding every byte value and runs of CR/LF, written
+  whole and in pieces and read back whole and in parts; names holding a space,
+  `#`, `%`, `+`, `&`, `=` and mixed case, stored, listed, renamed and removed as
+  written; `stat()` of a longer file (`test_stat` now checks it) and of a
+  directory, and a numeric `st_mtime`; `_scandir()` agreeing with `stat()` for every child; nothing
+  existing below a file; partial `read(n)`; and `rename()` onto a non-empty
+  directory raising. The switches, each documented in the module and in the
+  guide: `supports_mkdir`, `supports_delete` and `supports_move` (default
+  `True`: a backend with no directories, delete or move, such as TFTP, sets them
+  `False` instead of marking tests as expected failures), `supports_unusual_names`
+  (default `True`), and `supports_question_mark_names` (default **`False`**: a
+  Windows file system cannot store a name holding `?`). A backend that kept
+  passing the old suite and now fails a new test was altering bytes, sizes or
+  names: fix it, or set the switch that names the gap. With
+  `supports_delete = False`, `copy(overwrite=True)` is no longer exercised;
+  `enforces_directory_hierarchy = False` also skips the rename-onto-a-directory
+  test.
 
 ### Changed
 - **`from pathlib_next import *` publishes only the documented names.** It also

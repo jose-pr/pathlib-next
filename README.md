@@ -121,6 +121,7 @@ print([child.name for child in member.parent.iterdir()])
 
 **Remote paths** use the same API:
 
+<!-- example: skip: reads from remote hosts -->
 ```python
 from pathlib_next.uri import UriPath
 
