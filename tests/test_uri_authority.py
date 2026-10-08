@@ -287,3 +287,12 @@ def test_a_non_utf8_escape_still_round_trips():
     path = UriPath("http://h/caf%E9.html")
     assert path.as_uri() == "http://h/caf%E9.html"
     assert (path.parent / path.name).as_uri() == "http://h/caf%E9.html"
+
+
+def test_comparing_endpoints_never_raises_for_a_port_that_is_not_a_number():
+    odd = Source("http", None, "h", "abc")
+    assert _same_authority(odd, Source("HTTP", None, "H", "abc"))
+    assert not _same_authority(odd, Source("http", None, "h", 80))
+    assert _same_authority(
+        Source("http", None, "h", "80"), Source("http", None, "h", 80)
+    )

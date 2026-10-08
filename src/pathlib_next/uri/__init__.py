@@ -39,13 +39,20 @@ _NOSOURCE = Source(None, None, None, None)
 _URI_SCHEME_RE = _re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
 
 
+def _port_key(port) -> "int | str | None":
+    if port in (None, ""):
+        return None
+    text = str(port)
+    return int(text) if text.isascii() and text.isdigit() else port
+
+
 def _authority_key(source: Source) -> tuple:
     scheme, userinfo, host, port = source
     return (
         scheme.lower() if scheme else None,
         _split_userinfo_text(userinfo) if userinfo else None,
         str(host).lower() if host else None,
-        int(port) if port not in (None, "") else None,
+        _port_key(port),
     )
 
 
