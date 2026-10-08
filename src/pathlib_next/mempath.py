@@ -30,6 +30,18 @@ class MemFile(bytearray):
         self.mtime = 0.0
         _touch(self)
 
+    def __reduce_ex__(self, protocol):
+        # `bytearray.__reduce_ex__` carries slot state only from 3.11; without
+        # this a copy or a pickle is re-stamped with the time it was made.
+        return _memfile, (bytes(self), self.mtime)
+
+
+def _memfile(content: bytes, mtime: float) -> "MemFile":
+    """Rebuild a `MemFile` with the modification time it had."""
+    file = MemFile(content)
+    file.mtime = mtime
+    return file
+
 
 def _touch(content) -> None:
     """Advance `content`'s mtime -- strictly, even within one clock tick:
@@ -44,22 +56,33 @@ class MemBytesIO(io.BytesIO):
     """A `BytesIO` that writes its buffer back into the backing
     `bytearray` (`dest`) on `flush()` and close, so `MemPath` files persist
     across `open()` calls. With `append=True` every write lands at the end,
-    like `O_APPEND`, whatever the current position."""
+    like `O_APPEND`, whatever the current position, and only the bytes this
+    handle wrote are added to `dest`, so two appenders both land."""
 
     def __init__(self, dest: bytearray, *, append: bool = False) -> None:
         self._bytes = dest
         self._append = append
+        self._published = 0
         super().__init__()
         if append:
-            super().write(dest)
+            snapshot = bytes(dest)
+            super().write(snapshot)
+            self._published = len(snapshot)
 
     def _publish(self) -> None:
         # getvalue(), not seek(0);read(): a caller that seeks before
         # closing (or opened in append mode, positioned at EOF) would
         # otherwise lose everything before the current position.
         content = self.getvalue()
-        self._bytes.clear()
-        self._bytes.extend(content)
+        if self._append:
+            # One extend() of the new bytes: a second appender's bytes
+            # already in `dest` stay, and a reader never sees a shorter file.
+            self._bytes.extend(content[self._published :])
+            self._published = len(content)
+        else:
+            # One slice assignment, not clear() then extend(): a reader
+            # never sees the file emptied in between.
+            self._bytes[:] = content
         _touch(self._bytes)
 
     def write(self, data) -> int:
@@ -116,7 +139,7 @@ class MemPath(Path):
     __slots__ = ("_backend", "_segments", "_normalized")
 
     def __init__(
-        self, *segments: str | Pathname | Path, backend: MemPathBackend = None, **kwargs
+        self, *segments: str | Pathname | Path, backend: MemPathBackend = None
     ):
         # Joined and normalized like `PurePosixPath`: empty and "." segments
         # collapse, and an absolute argument restarts the join. Raw
@@ -128,7 +151,11 @@ class MemPath(Path):
         for segment in segments:
             if isinstance(segment, MemPath):
                 text = segment.as_posix()
-                _backend = segment.backend
+                # The first MemPath argument names the filesystem, as the
+                # left operand does for `/`; a later one (often a pattern or
+                # a name built without a backend) only contributes its text.
+                if _backend is None:
+                    _backend = segment.backend
             elif isinstance(segment, Path):
                 raise NotImplementedError()
             elif isinstance(segment, Pathname):
@@ -155,14 +182,14 @@ class MemPath(Path):
         self._normalized = None
 
     @staticmethod
-    def _parse(path: str) -> list:
-        """Segments of a joined path string: `["", ""]` for the root,
-        `["", name, ...]` for another absolute path, `[name, ...]` for a
-        relative one and `[]` for the empty path (so its `root` is "")."""
+    def _parse(path: str) -> tuple:
+        """Segments of a joined path string: `("", "")` for the root,
+        `("", name, ...)` for another absolute path, `(name, ...)` for a
+        relative one and `()` for the empty path (so its `root` is "")."""
         names = [name for name in path.split("/") if name and name != "."]
         if path.startswith("/"):
-            return ["", *names] if names else ["", ""]
-        return names
+            return ("", *names) if names else ("", "")
+        return tuple(names)
 
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self.as_posix())
@@ -180,12 +207,17 @@ class MemPath(Path):
         return self._backend is other._backend
 
     def _node_key(self):
-        # I/O resolves through `normalized`, so "a.txt", "/a.txt" and
-        # "/d/../a.txt" are one node although their segments differ.
+        # "a.txt", "/a.txt" and "/d/../a.txt" are one node although their
+        # segments differ. This reads no tree, so `..` is applied to the
+        # text; I/O applies it to the tree (`_parent_container`) and agrees
+        # on every path that exists. One that does not (`/missing/../a.txt`)
+        # fails on I/O whatever it compares equal to.
         return self._backend, tuple(name for name in self.normalized if name)
 
     @property
     def normalized(self):
+        """The names of this path with `..` applied to the text and clamped
+        at the root; `[""]` for the root. `_node_key()` reads it."""
         if self._normalized is None:
             # Normalize against a virtual root ("/" + posix) so ".."-escaping
             # paths (e.g. "..", "../x") get clamped at the root instead of
@@ -210,7 +242,7 @@ class MemPath(Path):
     @property
     def parent(self):
         segments = self.segments
-        if not segments or segments == ["", ""]:
+        if not segments or segments == ("", ""):
             return self
         if len(segments) == 2 and segments[0] == "":
             # "/a" -> "/": dropping the root gave the relative empty path.
@@ -231,27 +263,39 @@ class MemPath(Path):
         return f"mempath:{_urlquote(self.as_posix())}"
 
     def _parent_container(self) -> tuple[dict[str, bytearray], str]:
-        parent = self.backend
-        *ancestors, name = self.normalized
-        for index, path in enumerate(ancestors):
-            if path not in parent:
+        """`(container, name)` of the node this path names; `name` is "" for
+        the root, whose container is the backend. `..` is applied to the tree:
+        the directory it leaves must exist, and the root is its own parent."""
+        containers = [self.backend]
+        names: list[str] = []
+        components = [name for name in self.segments if name]
+        for index, component in enumerate(components):
+            if component == "..":
+                if names:
+                    names.pop()
+                    containers.pop()
+                continue
+            if index == len(components) - 1:
+                return containers[-1], component
+            child = containers[-1].get(component)
+            if child is None:
                 raise _os_error(FileNotFoundError, _errno.ENOENT, self)
-            parent = parent[path]
-            if not isinstance(parent, dict):
-                # An ancestor segment names a file. Without this the next
-                # iteration evaluates `"seg" not in bytearray` and raises
-                # TypeError, which sails past the OSError guards in
-                # stat()/exists()/is_dir() -- so even exists() crashed on a
-                # path merely routed through a file. NotADirectoryError is
-                # an OSError, which is what stdlib raises and what those
-                # guards already swallow.
+            if not isinstance(child, dict):
+                # An ancestor names a file. Without this the next step
+                # evaluates `"seg" not in bytearray` and raises TypeError,
+                # which sails past the OSError guards in stat()/exists()/
+                # is_dir(). NotADirectoryError is an OSError, which is what
+                # stdlib raises and what those guards already swallow.
                 raise _os_error(
                     NotADirectoryError,
                     _errno.ENOTDIR,
-                    self.with_segments(*ancestors[: index + 1]),
+                    self.with_segments(*names, component),
                 )
-
-        return parent, name
+            containers.append(child)
+            names.append(component)
+        if not names:
+            return self.backend, ""
+        return containers[-2], names[-1]
 
     def _mkdir(self, mode: int):
         parent, name = self._parent_container()
@@ -265,7 +309,10 @@ class MemPath(Path):
     def rmdir(self):
         parent, name = self._parent_container()
         if not name:
-            raise _os_error(FileNotFoundError, _errno.ENOENT, self)
+            # The root exists, so it is not "missing", and a tree cannot lose it.
+            raise OSError(
+                _errno.EBUSY, "The root of a MemPath tree cannot be removed", str(self)
+            )
         content = parent.get(name)
         if content is None:
             raise _os_error(FileNotFoundError, _errno.ENOENT, self)

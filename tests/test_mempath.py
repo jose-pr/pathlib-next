@@ -1,8 +1,10 @@
+import copy
 import errno
+import pickle
 
 import pytest
 
-from pathlib_next.mempath import MemPath, MemPathBackend
+from pathlib_next.mempath import MemFile, MemPath, MemPathBackend
 
 
 def test_backend_shared_across_joins_from_empty_root():
@@ -286,3 +288,263 @@ def test_mtime_is_set_and_advances_on_every_write():
     # Reading does not touch it.
     path.read_bytes()
     assert path.stat().st_mtime == third
+
+
+# --- a join names the left operand's filesystem ---
+
+
+def test_joining_a_mempath_stays_on_the_left_operands_backend():
+    root = MemPath("/")
+    (root / "f.txt").write_text("data")
+    other = MemPath("f.txt")
+
+    for joined in (root / other, root.joinpath(other), MemPath(root, other)):
+        assert joined.backend is root.backend
+        assert joined.as_posix() == "/f.txt"
+        assert joined.read_text() == "data"
+
+
+def test_an_explicit_backend_wins_over_the_mempath_arguments():
+    first, second, chosen = MemPathBackend(), MemPathBackend(), MemPathBackend()
+    a, b = MemPath("/a", backend=first), MemPath("b", backend=second)
+
+    assert MemPath(a, b).backend is first
+    assert MemPath(a, b, backend=chosen).backend is chosen
+    assert MemPath("/x", b).backend is second
+
+
+def test_a_string_prefix_joined_onto_a_mempath_keeps_its_backend():
+    path = MemPath("sub")
+    assert ("/root" / path).backend is path.backend
+
+
+def test_glob_with_a_mempath_pattern_searches_the_root_dir():
+    from pathlib_next.utils import glob
+
+    src = MemPath("/src")
+    src.mkdir()
+    (src / "x.py").write_text("")
+    (src / "y.txt").write_text("")
+
+    assert list(glob.glob(MemPath("*.py"), root_dir=src)) == [src / "x.py"]
+
+
+# --- ".." is applied to the tree ---
+
+
+def _tree():
+    root = MemPath("/")
+    (root / "d").mkdir()
+    (root / "a.txt").write_text("precious")
+    return root
+
+
+def test_dotdot_through_a_missing_directory_is_not_found():
+    root = _tree()
+    before = dict(root.backend)
+
+    path = root / "missing" / ".." / "a.txt"
+    assert path.exists() is False
+    with pytest.raises(FileNotFoundError):
+        path.read_text()
+    with pytest.raises(FileNotFoundError):
+        (root / "missing" / ".." / "new").mkdir()
+    assert dict(root.backend) == before
+
+
+def test_dotdot_through_a_file_is_not_a_directory():
+    root = _tree()
+
+    path = root / "a.txt" / ".." / "d"
+    assert path.is_dir() is False
+    with pytest.raises(NotADirectoryError) as info:
+        path.stat()
+    assert info.value.errno == errno.ENOTDIR
+
+
+def test_dotdot_through_existing_directories_names_the_same_node():
+    root = _tree()
+    reference = root / "a.txt"
+
+    for spelling in ("/d/../a.txt", "d/../a.txt", "/../a.txt", "/d/./../a.txt"):
+        path = MemPath(spelling, backend=root.backend)
+        assert path._node_key() == reference._node_key()
+        assert path.read_text() == "precious"
+
+
+def test_a_trailing_dotdot_is_the_directory_above():
+    root = _tree()
+    (root / "d" / "e").mkdir()
+
+    assert (root / "d" / "e" / "..").stat().is_dir()
+    assert sorted(p.name for p in (root / "d" / "e" / "..").iterdir()) == ["e"]
+    assert sorted(p.name for p in (root / "d" / "..").iterdir()) == ["a.txt", "d"]
+
+
+def test_dotdot_does_not_climb_above_the_root():
+    root = _tree()
+    assert (root / ".." / ".." / "a.txt").read_text() == "precious"
+
+
+def test_mkdir_parents_creates_the_directories_a_dotdot_passes_through():
+    root = MemPath("/")
+    (root / "made" / ".." / "new").mkdir(parents=True)
+    assert sorted(root.backend) == ["made", "new"]
+
+
+# --- appends and replacements are published as one step ---
+
+
+def test_two_append_handles_both_land():
+    path = MemPath("/log")
+    path.write_bytes(b"0")
+    first, second = path.open("ab"), path.open("ab")
+    first.write(b"1")
+    second.write(b"2")
+    first.close()
+    second.close()
+    assert path.read_bytes() == b"012"
+
+
+def test_append_handles_publish_only_what_they_wrote_on_flush():
+    path = MemPath("/log")
+    path.write_bytes(b"0")
+    first, second = path.open("ab"), path.open("ab")
+    first.write(b"1")
+    first.flush()
+    second.write(b"2")
+    second.flush()
+    first.write(b"3")
+    first.close()
+    second.close()
+    assert path.read_bytes() == b"0123"
+
+
+def test_text_append_handles_both_land():
+    path = MemPath("/log")
+    path.write_text("a")
+    first, second = path.open("a"), path.open("a")
+    first.write("b")
+    second.write("c")
+    first.close()
+    second.close()
+    assert path.read_text() == "abc"
+
+
+def test_an_append_after_the_file_was_replaced_lands_at_its_new_end():
+    path = MemPath("/log")
+    path.write_bytes(b"old content")
+    handle = path.open("ab")
+    path.write_bytes(b"new")
+    handle.write(b"+")
+    handle.close()
+    assert path.read_bytes() == b"new+"
+
+
+class _WatchedFile(MemFile):
+    """A file that counts how often it was emptied."""
+
+    __slots__ = ("emptied",)
+
+    def clear(self):
+        self.emptied = getattr(self, "emptied", 0) + 1
+        super().clear()
+
+
+@pytest.mark.parametrize("mode", ["ab", "wb"])
+def test_publishing_a_handle_never_empties_the_file(mode):
+    # A reader between an emptying clear() and the extend() that follows
+    # would see no content at all.
+    backend = MemPathBackend()
+    watched = _WatchedFile(b"x" * 100)
+    backend["f"] = watched
+    handle = MemPath("/f", backend=backend).open(mode)
+    handle.write(b"tail")
+    emptied = getattr(watched, "emptied", 0)
+
+    handle.flush()
+    handle.close()
+
+    assert getattr(watched, "emptied", 0) == emptied
+    assert bytes(watched).endswith(b"tail")
+
+
+# --- the root cannot be removed ---
+
+
+def test_rmdir_of_the_root_says_the_root_cannot_be_removed():
+    root = _tree()
+    with pytest.raises(OSError) as info:
+        root.rmdir()
+    assert info.value.errno == errno.EBUSY
+    assert not isinstance(info.value, FileNotFoundError)
+    assert "root" in str(info.value)
+
+
+def test_recursive_rm_of_the_root_does_not_report_it_as_missing():
+    root = _tree()
+    with pytest.raises(OSError) as info:
+        root.rm(recursive=True)
+    assert info.value.errno == errno.EBUSY
+    assert not isinstance(info.value, FileNotFoundError)
+
+
+# --- segments are a value ---
+
+
+def test_segments_are_an_immutable_tuple():
+    path = MemPath("/a/b")
+    assert path.segments == ("", "a", "b")
+    assert isinstance(path.segments, tuple)
+    assert isinstance(MemPath("a/b").segments, tuple)
+    assert MemPath("").segments == ()
+    assert MemPath("/").segments == ("", "")
+    seen = {path}
+    assert path in seen
+    assert hash(path) == hash(MemPath("/a/b"))
+
+
+def test_a_misspelled_keyword_is_refused():
+    with pytest.raises(TypeError):
+        MemPath("/", bakend=MemPathBackend())
+    with pytest.raises(TypeError):
+        MemPath("/", something=1)
+
+
+# --- a file keeps its modification time through copy and pickle ---
+
+
+def _stamped_backend():
+    backend = MemPathBackend()
+    MemPath("/d", backend=backend).mkdir()
+    MemPath("/d/f.txt", backend=backend).write_text("v")
+    backend["d"]["f.txt"].mtime = 1234.5
+    return backend
+
+
+@pytest.mark.parametrize("how", ["copy", "deepcopy", "pickle"])
+def test_a_copied_file_keeps_its_mtime(how):
+    file = _stamped_backend()["d"]["f.txt"]
+    clone = {
+        "copy": copy.copy,
+        "deepcopy": copy.deepcopy,
+        "pickle": lambda f: pickle.loads(pickle.dumps(f)),
+    }[how](file)
+
+    assert type(clone) is MemFile
+    assert bytes(clone) == b"v"
+    assert clone.mtime == 1234.5
+
+
+@pytest.mark.parametrize("how", ["deepcopy", "pickle"])
+def test_a_copied_backend_keeps_the_mtimes(how):
+    backend = _stamped_backend()
+    clone = (
+        copy.deepcopy(backend)
+        if how == "deepcopy"
+        else pickle.loads(pickle.dumps(backend))
+    )
+
+    path = MemPath("/d/f.txt", backend=clone)
+    assert path.read_text() == "v"
+    assert path.stat().st_mtime == 1234.5

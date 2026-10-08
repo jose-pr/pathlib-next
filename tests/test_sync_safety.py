@@ -1705,6 +1705,8 @@ def _mem_tree():
     root = MemPath("/r", backend=backend)
     (root / "in").mkdir(parents=True)
     (root / "keep.txt").write_text("keep")
+    # `/x/../r` is another spelling of `/r` only while `/x` is a directory.
+    MemPath("/x", backend=backend).mkdir()
     return backend, root
 
 

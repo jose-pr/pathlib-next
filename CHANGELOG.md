@@ -639,6 +639,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   had changed into (`CWD`) when it is. `ftp://host/` always listed the root.
   An empty path now sends `/` in every command that takes the path, so both
   spellings name the same directory.
+- **Joining a `MemPath` onto another keeps the left operand's tree.**
+  `root / MemPath("f.txt")`, `root.joinpath(MemPath("f.txt"))` and
+  `MemPath(root, MemPath("f.txt"))` addressed the last argument's own empty
+  backend, so `.exists()` was `False` for a file `root` held, and
+  `utils.glob.glob(MemPath("*.py"), root_dir=src)` found nothing. The first
+  `MemPath` argument now names the backend; an explicit `backend=` still wins.
+  Pass `backend=` to place a join on a different tree.
+- **`MemPath` applies `..` to the tree.** `/missing/../a.txt` existed,
+  `/a.txt/../d` was a directory and `/missing/../new` was created as `/new`,
+  because `..` was removed from the text first. As on a POSIX filesystem, the
+  directory a `..` leaves must exist (`FileNotFoundError`) and be a directory
+  (`NotADirectoryError`); `..` above the root stays at the root. A spelling
+  through a directory that exists names the same node as before.
+- **Two `MemPath` append handles both land, and a write never shows a reader
+  an empty file.** Each handle opened with `"ab"` published its own snapshot
+  of the whole file on close, so the second close overwrote the first's bytes
+  (`b"02"` for appends of `1` and `2` to `0`), and every publish emptied the
+  file before refilling it. A handle now adds only what it wrote, in one step
+  (`b"012"`), and a write replaces the content in one step.
+- **`MemPath.rmdir()` of the root raises `OSError(EBUSY)`, not
+  `FileNotFoundError`.** The root exists, and `FileNotFoundError` read as
+  "already gone" to a caller that catches it; `root.rm(recursive=True)` emptied
+  the tree and then failed with it. The tree is still emptied; catch `OSError`
+  if you call it on a root.
+- **`MemPath.segments` is a tuple and an unknown keyword is a `TypeError`.**
+  The list was the path's own: `p.segments.append("c")` changed `str(p)` and
+  its hash. `MemPath("/", bakend=b)` silently built a fresh backend. Code that
+  mutated `segments` or passed a stray keyword was already wrong; read a copy
+  with `list(p.segments)`.
+- **On Python 3.9 a copied or pickled `MemPath` file keeps its `st_mtime`.**
+  `copy`, `deepcopy` and `pickle` of a `MemFile` (and of a `MemPathBackend`)
+  gave every file the time of the copy on 3.9; 3.14 already kept it. A sync
+  quick check that compares `(size, mtime)` across a copied tree now sees the
+  same answer on every version.
 
 ## [0.9.11] - 2026-09-21
 

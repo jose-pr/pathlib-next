@@ -344,21 +344,32 @@ not by a checker.
 
 - **`MemPath(*segments, backend=None)`** — `Path` over nested dicts; the
   reference `Path` subclass. Segments may be `str`, `Pathname` or `MemPath`
-  (a `MemPath` argument shares its backend; another `Path` →
-  `NotImplementedError`). Joined and normalized like `PurePosixPath`.
-  - `backend` (a `MemPathBackend`); `parts` is `(segments, backend)`;
-    `as_uri()` → `mempath:<quoted posix path>` (no `mempath:` scheme is
-    registered; build `MemPath` directly).
+  (the first `MemPath` argument names the backend, as the left operand does
+  for `/` and `joinpath()`, and an explicit `backend=` wins over it; another
+  `Path` → `NotImplementedError`). Joined and normalized like `PurePosixPath`.
+  An unknown keyword → `TypeError`.
+  - `backend` (a `MemPathBackend`); `segments` is a tuple (`("", "a")` for
+    `/a`); `parts` is `(segments, backend)`; `as_uri()` →
+    `mempath:<quoted posix path>` (no `mempath:` scheme is registered; build
+    `MemPath` directly).
+  - `..` is applied to the tree, as on a POSIX filesystem: the directory it
+    leaves must exist (`/missing/../a` → `FileNotFoundError`, `/f/../a` with
+    `f` a file → `NotADirectoryError`), and above the root it stays at the
+    root.
   - `stat()` → `FileStat` with `st_size` and `st_mtime` (time of the last
     write); the mode is a placeholder (`mode_known=False`).
   - `open()` supports `r`, `w`, `x`, `a` (binary or text); `+` modes →
-    `NotImplementedError`. Writes are visible after `flush()`/`close()`.
+    `NotImplementedError`. Writes are visible after `flush()`/`close()`; two
+    `a` handles on one file both land (each adds only what it wrote).
+  - `rmdir()` of the root → `OSError(EBUSY)`, so `root.rm(recursive=True)`
+    empties the tree and then raises that.
   - Not implemented (`NotImplementedError`): `relative_to()`,
     `rename()` (`move()` copies), `chmod()`, `symlink_to()`.
   - A `str` destination to `copy()`/`move()` stays on the same backend.
 - **`MemPathBackend(dict)`** — storage: `dict` value = directory,
-  `bytearray` (`MemFile`, carrying `mtime`) = file. Pass one instance as
-  `backend=` to share a tree; each root `MemPath()` otherwise gets its own.
+  `bytearray` (`MemFile`, carrying `mtime`, which `copy`, `deepcopy` and
+  `pickle` keep on every version) = file. Pass one instance as `backend=` to
+  share a tree; each root `MemPath()` otherwise gets its own.
 
 ## Protocols (`pathlib_next.protocols`)
 
