@@ -433,10 +433,16 @@ class DavPath(HttpPath):
 
     def rename(self, target: "DavPath | Uri | str"):
         target = self._rename_target(target)
+        # The new path carries the target's own query, not this path's: a
+        # signature or token in the query is good for the source only.
+        moved = self._from_parsed_parts(
+            self.source, target.path, target.query, target.fragment
+        )
         # No userinfo in the header: the credentials already travel as
         # `auth=` (see `HttpBackend.request`), and a header value ends up in
-        # server and proxy logs.
-        dest = _split_userinfo(self.with_path(target.path)._wire_uri())[0]
+        # server and proxy logs. No fragment either: it is not part of a URL
+        # the server resolves.
+        dest = _split_userinfo(moved.with_fragment("")._wire_uri())[0]
         self._dav_request(
             "MOVE",
             headers={"Destination": dest, "Overwrite": "F"},
@@ -447,4 +453,4 @@ class DavPath(HttpPath):
             },
         )
         # pathlib returns the new path.
-        return self.with_path(target.path)
+        return moved

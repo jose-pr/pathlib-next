@@ -78,7 +78,8 @@ def _handler_class(site):
             if self.command != "HEAD" and payload:
                 self.wfile.write(payload)
 
-        do_GET = do_HEAD = do_PROPFIND = _serve
+        do_GET = do_HEAD = do_PROPFIND = do_MOVE = do_PUT = _serve
+        do_DELETE = do_MKCOL = _serve
 
     return Handler
 
@@ -555,3 +556,59 @@ def test_get_still_follows_a_redirect_as_requests_does(site):
     site.on("GET", "/store/f.bin", (200, {"Content-Type": "text/plain"}, b"hello"))
     assert _dav(site, "/r/f.bin").read_bytes() == b"hello"
     assert _http(site, "/r/f.bin").read_bytes() == b"hello"
+
+
+# --- DavPath verbs ---
+
+
+def test_rename_destination_carries_the_targets_query_not_the_sources(site):
+    site.on("MOVE", "/d/f.txt?sig=SOURCE", (201, {}, b""))
+    moved = _dav(site, "/d/f.txt?sig=SOURCE").rename("g.txt")
+    (request,) = site.sent("MOVE")
+    host = site.base[len("http://") :]
+    assert request.headers["Destination"] == f"http://{host}/d/g.txt"
+    assert request.path == "/d/f.txt?sig=SOURCE"
+    assert moved.path == "/d/g.txt" and moved.query == ""
+
+
+def test_rename_to_a_uri_keeps_that_uris_query_and_drops_its_fragment(site):
+    site.on("MOVE", "/d/f.txt", (201, {}, b""))
+    host = site.base[len("http://") :]
+    target = UriPath(f"dav://{host}/d/h.txt?sig=TARGET#frag")
+    moved = _dav(site, "/d/f.txt").rename(target)
+    (request,) = site.sent("MOVE")
+    assert request.headers["Destination"] == f"http://{host}/d/h.txt?sig=TARGET"
+    assert str(moved).endswith("/d/h.txt?sig=TARGET#frag")
+
+
+@pytest.mark.parametrize(
+    "act",
+    [
+        lambda p: p.write_bytes(b"x"),
+        lambda p: p.mkdir(),
+        lambda p: p.unlink(),
+        lambda p: p.rename("g.txt"),
+        lambda p: p.rm(recursive=True),
+        lambda p: p.rmdir(),
+        lambda p: p.stat(),
+        lambda p: list(p.iterdir()),
+        lambda p: p.read_bytes(),
+    ],
+    ids=[
+        "write",
+        "mkdir",
+        "unlink",
+        "rename",
+        "rm",
+        "rmdir",
+        "stat",
+        "iterdir",
+        "read",
+    ],
+)
+def test_dav_verbs_fail_with_pathlib_errors_not_requests_errors(site, act):
+    for method in ("GET", "HEAD", "PROPFIND", "MOVE", "PUT", "DELETE", "MKCOL"):
+        site.on(method, "/d/f.txt", (500, {}, b""))
+    with pytest.raises(OSError) as raised:
+        act(_dav(site, "/d/f.txt"))
+    assert not isinstance(raised.value, requests.exceptions.RequestException)
