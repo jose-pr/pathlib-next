@@ -153,7 +153,8 @@ class BaseSftpBackend(object):
         return frozenset()
 
     @_utils.notimplemented
-    def client(self, source: Source): ...
+    def client(self, source: Source):
+        """A ready-to-use SFTP client for `source`, cached or newly opened."""
 
     def close(self) -> None:
         """Close every connection this backend has cached. A no-op here;

@@ -6,8 +6,11 @@ Both need the `http` extra.
     options:
       members:
         - DEFAULT_TIMEOUT
+        - MAX_LISTING_BYTES
         - HttpBackend
         - HttpPath
+        - HttpWriteStream
+        - HttpAppendStream
       show_if_no_docstring: true
       filters: ["!^_"]
 

@@ -23,7 +23,8 @@ class BaseGsBackend(object):
     __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
-    def client(self): ...
+    def client(self):
+        """The `google.cloud.storage` client every call of a path goes through."""
 
     def call_options(self) -> dict:
         """Keyword arguments (`timeout=`, `retry=`) added to every SDK call

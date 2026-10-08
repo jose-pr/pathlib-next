@@ -33,7 +33,8 @@ class BaseFtpBackend(object):
     __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
-    def client(self, source: Source, tls: bool) -> "_ftplib.FTP": ...
+    def client(self, source: Source, tls: bool) -> "_ftplib.FTP":
+        """The connected, logged-in client for `source`; `tls` asks for `ftps:`."""
 
 
 DEFAULT_TIMEOUT = 30.0

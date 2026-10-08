@@ -27,7 +27,8 @@ class BaseAzBackend(object):
     __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
-    def client(self): ...
+    def client(self):
+        """The `BlobServiceClient` every call of a path goes through."""
 
 
 def _default_credential():

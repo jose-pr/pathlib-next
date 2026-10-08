@@ -124,7 +124,8 @@ class BaseRepoBackend(object):
     __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
-    def request(self, method, url, **kwargs): ...
+    def request(self, method, url, **kwargs):
+        """Send one request to the API and return the `requests` response."""
 
 
 class RepoBackend(BaseRepoBackend):

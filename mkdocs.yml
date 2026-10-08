@@ -57,7 +57,7 @@ plugins:
             show_source: true
             show_root_heading: true
             merge_init_into_class: true
-            show_if_no_docstring: false
+            show_if_no_docstring: true
 
 markdown_extensions:
   - admonition

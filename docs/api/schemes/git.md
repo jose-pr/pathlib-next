@@ -7,6 +7,7 @@ All need the `http` extra.
       members:
         - DEFAULT_TIMEOUT
         - BaseRepoBackend
+        - InsecureTransportWarning
         - RepoBackend
       show_root_heading: true
 

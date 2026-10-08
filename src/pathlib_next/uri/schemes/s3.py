@@ -29,7 +29,8 @@ class BaseS3Backend(object):
     __slots__ = ("__weakref__",)
 
     @_utils.notimplemented
-    def client(self): ...
+    def client(self):
+        """The `boto3` S3 client every call of a path goes through."""
 
 
 class S3Backend(BaseS3Backend):
