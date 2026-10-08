@@ -147,7 +147,10 @@ class _DavWriteStream(_UploadStream):
         if self._exclusive:
             statuses[412] = FileExistsError
             extra = _EXCLUSIVE_CREATE
-        self._path._dav_request("PUT", data=data, statuses=statuses, **extra)
+        path = self._path
+        path._dav_request(
+            path.backend.write_method, data=data, statuses=statuses, **extra
+        )
 
 
 class DavPath(HttpPath):
@@ -237,7 +240,9 @@ class DavPath(HttpPath):
             raise OSError(_errno.EIO, f"Invalid PROPFIND response for {self}")
         return root, getattr(resp, "url", None) or self._wire_uri()
 
-    def stat(self, *, follow_symlinks=True):
+    def stat(self, *, follow_symlinks=True, walk_up_last_modified=False):
+        # `walk_up_last_modified` has nothing to do: the reply carries the
+        # modification time.
         hint = self._pop_stat_hint()
         if hint is not None:
             return hint
@@ -311,7 +316,7 @@ class DavPath(HttpPath):
             yield name
 
     def _open(self, mode="r", buffering=-1):
-        if "r" in mode:
+        if mode == "r":
             with _translate_http_errors(self):
                 req = self.backend.request(
                     "GET", self._wire_uri(), stream=True, headers=_IDENTITY_ENCODING

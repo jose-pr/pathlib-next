@@ -306,7 +306,7 @@ def test_repo_backend_headers_merge_with_request_headers():
 
     session = _Session()
     backend = RepoBackend(token="T", session=session, headers={"X-A": "1"})
-    backend.request("GET", "http://h/x", headers={"Accept": "raw"})
+    backend.request("GET", "https://h/x", headers={"Accept": "raw"})
     assert session.kwargs["headers"] == {
         "X-A": "1",
         "Accept": "raw",

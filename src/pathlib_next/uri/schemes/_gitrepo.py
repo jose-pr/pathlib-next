@@ -3,7 +3,10 @@ from __future__ import annotations
 import contextlib as _contextlib
 import errno as _errno
 import io as _io
+import ipaddress as _ipaddress
 import typing as _ty
+import urllib.parse as _urlparse
+import warnings as _warnings
 
 from ... import utils as _utils
 from .. import Source, UriPath
@@ -16,6 +19,40 @@ DEFAULT_TIMEOUT = (10, 60)
 """`(connect, read)` timeout, in seconds, `RepoBackend` sends with every
 request unless the caller supplies `timeout` (`RepoBackend(timeout=...)` or
 per request); `timeout=None` restores requests' unbounded wait."""
+
+
+class InsecureTransportWarning(UserWarning):
+    """A `RepoBackend` is about to send an `Authorization` header (its token,
+    or one given in `headers=`) over plain `http://` to a host that is not
+    this machine, where anyone on the route can read it."""
+
+
+def _is_loopback(host: "str | None") -> bool:
+    if not host:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return _ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _warn_if_plaintext(url: str, headers: dict) -> None:
+    if not url.lower().startswith("http://"):
+        return
+    if not any(name.lower() == "authorization" for name in headers):
+        return
+    host = _urlparse.urlsplit(url).hostname
+    if _is_loopback(host):
+        return
+    _warnings.warn(
+        f"Sending an Authorization header over plain http to {host}; "
+        "use an https API root",
+        InsecureTransportWarning,
+        stacklevel=3,
+    )
 
 
 def _rate_limit_error(response, path_obj) -> "OSError | None":
@@ -98,7 +135,9 @@ class RepoBackend(BaseRepoBackend):
     overrides the scheme's convention-derived API root entirely (e.g.
     `https://api.github.com`/`https://{host}/api/v3`) -- the seam a test
     fake (or a reverse-proxied self-hosted setup) plugs into, since the
-    real convention always forces `https`. Every request gets
+    real convention always forces `https`; a request that carries an
+    `Authorization` header to a plain `http://` URL on a host other than
+    loopback warns (`InsecureTransportWarning`). Every request gets
     `timeout=DEFAULT_TIMEOUT` (`(10, 60)` seconds) unless `requests_args`
     (`RepoBackend(timeout=...)`) or the call supplies one; `timeout=None`
     waits forever."""
@@ -127,6 +166,7 @@ class RepoBackend(BaseRepoBackend):
         headers = {**(self.requests_args.get("headers") or {}), **(headers or {})}
         if self.token:
             headers.setdefault("Authorization", f"Bearer {self.token}")
+        _warn_if_plaintext(url, headers)
         args = {**self.requests_args, **kwargs}
         args.pop("headers", None)
         args.setdefault("timeout", DEFAULT_TIMEOUT)
@@ -178,6 +218,19 @@ class _RepoApiPath(UriPath):
     def _initbackend(self):
         user, password = self.source.parsed_userinfo()
         return RepoBackend(token=password or user or None)
+
+    def as_posix(self) -> str:
+        # `user@host:path` would show the token when it is the user slot.
+        host = self.source.host
+        return f"{host}:{self.path}" if host else self.path
+
+    def _api_quote(self, text: str, safe: str = "") -> str:
+        """`text` as part of an API URL path: percent-encoded (`safe` stays
+        bare), and never a `.` or `..` segment, which the client would
+        resolve out of the repository's API root."""
+        if any(part in (".", "..") for part in text.split("/")):
+            raise ValueError(f"A dot segment cannot be part of an API URL: {self}")
+        return _urlparse.quote(text, safe=safe, errors="surrogateescape")
 
     @property
     def owner(self) -> str:

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import base64 as _base64
 import errno as _errno
-import urllib.parse as _urlparse
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
-from ._gitrepo import (
+from ._gitrepo import (  # noqa: F401  (re-exported)
+    InsecureTransportWarning,
     RepoBackend,
     _RepoApiPath,
     _translate_repo_errors,
-)  # noqa: F401  (re-exported)
+)
 
 
 class GitHubPath(_RepoApiPath):
@@ -45,13 +45,14 @@ class GitHubPath(_RepoApiPath):
 
     @property
     def _repo_url(self) -> str:
-        return f"{self._api_base}/repos/{self.owner}/{self.repo}"
+        owner, repo = self._api_quote(self.owner), self._api_quote(self.repo)
+        return f"{self._api_base}/repos/{owner}/{repo}"
 
     def _contents_url(self, path: "str | None" = None) -> str:
         url = f"{self._repo_url}/contents"
         path = self.repo_path if path is None else path
         if path:
-            url += f"/{_urlparse.quote(path)}"
+            url += f"/{self._api_quote(path, '/')}"
         return url
 
     def _params(self) -> dict:
@@ -111,7 +112,7 @@ class GitHubPath(_RepoApiPath):
         return branch
 
     def _tree_entries(self, sha: str) -> "list[dict]":
-        url = f"{self._repo_url}/git/trees/{_urlparse.quote(sha)}"
+        url = f"{self._repo_url}/git/trees/{self._api_quote(sha, '/')}"
         data = self._request(url=url, params={}).json()
         if data.get("truncated"):
             # Only for trees far past any directory listing (100,000

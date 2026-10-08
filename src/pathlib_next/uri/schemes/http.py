@@ -41,11 +41,21 @@ compressed from `open()` (and a rewrite-mode append would store that blob),
 while `Content-Length` would count encoded bytes."""
 
 
-def _split_userinfo(url: str) -> "tuple[str, tuple[str, str] | None]":
+def _credential(text: str) -> "str | bytes":
+    """The octets a percent-encoded userinfo part stands for (RFC 3986 2.1),
+    as `str` when they are ASCII and as `bytes` otherwise: `requests` encodes
+    a `str` credential as Latin-1, which would send the UTF-8 `caf%C3%A9` as
+    the single byte E9 and fail outright for `%FF` decoded to U+FFFD."""
+    octets = _urlparse.unquote_to_bytes(text)
+    return octets.decode("ascii") if octets.isascii() else octets
+
+
+def _split_userinfo(url: str) -> "tuple[str, tuple[str|bytes, str|bytes] | None]":
     """Split the userinfo out of an absolute URL: `(url_without_userinfo,
-    (user, password) | None)`, both parts percent-decoded. Credentials sent
-    inside the request URL end up in `Response.url`, `raise_for_status()`
-    text and redirect handling; they go out as `auth=` instead."""
+    (user, password) | None)`, both parts percent-decoded to the octets they
+    stand for. Credentials sent inside the request URL end up in
+    `Response.url`, `raise_for_status()` text and redirect handling; they go
+    out as `auth=` instead."""
     match = _RE_URL_SCHEME.match(url)
     if not match:
         return url, None
@@ -59,7 +69,7 @@ def _split_userinfo(url: str) -> "tuple[str, tuple[str, str] | None]":
     if not at:
         return url, None
     user, _, password = userinfo.partition(":")
-    auth = (_urlparse.unquote(user), _urlparse.unquote(password))
+    auth = (_credential(user), _credential(password))
     return url[:start] + hostport + url[end:], (auth if any(auth) else None)
 
 
@@ -1107,7 +1117,7 @@ class HttpPath(UriPath):
         mode="r",
         buffering=-1,
     ):
-        if "r" in mode:
+        if mode == "r":
             with _translate_http_errors(self):
                 req = self.backend.request(
                     "GET", self.as_uri(), stream=True, headers=_IDENTITY_ENCODING

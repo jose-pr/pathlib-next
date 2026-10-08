@@ -6,11 +6,12 @@ import urllib.parse as _urlparse
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
-from ._gitrepo import (
+from ._gitrepo import (  # noqa: F401  (re-exported)
+    InsecureTransportWarning,
     RepoBackend,
     _RepoApiPath,
     _translate_repo_errors,
-)  # noqa: F401  (re-exported)
+)
 
 
 class GitLabPath(_RepoApiPath):
@@ -93,7 +94,7 @@ class GitLabPath(_RepoApiPath):
         return extra
 
     def _file_url(self, path: str, suffix: str = "") -> str:
-        encoded = _urlparse.quote(path, safe="")
+        encoded = self._api_quote(path)
         return f"{self._api_base}/projects/{self._project_id}/repository/files/{encoded}{suffix}"
 
     def _tree_url(self) -> str:
