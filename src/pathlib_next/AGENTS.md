@@ -1014,14 +1014,19 @@ class TestMyPath(PathContract):
   importable from `pathlib_next.utils`.
 - **`archive`** — `make_archive(src, format, target)` (`format` `"zip"` or
   `"tar"`, else `ValueError`; `src` file or directory of any `Path`; built in
-  a temporary buffer, written to `target` only when complete; zip64 always)
+  a temporary buffer, written to `target` only when complete; zip64 always;
+  every directory is a member, empty ones too; a member carries the source's
+  modification time and, in a tar, its permission bits — a source that
+  reports no time gets 1980-01-01 (zip) or the epoch (tar), and one that
+  reports no mode gets 0o644 for a file and 0o755 for a directory; a tar
+  member is sized from the bytes read, not from `stat()`)
   and `unpack_archive(archive, dest)` (format from the name, else magic
   bytes; creates `dest`; non-seekable streams are buffered; members that
   would leave `dest` are skipped, and for a Windows-flavoured `dest` so are
   members with a part Windows would rewrite or send to a device
   (`UserWarning`); tar hard links and links to regular files are extracted as
-  copies, other links skipped with `UserWarning`). Also importable from
-  `pathlib_next.utils`.
+  copies, other links — to nothing, to a directory, or in a loop — skipped
+  with `UserWarning`). Also importable from `pathlib_next.utils`.
 - **`is_safe_child_name(name, *, windows=False) -> bool`** — `False` for a
   non-`str`, `""`, `.`, `..`, or a name containing `/` or NUL; with
   `windows=True` also `\`, `:`, a trailing dot or space, and the reserved

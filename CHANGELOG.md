@@ -736,6 +736,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   written against `pathlib` now sees the same events with the same arguments
   on the running version. `glob(None)` has no `pathlib` counterpart and raises
   none.
+- **`make_archive(format="tar")` sizes a member from the bytes it read.** The
+  member size was `stat().st_size`, so a file whose backend does not know its
+  size (an HTTP file served without `Content-Length` reports 0) became an empty
+  member with no error, and a size that was too large failed with `unexpected
+  end of data`. The content is read once into a buffer, counted, and then
+  written, so the member holds the file. A tar of a large file is read and
+  buffered once more than before.
+- **`make_archive` keeps directories, times and permissions.** A source with
+  `empty/` and `sub/run.sh` archived one member, so `unpack_archive` rebuilt no
+  `empty/`; every directory is now a member of its own, before what is in it.
+  Members were dated 1980-01-01 (zip) or the epoch (tar) whatever the source
+  said; a member now carries the modification time the source reports, and a
+  source that reports none keeps those two defaults. A tar member from a source
+  that reports no permission bits (`MemPath`, an HTTP file) was read-only
+  (`0o444`); it is `0o644` for a file and `0o755` for a directory. Code that
+  unpacks these archives needs no change.
+- **`unpack_archive` skips a tar link that names itself.** A symlink `a -> a`,
+  `a -> b` with `b -> a`, or a hard link to itself ended the extraction with
+  `RecursionError` and no warning. Links are resolved by a loop that follows a
+  chain once, so such a link is skipped with the `UserWarning` every other
+  unresolvable link gets, the other members are extracted, and a chain of any
+  length ending at a file is followed.
 
 ## [0.9.11] - 2026-09-21
 
