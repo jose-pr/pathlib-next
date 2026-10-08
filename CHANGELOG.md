@@ -652,6 +652,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Host` block was ignored until restart. The cache now also keys on the file's
   modification time and size (a change to an `Include`d file alone is not
   noticed).
+- **An `archive:` path reads nothing until it is used.** `UriPath("archive:http://h/noext!/m")`
+  sent a request while it was being built (an outer whose name does not say
+  zip or tar is sniffed), a second one to read the member, and a sniff that
+  failed made that path object a tar for good, so a good zip then failed with
+  `tarfile.ReadError`. The format is now settled on first use: building,
+  printing, joining, copying and pickling a path send nothing, a non-local
+  outer read to decide is not fetched again, and a failure to read the outer
+  propagates and decides nothing, so the next call tries again. A write
+  through an `archive:` path whose outer is missing and has no extension is now
+  `FileNotFoundError` (it was `NotImplementedError`).
+- **A tar member whose name is not UTF-8 can be printed, hashed and compared.**
+  A tar written in a Latin-1 locale lists `caf\udce9.txt`, and `str()`,
+  `repr()`, `hash()`, `==` and `as_uri()` of that path raised
+  `UnicodeEncodeError`. The name now keeps its bytes as `%XX` in the URI
+  (`.../caf%E9.txt`), as every other scheme composes it, and the URI parses
+  back to the same member.
+- **A damaged archive raises one exception family per format.** Besides
+  `zipfile.BadZipFile` and `tarfile.ReadError`, `exists()`, `stat()`,
+  `iterdir()` and `read_bytes()` leaked `zlib.error`, `EOFError`,
+  `NotImplementedError("zip file version ...")` and `gzip.BadGzipFile` (an
+  `OSError`, so `exists()` answered `False` for a corrupt `.tar.gz`). They are
+  now `BadZipFile` for a zip and `ReadError` for a tar, with the decoder's error
+  as `__cause__`. Code that caught `zlib.error` or `EOFError` around a read of
+  an archive member catches those two instead. An encrypted member is still
+  `RuntimeError` and an unsupported compression method
+  `NotImplementedError`.
+- **`exists()` and `is_file()` of a zip member no longer raise `KeyError`
+  while another thread rewrites the zip.** The name was looked up in one
+  snapshot and its stat read from a handle that had been reopened in between;
+  both now happen under one hold of the handle's lock, and a member that is
+  gone by then is `FileNotFoundError`.
+- **New members written through `zip:` are deflated.** A member added with
+  `write_bytes()` or `open("w")` was stored uncompressed, so 100 000 bytes of
+  one letter took 100 000 bytes. An overwritten member keeps the compression
+  method it had (a stored `mimetype` stays stored).
+- **A read-only zip is not replaced on POSIX.** `write_bytes()`, `unlink()` and
+  `rename()` on a zip whose mode forbids writing succeeded, because the archive
+  is replaced by a new file; they raise `PermissionError` before anything is
+  written, as on Windows. Replacing the archive still gives it a new inode:
+  another hard link to it keeps the old content.
 
 ## [0.9.12] - 2026-10-08
 
