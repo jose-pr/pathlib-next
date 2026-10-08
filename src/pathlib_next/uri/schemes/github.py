@@ -33,11 +33,7 @@ class GitHubPath(_RepoApiPath):
     # no pagination and no truncation flag.
     _CONTENTS_LIMIT = 1000
 
-    @property
-    def _api_base(self) -> str:
-        override = getattr(self.backend, "api_base", None)
-        if override:
-            return override
+    def _default_api_base(self) -> str:
         host = self.source.host or "github.com"
         if str(host).lower() in ("github.com", "www.github.com"):
             return "https://api.github.com"
@@ -72,25 +68,44 @@ class GitHubPath(_RepoApiPath):
             resp.raise_for_status()
         return resp
 
+    def _object(self, data: dict) -> dict:
+        """`data` if it describes one entry of a repository (it has a
+        `type`), else `OSError(EIO)`."""
+        if not isinstance(data.get("type"), str):
+            raise self._bad_reply("an object without a type")
+        return data
+
+    def _entry(self, item) -> dict:
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("type"), str)
+        ):
+            raise self._bad_reply("a directory entry without a name and a type")
+        self._size_of(item)
+        return item
+
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
         if hint is not None:
             return hint
-        data = self._request().json()
+        data = self._decode(self._request(), list, dict)
         if isinstance(data, list):
             return FileStat(is_dir=True)
-        return FileStat(st_size=data.get("size", 0) or 0, is_dir=False)
+        return FileStat(st_size=self._size_of(self._object(data)), is_dir=False)
 
     def _entries(self, path: str) -> "list[dict]":
         """Contents-API-shaped entries of the directory `path`. A listing
         that hits the contents API's 1,000-entry cap is re-read through the
         Git Trees API, which has no such cap."""
-        data = self._request(url=self._contents_url(path)).json()
-        if not isinstance(data, list):
+        data = self._decode(self._request(url=self._contents_url(path)), list, dict)
+        if isinstance(data, dict):
+            self._object(data)
             raise NotADirectoryError(self)
-        if len(data) >= self._CONTENTS_LIMIT:
-            data = self._tree_entries(self._tree_sha(path))
-        return data
+        entries = [self._entry(item) for item in data]
+        if len(entries) >= self._CONTENTS_LIMIT:
+            entries = self._tree_entries(self._tree_sha(path))
+        return entries
 
     def _tree_sha(self, path: str) -> str:
         if not path:
@@ -98,7 +113,10 @@ class GitHubPath(_RepoApiPath):
         parent, _, name = path.rpartition("/")
         for entry in self._entries(parent):
             if entry["name"] == name and entry["type"] == "dir":
-                return entry["sha"]
+                sha = entry.get("sha")
+                if not isinstance(sha, str):
+                    raise self._bad_reply("a directory entry without a sha")
+                return sha
         raise FileNotFoundError(self)
 
     def _default_branch(self) -> str:
@@ -106,28 +124,44 @@ class GitHubPath(_RepoApiPath):
         key = ("github_default_branch", self._repo_url)
         if cache is not None and key in cache:
             return cache[key]
-        branch = self._request(url=self._repo_url, params={}).json()["default_branch"]
+        data = self._decode(self._request(url=self._repo_url, params={}), dict)
+        branch = data.get("default_branch")
+        if not (isinstance(branch, str) and branch):
+            raise self._bad_reply("a repository without a default_branch")
         if cache is not None:
             cache[key] = branch
         return branch
 
     def _tree_entries(self, sha: str) -> "list[dict]":
         url = f"{self._repo_url}/git/trees/{self._api_quote(sha, '/')}"
-        data = self._request(url=url, params={}).json()
+        data = self._decode(self._request(url=url, params={}), dict)
         if data.get("truncated"):
             # Only for trees far past any directory listing (100,000
             # entries); never return a partial listing as a complete one.
             raise OSError(_errno.EIO, f"Git tree listing truncated for {self}")
+        tree = data.get("tree")
+        if not isinstance(tree, list):
+            raise self._bad_reply("a tree without a tree list")
         kinds = {"tree": "dir", "blob": "file", "commit": "submodule"}
-        return [
-            {
-                "name": entry["path"],
-                "type": kinds.get(entry["type"], entry["type"]),
-                "size": entry.get("size", 0) or 0,
-                "sha": entry.get("sha"),
-            }
-            for entry in data.get("tree", [])
-        ]
+        entries = []
+        for item in tree:
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("path"), str)
+                and isinstance(item.get("type"), str)
+            ):
+                raise self._bad_reply("a tree entry without a path and a type")
+            entries.append(
+                self._entry(
+                    {
+                        "name": item["path"],
+                        "type": kinds.get(item["type"], item["type"]),
+                        "size": item.get("size"),
+                        "sha": item.get("sha"),
+                    }
+                )
+            )
+        return entries
 
     def _scandir(self):
         for entry in self._entries(self.repo_path):
@@ -136,12 +170,8 @@ class GitHubPath(_RepoApiPath):
                 continue
             is_dir = entry["type"] == "dir"
             yield entry["name"], FileStat(
-                st_size=0 if is_dir else (entry.get("size", 0) or 0), is_dir=is_dir
+                st_size=0 if is_dir else self._size_of(entry), is_dir=is_dir
             )
-
-    def _listdir(self):
-        for name, _stat in self._scandir():
-            yield name
 
     def _open(self, mode="r", buffering=-1):
         self._check_read_mode(mode)
@@ -150,10 +180,14 @@ class GitHubPath(_RepoApiPath):
         if content_type.startswith("application/json"):
             # "raw" is ignored by the API for a directory listing (and for
             # a symlink/submodule entry, which carries its own JSON shape).
-            data = resp.json()
+            data = self._decode(resp, list, dict)
             if isinstance(data, list):
                 raise IsADirectoryError(self)
-            if data.get("encoding") == "base64" and data.get("content") is not None:
-                return self._reader(_base64.b64decode(data["content"]))
+            content = data.get("content")
+            if data.get("encoding") == "base64" and isinstance(content, str):
+                try:
+                    return self._reader(_base64.b64decode(content))
+                except ValueError:
+                    raise self._bad_reply("content that is not base64") from None
             raise OSError(_errno.EIO, f"Unsupported content response for {self}")
         return self._reader(resp.content)

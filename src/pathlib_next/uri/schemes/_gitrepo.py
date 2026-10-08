@@ -219,6 +219,41 @@ class _RepoApiPath(UriPath):
         user, password = self.source.parsed_userinfo()
         return RepoBackend(token=password or user or None)
 
+    @property
+    def _api_base(self) -> str:
+        return getattr(self.backend, "api_base", None) or self._default_api_base()
+
+    @_utils.notimplemented
+    def _default_api_base(self) -> str:
+        """The API root of this host when the backend names none."""
+
+    def _bad_reply(self, what: str) -> OSError:
+        return OSError(_errno.EIO, f"Unexpected API reply for {self}: {what}")
+
+    def _decode(self, resp, *expected: type):
+        """The JSON body of `resp`, which must be one of `expected` (`dict`,
+        `list`): anything else -- a captive portal's page, a gateway's JSON,
+        `null`, a truncated body -- is `OSError(EIO)` naming this path, so
+        `exists()` answers `False` and `stat()` raises."""
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, expected):
+            kinds = " or ".join({dict: "object", list: "array"}[k] for k in expected)
+            raise self._bad_reply(f"not a JSON {kinds}")
+        return data
+
+    def _size_of(self, entry: dict) -> int:
+        """The `size` of an API object: a non-negative integer, `0` when it
+        has none."""
+        size = entry.get("size")
+        if size is None:
+            return 0
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            return size
+        raise self._bad_reply(f"size {size!r}")
+
     def as_posix(self) -> str:
         # `user@host:path` would show the token when it is the user slot.
         host = self.source.host

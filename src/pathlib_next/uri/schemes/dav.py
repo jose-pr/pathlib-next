@@ -317,18 +317,7 @@ class DavPath(HttpPath):
 
     def _open(self, mode="r", buffering=-1):
         if mode == "r":
-            with _translate_http_errors(self):
-                req = self.backend.request(
-                    "GET", self._wire_uri(), stream=True, headers=_IDENTITY_ENCODING
-                )
-                try:
-                    req.raise_for_status()
-                except BaseException:
-                    # Without this check a 404/401/500 error page was read
-                    # back as file content. Close first: stream=True leaves
-                    # the body unread and the pooled connection held.
-                    req.close()
-                    raise
+            req = self._get(self._wire_uri(), headers=_IDENTITY_ENCODING)
             content_type = req.headers.get("Content-Type", "")
             if content_type.split(";")[0].strip().lower() == "text/html":
                 # GET on a collection is server-defined (RFC 4918 9.4) and

@@ -6,6 +6,7 @@ import urllib.parse as _urlparse
 
 from ... import utils as _utils
 from ...utils.stat import FileStat
+from .http import _server_size
 from ._gitrepo import (  # noqa: F401  (re-exported)
     InsecureTransportWarning,
     RepoBackend,
@@ -34,11 +35,7 @@ class GitLabPath(_RepoApiPath):
     __SCHEMES = ("gitlab",)
     __slots__ = ()
 
-    @property
-    def _api_base(self) -> str:
-        override = getattr(self.backend, "api_base", None)
-        if override:
-            return override
+    def _default_api_base(self) -> str:
         if not self.source.host:
             return "https://gitlab.com/api/v4"
         return f"https://{self._api_authority()}/api/v4"
@@ -121,19 +118,34 @@ class GitLabPath(_RepoApiPath):
         if cache is not None and key in cache:
             return cache[key]
         resp = self._request("GET", f"{self._api_base}/projects/{self._project_id}")
-        branch = resp.json()["default_branch"]
+        branch = self._decode(resp, dict).get("default_branch")
+        if not (isinstance(branch, str) and branch):
+            raise self._bad_reply("a project without a default_branch")
         if cache is not None:
             cache[key] = branch
         return branch
 
-    def _get_file_meta(self, path: str):
+    def _file_size(self, path: str) -> "int | None":
+        """The size of the file at `path`, or `None` when there is no such
+        file. `HEAD` on the files endpoint answers with the size in
+        `X-Gitlab-Size` and no body; a reply without it (or a server that
+        refuses `HEAD`) is followed by a `GET` of the file's metadata."""
+        url = self._file_url(path)
+        params = {"ref": self._resolved_ref()}
         try:
-            resp = self._request(
-                "GET", self._file_url(path), params={"ref": self._resolved_ref()}
-            )
+            with _translate_repo_errors(self):
+                resp = self.backend.request("HEAD", url, params=params)
+                if resp.status_code not in (405, 501):
+                    resp.raise_for_status()
+            size = _server_size(resp.headers.get("X-Gitlab-Size"))
+            if size is not None and resp.status_code < 300:
+                return size
+            meta = self._decode(self._request("GET", url, params=params), dict)
         except FileNotFoundError:
             return None
-        return resp.json()
+        if "size" not in meta:
+            raise self._bad_reply("file metadata without a size")
+        return self._size_of(meta)
 
     def _tree_entries(self, path: str):
         # The tree endpoint is paginated (at most 100 per page): follow
@@ -145,7 +157,14 @@ class GitLabPath(_RepoApiPath):
                 self._tree_url(),
                 params=self._params(path=path, per_page=100, page=page),
             )
-            yield from resp.json()
+            for item in self._decode(resp, list):
+                if not (
+                    isinstance(item, dict)
+                    and isinstance(item.get("name"), str)
+                    and isinstance(item.get("type"), str)
+                ):
+                    raise self._bad_reply("a tree entry without a name and a type")
+                yield item
             next_page = resp.headers.get("X-Next-Page", "")
             if not next_page.isdigit() or int(next_page) <= page:
                 return
@@ -159,11 +178,14 @@ class GitLabPath(_RepoApiPath):
         if not path:
             # Ask the server: a missing project, owner-only URI or unknown
             # ref must not read as an existing directory.
-            self._request("GET", self._tree_url(), params=self._params(per_page=1))
+            self._decode(
+                self._request("GET", self._tree_url(), params=self._params(per_page=1)),
+                list,
+            )
             return FileStat(is_dir=True)
-        meta = self._get_file_meta(path)
-        if meta is not None:
-            return FileStat(st_size=meta.get("size", 0) or 0, is_dir=False)
+        size = self._file_size(path)
+        if size is not None:
+            return FileStat(st_size=size, is_dir=False)
         # Not a file at this exact path. Git has no empty directories, so a
         # path whose tree listing has any entry is a directory; an empty
         # listing (or a 404) means it does not exist.
@@ -173,7 +195,7 @@ class GitLabPath(_RepoApiPath):
             )
         except FileNotFoundError:
             raise FileNotFoundError(self) from None
-        if resp.json():
+        if self._decode(resp, list):
             return FileStat(is_dir=True)
         raise FileNotFoundError(self)
 
@@ -183,7 +205,7 @@ class GitLabPath(_RepoApiPath):
             first = next(entries, None)
         except FileNotFoundError:
             # The tree endpoint 404s for a blob path as for a missing one.
-            if self.repo_path and self._get_file_meta(self.repo_path) is not None:
+            if self.repo_path and self._file_size(self.repo_path) is not None:
                 raise NotADirectoryError(
                     _errno.ENOTDIR, "Not a directory", str(self)
                 ) from None
@@ -205,10 +227,6 @@ class GitLabPath(_RepoApiPath):
                 continue
             is_dir = entry["type"] == "tree"
             yield entry["name"], (FileStat(is_dir=True) if is_dir else None)
-
-    def _listdir(self):
-        for name, _stat in self._scandir():
-            yield name
 
     def _open(self, mode="r", buffering=-1):
         self._check_read_mode(mode)

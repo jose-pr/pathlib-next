@@ -919,11 +919,11 @@ class HttpPath(UriPath):
         # asked again for the path as given.
         slashed = self if self.path.endswith("/") else self.with_path(self.path + "/")
         try:
-            req = self._get_listing(slashed)
+            req = self._get(slashed)
         except FileNotFoundError:
             if slashed is self:
                 raise
-            req = self._get_listing(self)
+            req = self._get(self)
         try:
             content_type = req.headers.get("Content-Type") or ""
             mime = content_type.split(";", 1)[0].strip().lower()
@@ -969,9 +969,12 @@ class HttpPath(UriPath):
         except LookupError:
             return body.decode("utf-8", "replace")
 
-    def _get_listing(self, uri) -> _req.Response:
+    def _get(self, uri, **kwargs) -> _req.Response:
+        """A streamed `GET` of `uri` that succeeded, its body unread. A
+        failure is translated to the pathlib exception for this path, and the
+        connection is released first: `stream=True` leaves it held."""
         with _translate_http_errors(self):
-            req = self.backend.request("GET", uri, stream=True)
+            req = self.backend.request("GET", uri, stream=True, **kwargs)
             try:
                 req.raise_for_status()
             except BaseException:
@@ -1118,15 +1121,7 @@ class HttpPath(UriPath):
         buffering=-1,
     ):
         if mode == "r":
-            with _translate_http_errors(self):
-                req = self.backend.request(
-                    "GET", self.as_uri(), stream=True, headers=_IDENTITY_ENCODING
-                )
-                try:
-                    req.raise_for_status()
-                except BaseException:
-                    req.close()
-                    raise
+            req = self._get(self.as_uri(), headers=_IDENTITY_ENCODING)
             return _response_reader(self, req, buffering)
         if mode == "a":
             return HttpAppendStream(self)

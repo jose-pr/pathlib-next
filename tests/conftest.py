@@ -956,7 +956,8 @@ def gitlab_api_server(fixture_tree):
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header("Content-Length", str(len(content)))
                     self.end_headers()
-                    self.wfile.write(content)
+                    if self.command != "HEAD":
+                        self.wfile.write(content)
                     return
                 self._send_json(
                     200,
@@ -965,10 +966,15 @@ def gitlab_api_server(fixture_tree):
                         "file_path": path,
                         "size": len(content),
                     },
+                    # The files endpoint describes the file in headers too,
+                    # and answers HEAD with those headers alone.
+                    {"X-Gitlab-Size": str(len(content))},
                 )
                 return
 
             self._send_json(404, {"message": "404 Not Found"})
+
+        do_HEAD = do_GET
 
         def _send_json(self, status, payload, headers=None):
             body = json.dumps(payload).encode()
@@ -978,7 +984,8 @@ def gitlab_api_server(fixture_tree):
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
 
         def log_message(self, format, *args):
             pass
