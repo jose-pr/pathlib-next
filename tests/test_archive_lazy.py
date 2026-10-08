@@ -227,3 +227,38 @@ def test_refresh_of_a_local_archive_changes_nothing(tmp_path):
     assert path.read_bytes() == b"M"
     path.refresh()
     assert path.read_bytes() == b"M"
+
+
+@pytest.mark.parametrize("scheme", ["archive", "zip", "archive+zip"])
+def test_two_paths_built_for_one_archive_are_on_one_filesystem(tmp_path, scheme):
+    archive = tmp_path / "a.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("a.txt", "A")
+    first = UriPath(f"{scheme}:{archive.as_uri()}!/") / "a.txt"
+    second = UriPath(f"{scheme}:{archive.as_uri()}!/") / "a.txt"
+    other_spelling = UriPath(f"zip:{archive.as_uri()}!/") / "a.txt"
+
+    assert first._same_filesystem(second) and second._same_filesystem(first)
+    assert first._same_filesystem(other_spelling)
+    assert pickle.loads(pickle.dumps(first))._same_filesystem(first)
+    with pytest.raises(OSError):
+        first.copy(second, overwrite=True)
+    assert first.read_bytes() == b"A"
+
+
+def test_paths_of_two_archives_are_on_two_filesystems(tmp_path):
+    paths = []
+    for name in ("a.zip", "b.zip"):
+        archive = tmp_path / name
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("a.txt", "A")
+        paths.append(UriPath(f"archive:{archive.as_uri()}!/") / "a.txt")
+
+    assert not paths[0]._same_filesystem(paths[1])
+
+
+def test_an_archive_that_cannot_be_read_is_on_no_other_filesystem(tmp_path):
+    missing = UriPath(f"archive:{(tmp_path / 'missing').as_uri()}!/") / "a.txt"
+    again = UriPath(f"archive:{(tmp_path / 'missing').as_uri()}!/") / "a.txt"
+
+    assert not missing._same_filesystem(again)

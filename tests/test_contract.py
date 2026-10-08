@@ -133,9 +133,6 @@ class TestArchiveZipContract(PathContract):
     supports_question_mark_names = True
 
     scheme = "archive"
-    # A pickled path of the extension-detecting scheme is equal to the
-    # original but `_same_filesystem()` does not place the two together.
-    supports_pickle = False
 
     @pytest.fixture
     def root(self, tmp_path_factory, fixture_tree):
@@ -146,12 +143,10 @@ class TestArchiveZipContract(PathContract):
 
 class TestArchivePinnedZipContract(TestArchiveZipContract):
     scheme = "archive+zip"
-    supports_pickle = True
 
 
 class TestArchiveTarContract(ReadPathContract):
     scheme = "archive"
-    supports_pickle = False  # as TestArchiveZipContract
 
     @pytest.fixture
     def root(self, tmp_path_factory, fixture_tree):
@@ -162,7 +157,6 @@ class TestArchiveTarContract(ReadPathContract):
 
 class TestArchivePinnedTarContract(TestArchiveTarContract):
     scheme = "archive+tar"
-    supports_pickle = True
 
 
 # DataUri read-only contract (represents single file)

@@ -1034,6 +1034,18 @@ class ArchiveUri(UriPath):
             return None
         return self.backend, tuple(member.split("/")) if member else ()
 
+    def _same_filesystem(self, other) -> bool:
+        # The archive handle is the namespace. An `archive:` path holds a
+        # stand-in until its format is settled, and two of them naming one
+        # archive settle on one handle.
+        if isinstance(other, ArchiveUri):
+            try:
+                return other.backend is self.backend
+            except Exception:
+                # The archive cannot be read: nothing settles its handle.
+                return False
+        return super()._same_filesystem(other)
+
     def _same_location(self, other: Uri) -> bool:
         # Every archive URI has the same bare "zip:"/"tar:" authority, so the
         # authority alone cannot tell two archives apart: an archive path is
