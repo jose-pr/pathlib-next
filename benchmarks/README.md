@@ -123,3 +123,6 @@ Excerpt (values illustrative):
 | --- | --- |
 | `baseline-local-0.9.3-py3.14-nt-amd64.json` | Local sanity baseline, default suite: the working tree after 0.9.3 on a Windows developer machine, CPython 3.14 (x64 build). Not CI; not a performance claim. |
 | `baseline-local-0.9.3-py3.9-nt-amd64.json` | The same run on CPython 3.9, the supported floor (x64 build). |
+| `ci-ubuntu-latest-py3.14.json` | The `benchmark` job of the test workflow on the hosted Linux runner, default suite, at the release commit of the version its `package.version` names. Replaced at each release; earlier ones are in the file's history. |
+| `ci-macos-latest-py3.14.json` | The same job on the hosted macOS runner. |
+| `ci-windows-latest-py3.14.json` | The same job on the hosted Windows runner. |
