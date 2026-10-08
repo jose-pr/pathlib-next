@@ -305,7 +305,7 @@ class Uri(Pathname):
         elif len(uris) == 1 and isinstance(uris[0], Uri):
             source, _path, query, fragment = uris[0].parts
         else:
-            paths: list[str] = []
+            paths: list[tuple[str, bool]] = []
             for _uri in uris:
                 src, path, q, frag = (
                     _uri.parts if isinstance(_uri, Uri) else self._parse_uri(_uri)
@@ -317,9 +317,16 @@ class Uri(Pathname):
                     query = q
                 if frag:
                     fragment = frag
-                paths.append(path)
+                # A `Uri` argument says what restarts a join for its own
+                # scheme (a `FileUri` stores "D:/f" without the "/").
+                absolute = (
+                    _uri._is_absolute_decoded(path)
+                    if isinstance(_uri, Uri)
+                    else path.startswith("/")
+                )
+                paths.append((path, absolute))
 
-            for path in reversed(paths):
+            for path, absolute in reversed(paths):
                 if not path:
                     continue
                 if path.endswith("/"):
@@ -328,7 +335,7 @@ class Uri(Pathname):
                     _path = f"{path}/{_path}"
                 else:
                     _path = path
-                if _path.startswith("/"):
+                if absolute or _path.startswith("/"):
                     break
 
             if local and not source:

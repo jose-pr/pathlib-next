@@ -605,8 +605,13 @@ chained (their text can carry credentials).
   drive is the anchor: `parents` ends at the drive root (`file:/C:/`) and
   equals the repeated `parent`, dot segments never climb above it, and a
   `str` join key or `copy()`/`move()`/`rename()` destination reads `\` as a
-  separator (`C:\Temp\x` is an absolute path). Elsewhere a backslash is a
-  filename character, and every other scheme splits on `/` only.
+  separator (`C:\Temp\x` is an absolute path). A path with a named host is a
+  UNC path there, whose anchor is the share: `file://server/share/a/b` has the
+  ancestors `file://server/share/a` and `file://server/share/`, and the share
+  root is its own parent. A `FileUri` argument holding a drive
+  (`base / UriPath("file:///D:/f")`) restarts the join, as a `str` key does.
+  Elsewhere a backslash is a filename character and the root of a host is the
+  end of the chain, and every other scheme splits on `/` only.
 - **`DataUri`** (`data:`; `schemes.data`) — RFC 2397
   `data:[<mediatype>][;base64],<data>`. `mediatype` property (default
   `text/plain;charset=US-ASCII`). RFC 2397 has no query: an unescaped `?` and

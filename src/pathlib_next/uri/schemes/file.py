@@ -20,11 +20,38 @@ class FileUri(UriPath):
             self._filepath = _Local(self.__fspath__())
         return self._filepath
 
+    def _unc_share(self) -> "str | None":
+        """The share of a UNC path ("/share" under a named host), else None.
+        On Windows a named host is a server and `//server/share` is the anchor
+        of everything below it. Only the text is looked at; nothing is
+        resolved."""
+        host = self.source.host
+        segments = self.segments
+        if (
+            _os.name == "nt"
+            and host
+            and not (isinstance(host, str) and host.lower() == "localhost")
+            and segments[:1] == ("",)
+            and len(segments) > 1
+            and segments[1]
+        ):
+            return "/" + segments[1]
+        return None
+
     @property
     def parent(self):
         if _os.name == "nt" and _is_drive(self.path.removeprefix("/")):
             # A bare drive is its own parent, as in `PureWindowsPath("C:")`.
             return self
+        share = self._unc_share()
+        if share is not None:
+            if self.path.rstrip("/") == share:
+                return self
+            parent = super().parent
+            if parent.path == share:
+                # The parent of a top-level name in a share is the share root.
+                return parent.with_path(share + "/")
+            return parent
         parent = super().parent
         path = parent.path
         if _os.name == "nt" and _is_drive(path.removeprefix("/")):
@@ -35,12 +62,15 @@ class FileUri(UriPath):
 
     def _anchor_segments(self):
         # The drive is the anchor of "C:/a/b" (and "/C:/a/b" under a host),
-        # so `parents` ends at the drive root "C:/" like `parent` does.
+        # so `parents` ends at the drive root "C:/" like `parent` does; the
+        # share is the anchor of a UNC path.
         segments = self.segments
         if _os.name == "nt":
             if segments[:1] and _is_drive(segments[0]):
                 return segments[:1]
             if segments[:1] == ("",) and len(segments) > 1 and _is_drive(segments[1]):
+                return segments[:2]
+            if self._unc_share() is not None:
                 return segments[:2]
         return super()._anchor_segments()
 

@@ -10,7 +10,7 @@ import os
 import pytest
 
 from pathlib_next import LocalPath
-from pathlib_next.uri import UriPath
+from pathlib_next.uri import Uri, UriPath
 from pathlib_next.uri.schemes.file import FileUri
 
 WINDOWS = os.name == "nt"
@@ -218,3 +218,72 @@ def test_sync_overlap_sees_a_local_path_and_its_file_uri(tmp_path):
             local, as_uri
         )
     assert (tree / "keep.txt").read_text() == "keep"
+
+
+# --- a UNC share is the anchor of its path ------------------------------------
+
+
+@windows_only
+def test_parents_of_a_unc_path_end_at_the_share_root():
+    path = UriPath("file://server/share/a/b")
+    assert [p.as_uri() for p in path.parents] == [
+        "file://server/share/a",
+        "file://server/share/",
+    ]
+    assert path.parent.parent.parent.as_uri() == "file://server/share/"
+    assert path.parents[-1].parent.as_uri() == "file://server/share/"
+
+
+@windows_only
+def test_a_share_root_is_its_own_parent_and_has_no_ancestors():
+    for text in ("file://server/share", "file://server/share/"):
+        path = UriPath(text)
+        assert path.parent.as_uri() == path.as_uri()
+        assert list(path.parents) == []
+    assert UriPath("file://server/share/a").parent.as_uri() == "file://server/share/"
+    assert UriPath("file://server/share/a").parents[0].as_uri() == (
+        "file://server/share/"
+    )
+
+
+@windows_only
+def test_a_named_host_that_is_this_machine_is_still_a_unc_share():
+    path = UriPath("file://localhost/share/a")
+    assert path.parent.as_uri() == "file://localhost/share"
+    assert UriPath("file://Server/Share/a/b").parents[-1].as_uri() == (
+        "file://server/Share/"
+    )
+
+
+@posix_only
+def test_off_windows_the_root_of_a_host_ends_the_chain():
+    path = UriPath("file://server/share/a/b")
+    assert [p.as_uri() for p in path.parents] == [
+        "file://server/share/a",
+        "file://server/share",
+        "file://server/",
+    ]
+
+
+# --- a drive path given as an argument restarts a join ---------------------------
+
+
+@windows_only
+def test_a_file_uri_argument_with_a_drive_restarts_the_join():
+    base = UriPath("file:///C:/d/")
+    other = UriPath("file:///D:/f")
+    assert (base / other).as_uri() == "file:/D:/f"
+    assert base.joinpath(other, "x").as_uri() == "file:/D:/f/x"
+    assert UriPath(base, other).as_uri() == "file:/D:/f"
+    assert (base / UriPath("file:///D:/f/g/")).as_uri() == "file:/D:/f/g/"
+    # The same answer whichever class carries the argument.
+    assert (base / Uri("file:///D:/f")).as_uri() == "file:/D:/f"
+    assert (base / "D:/f").as_uri() == "file:/D:/f"
+    assert (base / "rel").as_uri() == "file:/C:/d/rel"
+    assert (base / UriPath("file:rel")).as_uri() == "file:/C:/d/rel"
+
+
+@posix_only
+def test_off_windows_a_drive_spelling_is_an_ordinary_relative_name():
+    base = UriPath("file:///d/")
+    assert (base / UriPath("file:D:/f")).as_uri().endswith("/d/D:/f")

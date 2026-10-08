@@ -397,6 +397,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `copy()` and `move()`. `normalized_path` still collapses, and a name a
   listing yields as empty is still skipped. Code that relied on `p / "a//b"`
   collapsing, as `pathlib` does, strips the empty segment itself.
+- **The ancestors of a UNC `FileUri` stop at the share root.** On Windows
+  `UriPath("file://server/share/a/b").parents` ended `file://server/share` and
+  `file://server/`, which names no file system, and `parent` of the share root
+  climbed out of the share. The share is the anchor, as it is for
+  `PureWindowsPath`: the ancestors are `file://server/share/a` and
+  `file://server/share/`, and the share root is its own parent. Off Windows
+  the root of the host still ends the chain.
+- **A `FileUri` argument holding a drive restarts a join on Windows.**
+  `UriPath("file:///C:/d/") / UriPath("file:///D:/f")` was `file:/C:/d/D:/f`
+  (the same join with a plain `Uri`, or with the `str` `"D:/f"`, was already
+  `file:/D:/f`). The argument now restarts the join whichever class carries it.
 
 ## [0.9.12] - 2026-10-08
 
