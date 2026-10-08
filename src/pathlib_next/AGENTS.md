@@ -627,23 +627,33 @@ chained (their text can carry credentials).
     headers merge over them.
   - Timeout: `DEFAULT_TIMEOUT = (10, 60)` (connect, read) unless given;
     `timeout=None` waits forever.
-  - Redirects: `GET`/`HEAD`/`OPTIONS`/`PROPFIND` follow them as `requests`
-    does. Every other request (`write_method`, `PATCH`, `DELETE`, `MKCOL`,
+  - Redirects: `GET`/`HEAD`/`OPTIONS` follow them as `requests` does. Every
+    other request (`PROPFIND`, `write_method`, `PATCH`, `DELETE`, `MKCOL`,
     `MOVE`) is sent with `allow_redirects=False`, and an `allow_redirects` in
-    `requests_args` or the call does not change that: a 307/308 to the same
-    scheme, host and port is re-sent once with the same method and body; any
-    other 3xx, another origin or a second redirect raises `OSError(EIO)`
-    naming the status and the `Location` (userinfo removed). A body that is
-    not bytes or `str` cannot be re-sent, so it raises too.
+    `requests_args` or the call does not change that: a 307/308 (for
+    `PROPFIND` also a 301, 302 or 303) to the same scheme, host and port is
+    re-sent once with the same method, headers and body; any other 3xx,
+    another origin or a second redirect raises `OSError(EIO)` naming the
+    status and the `Location` (userinfo removed). A body that is not bytes or
+    `str` cannot be re-sent, so it raises too.
   - URL userinfo is sent as Basic `auth=` (not in the URL) unless
     `requests_args`/`session.auth` set auth; it takes priority over `~/.netrc`.
   - `stat(*, follow_symlinks=True, walk_up_last_modified=False)` — `HEAD`
-    (`GET` on 405); a final URL ending in `/` is a directory; `st_size` from
-    `Content-Length`, `st_mtime` from `Last-Modified` (UTC), or from the
+    (`GET` on 405); a redirect is followed once, at its `Location`; a final
+    URL whose path ends in `/` is a directory (a query or fragment does not
+    matter); `st_size` from `Content-Length` (absent, non-numeric or negative
+    = unknown, `0`), `st_mtime` from `Last-Modified` (UTC), or from the
     parent's index when `walk_up_last_modified=True`.
-  - Listing scrapes an Apache/nginx-style HTML index; `.`/`..` rows are never
+  - Listing scrapes an Apache/nginx-style HTML index, asking for the
+    directory's URL with a trailing `/` first; `.`/`..` rows are never
     children; a non-HTML response → `NotADirectoryError` (an HTML file lists
-    as empty). Cannot always tell a file from an index page.
+    as empty). Cannot always tell a file from an index page. The body is read
+    like `open()` reads a file: a cut-short, stalled or undecodable one is
+    `OSError(EIO)`/`TimeoutError` naming the path, never a partial list, and
+    one over `schemes.http.MAX_LISTING_BYTES` (8 MiB after decoding; assign a
+    larger number to allow more) is `OSError(EFBIG)`. A name that is not
+    UTF-8 (`caf%E9`) keeps its bytes (`surrogateescape`) and is requested as
+    listed.
   - `open("r")` streams `GET` with `Accept-Encoding: identity`. `"w"`/`"x"`
     buffer and send `write_method` on close. `"x"` first calls `stat()`: found
     → `FileExistsError`, a failure other than not-found raises with nothing
@@ -664,16 +674,22 @@ chained (their text can carry credentials).
     writes), other → `OSError(EIO)` with the status.
 - **`DavPath(HttpPath)`** (`dav:`/`davs:`, sent as `http:`/`https:`; `http`
   extra; `schemes.dav`) — same backend and `with_session()`. `stat()`/
-  listing via `PROPFIND`. `open("r")` on a collection → `IsADirectoryError`;
+  listing via `PROPFIND` (`stat()` takes `walk_up_last_modified=` and ignores
+  it: the reply carries the modification time). A reply that is not a
+  `multistatus` document, or that names neither the collection nor any
+  member of it, is `OSError(EIO)`; a listing keeps a member only when its
+  href, resolved against the collection, names the same host and a direct
+  child, and a `getcontentlength` that is not a plain number is unknown (`0`).
+  `open("r")` on a collection → `IsADirectoryError`;
   `"w"`/`"x"` `PUT` on close (`"x"` as for `HttpPath`, probing with
   `PROPFIND`); `"a"` unsupported. `mkdir()` = `MKCOL`
   (missing parent → `FileNotFoundError`). `unlink()` refuses a collection;
   `rmdir()` checks emptiness first; `rm(recursive=True)` is one recursive
   `DELETE` (failed members of a 207 raise). `rename()` = `MOVE` with
   `Overwrite: F` (existing target → `FileExistsError`), no credentials in
-  `Destination`. 423 → `PermissionError`. `PUT`, `MKCOL`, `DELETE` and `MOVE`
-  follow the `HttpPath` redirect rule above; `PROPFIND` follows redirects.
-  No `chmod()`.
+  `Destination`. 423 → `PermissionError`. `PROPFIND`, `PUT`, `MKCOL`, `DELETE`
+  and `MOVE` follow the `HttpPath` redirect rule above (a listing is scoped to
+  the URL that answered it). No `chmod()`.
 - **`FtpPath`** (`ftp:`/`ftps:`; `uri` extra; `schemes.ftp`)
   - `FtpBackend(timeout=30.0, ssl_context=None, verify=True)` — `timeout`
     bounds connect, replies and transfers (`None` = forever). `ftps:` is

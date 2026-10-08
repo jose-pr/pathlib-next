@@ -93,6 +93,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Only `None` and empty text are the empty URI; `Uri(0)` or `Uri([])` used to
   be silently the empty URI, and `Uri(5)` said it got `NoneType`. The message
   now names the type that was passed. Pass `None` or `""` for an empty part.
+- **An `http:` directory index larger than 8 MiB raises.** `iterdir()`,
+  `walk()` and `glob()` read the whole index and parse it at about a second per
+  megabyte with no bound, so a server decided how long a listing took. A body
+  over `pathlib_next.uri.schemes.http.MAX_LISTING_BYTES` (8 MiB after decoding)
+  is now `OSError` (`EFBIG`), checked against `Content-Length` before the body
+  is read. Assign a larger number to that module constant to list a bigger
+  index.
+- **Listing an `http:` subdirectory and `stat()` of a redirecting URL send fewer
+  requests.** A directory without a trailing slash is now asked for with it
+  first (one `GET` instead of a `GET` and the redirect it earned, per
+  directory of a `walk()`), falling back to the path as given on a 404, and
+  `stat()` follows the `Location` of the first answer instead of repeating the
+  request that was redirected.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -414,6 +427,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   result, a bug in a scheme's `__init__` included; `UriPath` already told the two
   apart. Only an argument the constructor cannot read is unsupported now, for
   both classes, and `/`, `joinpath()` and `"prefix" / uri` are defined once.
+- **A cut-short, stalled or undecodable `http:` directory index raises instead
+  of listing part of it.** `iterdir()`, `walk()` and `glob()` read the index
+  with `requests`' own `.text`: on urllib3 1.26 (what a Python 3.9 install with
+  the `s3` extra gets) a connection that closed early gave the entries that had
+  arrived, which `PathSyncer(remove_missing=True)` read as the whole directory
+  and deleted the rest; a stalled body raised `requests`' `ConnectionError`
+  rather than `TimeoutError`, and a bad `Content-Encoding` leaked `requests`'
+  `ContentDecodingError`. The index is now read the way `open()` reads a file:
+  a short body is `OSError` (`EIO`) and a stall is `TimeoutError`, both naming
+  the directory.
+- **A DAV listing keeps only the members of the collection it asked about.**
+  A `PROPFIND` reply that held members deeper than `Depth: 1`, hrefs for
+  another path, another host or the collection spelled differently (a proxy
+  that strips a prefix) listed every one of them as a child by the last
+  segment of its href, so the directory could list itself; an href of `""` or
+  `/` made the whole listing raise `NotADirectoryError`; and any well-formed
+  XML that was not a `multistatus` (a login page answered with 200) listed as
+  an empty directory and `stat()`ed as missing. A member is now listed only
+  when its href, resolved against the collection, names the same host and a
+  direct child; a reply that is not a `multistatus`, or names neither the
+  collection nor any member of it, is `OSError` (`EIO`).
+- **A size a server states that is not a plain number is unknown.**
+  `Content-Length: abc` made `HttpPath.stat()` raise `ValueError`, one member
+  with `<getcontentlength>abc</...>` made `DavPath.iterdir()` of the whole
+  collection raise it, and a negative number became a negative `st_size`. Each
+  is now an unknown size (`st_size` `0`, and patch-mode append still refuses a
+  `HEAD` without a usable `Content-Length`).
+- **A listed `http:`/`dav:` name that is not UTF-8 can be opened.** `caf%E9.txt`
+  listed with U+FFFD in place of the byte and the request for it named
+  `caf%EF%BF%BD.txt`.
+  The name keeps its bytes as `Uri("http://h/caf%E9.txt")` does and the request
+  names the file the server listed.
+- **An `http:` directory URL with a query or fragment is a directory.**
+  `http://h/d/?C=M` and `http://h/d/#top` read as files, so `unlink()` sent the
+  `DELETE` it refuses for `http://h/d/`. The path of the final URL decides.
+- **A `PROPFIND` behind a redirect keeps its method and body.** `requests`
+  followed a 302 or 303 as a `GET` (so `stat()`, `exists()` and listing of a
+  `dav:` URL behind one failed or read as missing) and a 301 without the body
+  (the server saw an `allprop` request). A `PROPFIND` is now sent again, with
+  its headers and body, after a 301, 302, 303, 307 or 308 to the same scheme,
+  host and port, and refused with `OSError` (`EIO`) naming the status and the
+  `Location` for another origin, a second redirect or any other 3xx. A `dav:`
+  URL that redirects to another origin (`http:` to `https:`, say) must be
+  spelled with its final scheme and host (`davs:`).
 
 ## [0.9.12] - 2026-10-08
 

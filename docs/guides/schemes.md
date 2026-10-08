@@ -74,10 +74,14 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
 ## HTTP and WebDAV
 
 - **`http(s):`** (`HttpPath`) reads with `GET` (uncompressed) and `stat()`s
-  with `HEAD`, falling back to `GET` on 405; a final URL ending in `/` is a
-  directory. Listing parses Apache/nginx-style HTML indexes; a non-HTML
+  with `HEAD`, falling back to `GET` on 405 and following a redirect once, at
+  its `Location`; a final URL whose path ends in `/` is a directory. Listing
+  parses Apache/nginx-style HTML indexes; a non-HTML
   response raises `NotADirectoryError`, and an HTML file cannot be told apart
-  from an index page. Configure it with
+  from an index page. An index is read like a file: one that is cut short or
+  stalls raises (`OSError` or `TimeoutError`) instead of listing part of it,
+  and one larger than `pathlib_next.uri.schemes.http.MAX_LISTING_BYTES` (8 MiB)
+  raises `OSError` (`EFBIG`); assign a larger number to list it. Configure it with
   `path.with_session(session, write_method="PUT", append_mode="rewrite",
   **requests_args)`: `requests_args` (`headers=`, `auth=`, `verify=`,
   `timeout=`, ...) go to every request.
@@ -97,19 +101,23 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
   - `unlink()` refuses a directory; `rmdir()` requires an empty one.
   - Requests time out after `(10, 60)` seconds (connect, read) unless a
     `timeout` is given; `timeout=None` waits forever.
-  - Redirects are followed for reads (`GET`, `HEAD`, `PROPFIND`) but not for
-    writes: `PUT`, `PATCH`, `DELETE`, `MKCOL`, `MOVE` and a custom
-    `write_method` are sent with `allow_redirects=False` (an
-    `allow_redirects` in `with_session()` does not apply to them). A 307 or
-    308 to the same scheme, host and port is sent once more with the same
-    method and body; a 301, 302 or 303, a redirect to another origin and a
-    second redirect raise `OSError` (`EIO`) naming the status and the
+  - Redirects are followed as `requests` follows them for `GET`, `HEAD` and
+    `OPTIONS`, but not for `PROPFIND` or the writes: `PROPFIND`, `PUT`,
+    `PATCH`, `DELETE`, `MKCOL`, `MOVE` and a custom `write_method` are sent
+    with `allow_redirects=False` (an `allow_redirects` in `with_session()`
+    does not apply to them). A 307 or 308 (for `PROPFIND` also a 301, 302 or
+    303) to the same scheme, host and port is sent once more with the same
+    method, headers and body; any other 3xx, a redirect to another origin and
+    a second redirect raise `OSError` (`EIO`) naming the status and the
     `Location`. Point the path at the final URL if the server redirects.
   - Credentials in the URL (`https://user:pw@host/`) are sent as Basic
     `auth=`, never inside the request URL, and take priority over `~/.netrc`.
 - **`dav(s):`** (`DavPath`) is WebDAV (RFC 4918) over the equivalent
   `http(s):` URL, with the same `with_session()`. `PROPFIND` gives real
-  directory metadata, `MKCOL`/`PUT`/`DELETE`/`MOVE` full writes. `unlink()`
+  directory metadata, `MKCOL`/`PUT`/`DELETE`/`MOVE` full writes. A reply that
+  is not a `multistatus` document, or that names neither the collection nor
+  any member of it, raises `OSError` (`EIO`), and a listing keeps only the
+  direct members of the collection it asked about. `unlink()`
   refuses a collection and `rmdir()` checks that it is empty (WebDAV
   `DELETE` is recursive); `rm(recursive=True)` is a single `DELETE`.
   `rename()` does not overwrite an existing target (`FileExistsError`).
