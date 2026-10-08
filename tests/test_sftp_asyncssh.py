@@ -43,14 +43,15 @@ def test_translate_dir_not_empty_sets_enotempty_errno():
     assert result.errno == errno.ENOTEMPTY
 
 
-def test_reraise_sftp_errors_translates_and_chains():
+def test_reraise_sftp_errors_translates_without_chaining():
     @backend_mod._reraise_sftp_errors
     def _raises():
         raise asyncssh.SFTPNoSuchFile("gone")
 
     with pytest.raises(FileNotFoundError) as excinfo:
         _raises()
-    assert isinstance(excinfo.value.__cause__, asyncssh.SFTPNoSuchFile)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__
 
 
 def test_reraise_sftp_errors_passes_through_other_exceptions():
@@ -329,7 +330,7 @@ def test_aconnect_merges_source_credentials_and_connect_opts(monkeypatch):
     calls = {}
 
     class _FakeConn:
-        async def start_sftp_client(self, *, sftp_version):
+        async def start_sftp_client(self, *, sftp_version, path_errors):
             calls["sftp_version"] = sftp_version
             return object()
 
@@ -373,7 +374,7 @@ def test_aconnect_passes_explicit_known_hosts_opt_out_through(monkeypatch):
     calls = {}
 
     class _FakeConn:
-        async def start_sftp_client(self, *, sftp_version):
+        async def start_sftp_client(self, *, sftp_version, path_errors):
             return object()
 
     async def _fake_connect(host, port, **kwargs):

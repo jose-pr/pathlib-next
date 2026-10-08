@@ -200,7 +200,7 @@ def _paramiko_backend(backends, connect_opts=None, *args, **kwargs):
 
 def test_asyncssh_rejects_unknown_host_key_by_default(server, backends):
     backend = _asyncssh_backend(backends)
-    with pytest.raises(asyncssh.HostKeyNotVerifiable):
+    with pytest.raises(sftp_pkg.SftpHostKeyError):
         SftpPath(server.url("hello.txt"), backend=backend).read_text()
     # Rejected before authentication: the password never reached the server.
     assert server.credentials == []
@@ -222,7 +222,7 @@ def test_asyncssh_verifies_against_user_known_hosts(server, home, backends):
 def test_paramiko_rejects_unknown_host_key_by_default(server, backends):
     backend = _paramiko_backend(backends)
     assert isinstance(backend.hostkeypolicy, paramiko.RejectPolicy)
-    with pytest.raises(paramiko.SSHException, match="not found in known_hosts"):
+    with pytest.raises(sftp_pkg.SftpHostKeyError):
         SftpPath(server.url("hello.txt"), backend=backend).read_text()
     assert server.credentials == []
     # The refused connection is closed, not left to a live Transport thread.
@@ -256,7 +256,7 @@ def test_paramiko_changed_host_key_is_rejected_even_with_autoadd(
     other_key = asyncssh.generate_private_key("ssh-rsa")
     (home / ".ssh" / "known_hosts").write_text(server.known_hosts_line(other_key))
     backend = _paramiko_backend(backends, None, paramiko.AutoAddPolicy())
-    with pytest.raises(paramiko.BadHostKeyException):
+    with pytest.raises(sftp_pkg.SftpHostKeyError):
         SftpPath(server.url("hello.txt"), backend=backend).read_text()
     assert server.credentials == []
 
@@ -306,7 +306,8 @@ def test_paramiko_connect_to_silent_server_times_out(home, backends):
             backends, None, paramiko.AutoAddPolicy(), known_hosts=None, timeout=0.5
         )
         start = time.monotonic()
-        with pytest.raises(paramiko.SSHException):
+        # paramiko reports a banner that never arrives as a failed session.
+        with pytest.raises(ConnectionAbortedError):
             backend.client(Source("sftp", "a:b", "127.0.0.1", port))
         assert time.monotonic() - start < 10
     finally:
@@ -646,7 +647,7 @@ def test_paramiko_failed_login_closes_the_connection(server_root, home, backends
             backends, None, paramiko.AutoAddPolicy(), known_hosts=None
         )
         for _ in range(3):
-            with pytest.raises(paramiko.AuthenticationException):
+            with pytest.raises(sftp_pkg.SftpAuthenticationError):
                 SftpPath(srv.url("hello.txt"), backend=backend).read_text()
         assert srv.accepted == 3
         assert _wait_until(lambda: not srv.live)
@@ -660,7 +661,7 @@ def test_asyncssh_aconnect_closes_connection_when_sftp_start_fails(monkeypatch):
     closed = []
 
     class _FakeConn:
-        async def start_sftp_client(self, *, sftp_version):
+        async def start_sftp_client(self, *, sftp_version, path_errors):
             raise asyncssh.ChannelOpenError(1, "no sftp subsystem")
 
         def close(self):

@@ -18,7 +18,7 @@ import asyncssh.packet as _packet
 from ... import Source
 from .... import utils as _utils
 from ....utils.stat import FileStat
-from . import _checkfile
+from . import _checkfile, _errors
 from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host
 
 # --- shared background event loop -------------------------------------
@@ -193,17 +193,13 @@ def _run(coro, timeout: "float | None" = _UNSET_TIMEOUT):
 
 
 # --- error translation ---------------------------------------------------
-# asyncssh's SFTPError hierarchy does NOT subclass OSError (verified by
-# introspection: MRO is SFTPError -> asyncssh.misc.Error -> Exception) --
-# every call needs explicit translation, unlike paramiko's mostly-already
-# -typed exceptions. Real-world OpenSSH sftp-server only ever speaks
-# protocol v3, which has no EEXIST/DIR_NOT_EMPTY status code at all -- a v3
-# server answers generic SFTPFailure regardless of client library for
-# those specifically, so the exists()-after-failure disambiguation already
-# in SftpPath._open()/_mkdir() (generic `except OSError:`) still does the
-# real work there; this translation layer's job is just making sure every
-# asyncssh failure surfaces as *some* OSError subclass so that generic
-# handler actually fires instead of an unrelated SFTPError propagating.
+# asyncssh's exceptions do NOT subclass OSError (SFTPError -> asyncssh.Error ->
+# Exception; a lost connection, a refused login or an untrusted host key are
+# DisconnectErrors), so every call translates them. A server below SFTP v5
+# has no EEXIST or ENOTEMPTY status: it answers a generic failure, which
+# `SftpPath._open()`/`_mkdir()` disambiguate by consulting the entry, so
+# every failure must surface as *some* OSError subclass for that handler to
+# fire. Nothing is chained to the library exception (see `_errors`).
 
 
 def _translate(
@@ -214,6 +210,8 @@ def _translate(
     """The pathlib exception for an asyncssh `SFTPError`, built as pathlib
     builds it -- `(errno, strerror, filename[, filename2])` -- so `errno`
     and `filename` are set, as they are on the paramiko backend."""
+    if isinstance(error, (_asyncssh.SFTPConnectionLost, _asyncssh.SFTPNoConnection)):
+        return _errors.lost()
     if isinstance(error, (_asyncssh.SFTPNoSuchFile, _asyncssh.SFTPNoSuchPath)):
         cls, code = FileNotFoundError, _errno.ENOENT
     elif isinstance(error, _asyncssh.SFTPFileAlreadyExists):
@@ -225,17 +223,37 @@ def _translate(
     elif isinstance(error, _asyncssh.SFTPOpUnsupported):
         return NotImplementedError(str(error))
     else:
-        # A bare SFTPv3 failure has no errno, as on the paramiko backend:
-        # `SftpPath` reads `errno is None` as "consult the entry itself".
-        if filename is None:
-            return OSError(str(error))
-        return OSError(None, str(error), filename, None, filename2)
-    strerror = str(error) or _os.strerror(code)
-    if filename is None:
-        return cls(code, strerror)
-    if filename2 is None:
-        return cls(code, strerror, filename)
-    return cls(code, strerror, filename, None, filename2)
+        return _errors.bare_failure(str(error), filename, filename2)
+    return _errors.os_error(
+        cls, code, str(error) or _os.strerror(code), filename, filename2
+    )
+
+
+def _transport_error(
+    error: "_asyncssh.Error", source: "Source | None" = None
+) -> Exception:
+    """The `OSError` for an asyncssh failure of the connection, the login or
+    the host key; the same classes the paramiko backend raises."""
+    if isinstance(error, _asyncssh.HostKeyNotVerifiable):
+        return _errors.host_key_refused(source)
+    if isinstance(error, _asyncssh.PermissionDenied):
+        return _errors.login_refused(source)
+    if isinstance(error, _asyncssh.ConnectionLost):
+        return _errors.lost()
+    if isinstance(error, (_asyncssh.DisconnectError, _asyncssh.ChannelOpenError)):
+        return _errors.aborted(error)
+    return OSError(_errno.EIO, f"SFTP request failed ({type(error).__name__})")
+
+
+def _library_error(
+    error: "_asyncssh.Error",
+    filename: "str | None" = None,
+    filename2: "str | None" = None,
+    source: "Source | None" = None,
+) -> Exception:
+    if isinstance(error, _asyncssh.SFTPError):
+        return _translate(error, filename, filename2)
+    return _transport_error(error, source)
 
 
 def _path_error(cls, code: int, path) -> OSError:
@@ -253,7 +271,7 @@ def _reraise_sftp_errors(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except _asyncssh.SFTPError as error:
+        except _asyncssh.Error as error:
             # `(self, path, ...)` for a client method; a file method's
             # arguments (a size, a buffer) name no path.
             filename = args[1] if len(args) > 1 and isinstance(args[1], str) else None
@@ -262,7 +280,7 @@ def _reraise_sftp_errors(fn):
                 if two_paths and len(args) > 2 and isinstance(args[2], str)
                 else None
             )
-            raise _translate(error, filename, filename2) from error
+            raise _library_error(error, filename, filename2) from None
 
     return wrapper
 
@@ -423,8 +441,8 @@ class _SyncSftpFile(_io.RawIOBase):
             else:
                 try:
                     _run(self._afile.close(), self._timeout)
-                except _asyncssh.SFTPError as error:
-                    raise _translate(error) from error
+                except _asyncssh.Error as error:
+                    raise _library_error(error) from None
         finally:
             super().close()
 
@@ -770,7 +788,11 @@ async def _aconnect(
         # asyncssh currently supports SFTP protocol versions 3 and 4 here --
         # request the configured maximum and let the server negotiate down
         # (real-world OpenSSH still stays at v3).
-        aclient = await conn.start_sftp_client(sftp_version=sftp_version)
+        # Names the server sends that are not UTF-8 come back with their
+        # bytes as lone surrogates, and go back out as the same bytes.
+        aclient = await conn.start_sftp_client(
+            sftp_version=sftp_version, path_errors="surrogateescape"
+        )
     except BaseException:
         conn.close()
         raise
@@ -848,18 +870,21 @@ class AsyncsshSftpBackend(_checkfile.CheckFileSftpBackend):
         self.timeout = timeout
 
     def client(self, source: "Source") -> _SyncSftpClient:
-        entry = _CACHE.get_or_create(
-            (self, source),
-            lambda: _run(
-                _aconnect(
-                    source,
-                    connect_opts=self.connect_opts,
-                    sftp_version=self.sftp_version,
-                    timeout=self.timeout,
+        try:
+            entry = _CACHE.get_or_create(
+                (self, source),
+                lambda: _run(
+                    _aconnect(
+                        source,
+                        connect_opts=self.connect_opts,
+                        sftp_version=self.sftp_version,
+                        timeout=self.timeout,
+                    ),
+                    self.timeout,
                 ),
-                self.timeout,
-            ),
-        )
+            )
+        except _asyncssh.Error as error:
+            raise _transport_error(error, source) from None
         return entry.client
 
     def close(self) -> None:
@@ -974,8 +999,8 @@ async def _concurrent_copy(
         async with semaphore:
             try:
                 return await make_awaitable()
-            except _asyncssh.SFTPError as error:
-                raise _translate(error, filename) from error
+            except _asyncssh.Error as error:
+                raise _library_error(error, filename) from None
 
     async def stat_path(current):
         stat_coro = aclient.stat if follow_symlinks else aclient.lstat
@@ -1207,8 +1232,8 @@ async def _concurrent_rm(
         async with semaphore:
             try:
                 return await make_awaitable()
-            except _asyncssh.SFTPError as error:
-                raise _translate(error, filename) from error
+            except _asyncssh.Error as error:
+                raise _library_error(error, filename) from None
 
     async def stat_path(current):
         attrs = await sftp_call(lambda: aclient.lstat(current.path), current.path)

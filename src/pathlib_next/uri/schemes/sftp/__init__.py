@@ -99,6 +99,7 @@ class BaseSftpBackend(object):
 
 # The default-config sentinel is paramiko-free (lives in `_sshconfig`) so
 # importing this scheme never pulls paramiko in just to have the sentinel.
+from ._errors import SftpAuthenticationError, SftpHostKeyError  # noqa: F401
 from ._sshconfig import _DEFAULT_SSH_CONFIG, _check_host
 
 # "No ssh_config argument given" -- distinct from _DEFAULT_SSH_CONFIG so a
@@ -337,12 +338,23 @@ class SftpPath(UriPath):
         except OSError:
             return None
 
+    @staticmethod
+    def _unreachable(error: OSError) -> bool:
+        """Whether `error` says the server could not be reached or logged
+        into, not that it refused this one request: asking it about the entry
+        would only try the same connection again."""
+        return isinstance(
+            error, (ConnectionError, TimeoutError, SftpAuthenticationError)
+        )
+
     def _directory_error(self, error: OSError, *, check_empty=False):
         """pathlib's exception for a failed directory operation (listing,
         `rmdir()`), or None to keep `error`. SFTPv3 has no ENOTDIR or
         ENOTEMPTY status: servers send "no such file" (OpenSSH maps ENOTDIR
         to it) or a bare failure, so the entry itself is consulted -- on this
         failure path only."""
+        if self._unreachable(error):
+            return None
         stat = self._entry_stat()
         if stat is None:
             return None
@@ -366,7 +378,7 @@ class SftpPath(UriPath):
         failed on a directory, or None to keep `error`. SFTPv3 has no EISDIR
         status either: OpenSSH-style servers send a bare failure. A status
         with an errno (permission denied, no such file) is already right."""
-        if error.errno is not None:
+        if error.errno is not None or self._unreachable(error):
             return None
         stat = self._entry_stat()
         if stat is None or not stat.is_dir():
@@ -396,7 +408,7 @@ class SftpPath(UriPath):
             # not the ENOENT-mapped FileNotFoundError already raised
             # correctly for a genuinely missing file/parent. True on both
             # backends against a real-world (v3) server.
-            if "x" in mode and self.exists():
+            if "x" in mode and not self._unreachable(error) and self.exists():
                 raise FileExistsError(
                     _errno.EEXIST, _os.strerror(_errno.EEXIST), str(self)
                 ) from error
@@ -411,7 +423,7 @@ class SftpPath(UriPath):
         except OSError as error:
             # Same SFTPv3 status-code gap as _open() above: mkdir on an
             # existing path also comes back as a generic failure.
-            if self.exists():
+            if not self._unreachable(error) and self.exists():
                 raise FileExistsError(
                     _errno.EEXIST, _os.strerror(_errno.EEXIST), str(self)
                 ) from error
@@ -552,7 +564,9 @@ class SftpPath(UriPath):
             raise
 
     def _raise_if_exists(self, target: Uri, error: OSError) -> None:
-        if isinstance(error, (FileNotFoundError, PermissionError)):
+        if isinstance(error, (FileNotFoundError, PermissionError)) or self._unreachable(
+            error
+        ):
             return
         try:
             # `target` may be a plain Uri: probe it over this connection.

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import errno as _errno
+import functools as _functools
+import io as _io
 import pathlib as _pathlib
+import socket as _socket
 import threading as _thread
 
 import netimps as _netimps
 import paramiko as _paramiko
 import paramiko.sftp as _paramiko_sftp
+from paramiko.sftp_attr import SFTPAttributes as _SFTPAttributes
 
 from .... import utils as _utils
 from ... import Source
-from . import _checkfile
+from . import _checkfile, _errors
 
 # The sentinel + path normalization are paramiko-free and now live in
 # ``_sshconfig`` so the asyncssh backend and the scheme ``__init__`` can use them
@@ -67,13 +72,230 @@ def _lookup_ssh_config(
     return config.lookup(host)
 
 
+# --- the SFTP client ---------------------------------------------------------
+
+
+def _wire_path(path):
+    """A `str` path as the bytes it stands for on the wire: a lone surrogate is
+    a byte of a name that was not UTF-8 when it was listed."""
+    return path.encode("utf-8", "surrogateescape") if isinstance(path, str) else path
+
+
+def _text(data: bytes) -> str:
+    return data.decode("utf-8", "surrogateescape")
+
+
+class _SFTPFile(_paramiko.SFTPFile):
+    """paramiko's file with the two `io` behaviours it lacks: `write()`
+    returns the number of bytes accepted, and `fileno()` says it has none."""
+
+    def write(self, data):
+        count = (
+            len(data.encode("utf-8"))
+            if isinstance(data, str)
+            else memoryview(data).nbytes
+        )
+        super().write(data)
+        return count
+
+    def fileno(self):
+        raise _io.UnsupportedOperation("fileno")
+
+
+def _named_errors(method, two_paths: bool = False):
+    """`method(self, path, ...)` with the path(s) in the `filename`
+    (`filename2`) of the `OSError` a server status raised, as pathlib's own
+    errors carry them."""
+
+    @_functools.wraps(method)
+    def wrapper(self, path, *args, **kwargs):
+        try:
+            return method(self, path, *args, **kwargs)
+        except OSError as error:
+            if error.filename is None and not isinstance(
+                error, (ConnectionError, TimeoutError)
+            ):
+                error.filename = path if isinstance(path, str) else _text(path)
+                if two_paths and args:
+                    error.filename2 = args[0]
+            raise
+
+    return wrapper
+
+
+class _SFTPClient(_paramiko.SFTPClient):
+    """paramiko's client with the status mapping and the names the asyncssh
+    backend has: an "operation unsupported" status is `NotImplementedError`,
+    a lost connection `ConnectionResetError`, an error carries the path it
+    was about, and a name that is not UTF-8 lists, opens and removes as the
+    lone-surrogate string of its bytes."""
+
+    def _convert_status(self, msg):
+        code = msg.get_int()
+        text = msg.get_text()
+        if code == _paramiko_sftp.SFTP_OK:
+            return
+        if code == _paramiko_sftp.SFTP_EOF:
+            raise EOFError(text)
+        if code == _paramiko_sftp.SFTP_NO_SUCH_FILE:
+            raise IOError(_errno.ENOENT, text)
+        if code == _paramiko_sftp.SFTP_PERMISSION_DENIED:
+            raise IOError(_errno.EACCES, text)
+        if code == _paramiko_sftp.SFTP_OP_UNSUPPORTED:
+            raise NotImplementedError(text)
+        if code in (
+            _paramiko_sftp.SFTP_NO_CONNECTION,
+            _paramiko_sftp.SFTP_CONNECTION_LOST,
+        ):
+            raise _errors.lost()
+        raise IOError(text)
+
+    def _read_response(self, waitfor=None):
+        try:
+            return super()._read_response(waitfor)
+        except _paramiko.SSHException:
+            # "Server connection dropped": the only SSHException it raises.
+            raise _errors.lost() from None
+
+    def _send_packet(self, t, packet):
+        try:
+            super()._send_packet(t, packet)
+        except (EOFError, _paramiko.SSHException):
+            raise _errors.lost() from None
+        except OSError as error:
+            if error.errno is not None:
+                raise
+            # A closed channel: "Socket is closed".
+            raise _errors.lost() from None
+
+    def _adjust_cwd(self, path):
+        return super()._adjust_cwd(_wire_path(path))
+
+    def symlink(self, source, dest):
+        return super().symlink(_wire_path(source), dest)
+
+    def listdir_attr(self, path="."):
+        # paramiko decodes every listed name as strict UTF-8, so one other
+        # name fails the whole listing.
+        path = self._adjust_cwd(path)
+        kind, msg = self._request(_paramiko_sftp.CMD_OPENDIR, path)
+        if kind != _paramiko_sftp.CMD_HANDLE:
+            raise _paramiko.SFTPError("Expected handle")
+        handle = msg.get_binary()
+        entries = []
+        while True:
+            try:
+                kind, msg = self._request(_paramiko_sftp.CMD_READDIR, handle)
+            except EOFError:
+                break
+            if kind != _paramiko_sftp.CMD_NAME:
+                raise _paramiko.SFTPError("Expected name response")
+            for _ in range(msg.get_int()):
+                filename = _text(msg.get_string())
+                longname = _text(msg.get_string())
+                attrs = _SFTPAttributes._from_msg(msg, filename, longname)
+                if filename not in (".", ".."):
+                    entries.append(attrs)
+        self._request(_paramiko_sftp.CMD_CLOSE, handle)
+        return entries
+
+    def readlink(self, path):
+        path = self._adjust_cwd(path)
+        kind, msg = self._request(_paramiko_sftp.CMD_READLINK, path)
+        if kind != _paramiko_sftp.CMD_NAME:
+            raise _paramiko.SFTPError("Expected name response")
+        count = msg.get_int()
+        if count == 0:
+            return None
+        if count != 1:
+            raise _paramiko.SFTPError(f"Readlink returned {count} results")
+        return _text(msg.get_string())
+
+    def open(self, filename, mode="r", bufsize=-1):
+        file = super().open(filename, mode, bufsize)
+        # The same attributes and slots: only `write()` and `fileno()` differ.
+        file.__class__ = _SFTPFile
+        return file
+
+
+for (
+    _name
+) in "stat lstat listdir_attr open mkdir chmod chown remove rmdir readlink".split():
+    setattr(_SFTPClient, _name, _named_errors(getattr(_SFTPClient, _name)))
+for _name in "rename posix_rename symlink".split():
+    setattr(_SFTPClient, _name, _named_errors(getattr(_SFTPClient, _name), True))
+del _name
+
+
+class _NoTransport(_paramiko.SSHException):
+    """`connect()` returned without a transport: a broken invariant, not a
+    failure of the connection, so it is raised as it is."""
+
+
+def _timed_out(error: BaseException) -> bool:
+    """Whether `error`, or what it was raised while handling, is a socket
+    timeout: paramiko re-raises one as an `SSHException` ("Error reading SSH
+    protocol banner") or words its own ("Authentication timeout")."""
+    seen = 0
+    while error is not None and seen < 8:
+        if isinstance(error, _socket.timeout):
+            return True
+        error = error.__cause__ or error.__context__
+        seen += 1
+    return False
+
+
+def _connect_error(error: BaseException, source: Source) -> "Exception | None":
+    """The `OSError` for a paramiko failure to connect, log in or open the
+    SFTP session, or None when `error` is not one of those."""
+    if isinstance(error, _NoTransport):
+        return None
+    if isinstance(error, _paramiko.ssh_exception.NoValidConnectionsError):
+        # Every address refused: say what the first one said, as asyncssh does.
+        for cause in error.errors.values():
+            if isinstance(cause, OSError) and cause.errno is not None:
+                return OSError(cause.errno, cause.strerror)
+        return None
+    if isinstance(error, _paramiko.BadHostKeyException):
+        return _errors.host_key_refused(source)
+    if isinstance(error, _paramiko.SSHException):
+        text = str(error)
+        if _timed_out(error) or "timeout" in text.lower():
+            return TimeoutError(_errno.ETIMEDOUT, "SFTP connection timed out")
+        # `RejectPolicy` (the default) refuses a key no known_hosts file has.
+        if "not found in known_hosts" in text:
+            return _errors.host_key_refused(source)
+        # "No authentication methods available": nothing was left to try.
+        if (
+            isinstance(error, _paramiko.AuthenticationException)
+            or "No authentication methods" in text
+        ):
+            return _errors.login_refused(source)
+        return _errors.aborted(error)
+    if isinstance(error, EOFError):
+        return _errors.lost()
+    if isinstance(error, _socket.timeout) and not isinstance(error, TimeoutError):
+        # Python 3.9: socket.timeout is not yet TimeoutError.
+        return TimeoutError(_errno.ETIMEDOUT, "SFTP connection timed out")
+    return None
+
+
 def _create_sftpclient(backend: "SftpBackend", source: Source, thread_id: int):
     transport = backend.transport(source)
     try:
-        return transport.open_sftp_client()
-    except BaseException:
+        client = transport.open_sftp_client()
+        if client is None:
+            raise _paramiko.SSHException("the server refused the sftp subsystem")
+        if type(client) is _paramiko.SFTPClient:
+            # `_SFTPClient` adds behaviour and no state.
+            client.__class__ = _SFTPClient
+        return client
+    except BaseException as error:
         transport.close()
-        raise
+        translated = _connect_error(error, source)
+        if translated is None:
+            raise
+        raise translated from None
 
 
 def _close_sftpclient(key: tuple, client) -> None:
@@ -259,8 +481,8 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
             client.connect(**opts)
             transport = client.get_transport()
             if not transport:
-                raise _paramiko.SSHException("connect() produced no transport")
-        except BaseException:
+                raise _NoTransport("connect() produced no transport")
+        except BaseException as error:
             # A failed connect/auth still leaves a running Transport thread
             # and an open socket (or a ProxyCommand subprocess) behind.
             client.close()
@@ -270,7 +492,10 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
                     sock.close()
                 except Exception:
                     pass
-            raise
+            translated = _connect_error(error, source)
+            if translated is None:
+                raise
+            raise translated from None
         return transport
 
     def client(self, source: Source):

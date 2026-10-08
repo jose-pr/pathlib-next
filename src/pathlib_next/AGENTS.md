@@ -787,6 +787,23 @@ chained (their text can carry credentials).
     it replaces is touched, `copy()` applies permission bits as
     `Path.copy()` does, `rm()`'s `missing_ok` covers the path it was called on
     only, and `ignore_error` is offered each error once.
+  - Errors are the same on both backends and none is chained to the SSH
+    library's exception. A server status is the pathlib exception with `errno`
+    and `filename` (the remote path; `filename2` for the second path of
+    `rename()` and `symlink_to()`); an "operation unsupported" status is
+    `NotImplementedError`. A connection that goes away, mid-request or
+    mid-transfer, is `ConnectionResetError`; a refused login is
+    `SftpAuthenticationError` (a `PermissionError`, `EACCES`); a host key that
+    is unknown, changed or refused is `SftpHostKeyError` (a `ConnectionError`,
+    `ECONNABORTED`) and no credential was sent; any other failure of the
+    handshake or the session is `ConnectionAbortedError`; a refused TCP
+    connection is `ConnectionRefusedError`; a timeout is `TimeoutError` (a
+    banner that never arrives is reported as `ConnectionAbortedError` by
+    paramiko). Both exception classes import from `pathlib_next.uri.schemes.sftp`.
+  - A name the server sends that is not UTF-8 is the string of its bytes as lone
+    surrogates (pathlib's spelling on POSIX), on both backends: it lists beside
+    its siblings, and `stat()`, `open()`, `unlink()`, `rm()` and `copy()` send
+    the same bytes back.
   - Both backends: `close()` closes every cached connection (the backend stays
     usable); `default(ssh_config=...)` classmethod.
     `BaseSftpBackend.client(source)` is the override point
