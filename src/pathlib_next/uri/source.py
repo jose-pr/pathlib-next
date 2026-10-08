@@ -469,12 +469,9 @@ class Source(_ty.NamedTuple):
         # verbatim (password and all) -- a traceback frame renders repr(),
         # so an unredacted Source anywhere on a failing call stack leaks
         # the credential into logs. Redact the same way __str__ does.
-        redacted = self._redacted_userinfo()
-        if redacted is not None:
-            redacted = str(redacted)
         return (
             f"{type(self).__name__}(scheme={self.scheme!r}, "
-            f"userinfo={redacted!r}, host={self.host!r}, "
+            f"userinfo={self._redacted_userinfo()!r}, host={self.host!r}, "
             f"port={self.port!r})"
         )
 
