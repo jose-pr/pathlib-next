@@ -30,12 +30,14 @@ Required on the pure-path side (abstract on `Pathname`):
 | `as_uri()` | a URI string identifying the path (a custom scheme is fine) |
 | `relative_to(other)` | may raise `NotImplementedError` if not meaningful |
 
-`is_absolute()` is an optional stub that raises `NotImplementedError` until you
-override it. Equality is not required either: `Pathname` supplies
-`__eq__`/`__hash__` keyed on `(type(self), tuple(self.segments))`, so paths
-work as dict keys and `is_relative_to()`/`parents` membership work. Override
-both together if your type needs another identity (case-insensitive names, or
-one that distinguishes two backing stores).
+`is_absolute()` is optional: it answers whether the path has a root, which is
+right unless your rooted paths are not all absolute. Equality is not required
+either: `Pathname` supplies `__eq__`/`__hash__` keyed on `(type(self),
+tuple(self.segments))`, so paths work as dict keys and
+`is_relative_to()`/`parents` membership work, and `<`, `<=`, `>`, `>=` compare
+the same key (`sorted(path.iterdir())` works). Override `__eq__`/`__hash__`
+together, and `_order_key()` with them, if your type needs another identity
+(case-insensitive names, or one that distinguishes two backing stores).
 
 On the I/O side, implement what the resource supports and leave the rest as
 the inherited stubs. Derived operations either fall back (`move()` copies and
