@@ -306,8 +306,10 @@ def test_paramiko_connect_to_silent_server_times_out(home, backends):
             backends, None, paramiko.AutoAddPolicy(), known_hosts=None, timeout=0.5
         )
         start = time.monotonic()
-        # paramiko reports a banner that never arrives as a failed session.
-        with pytest.raises(ConnectionAbortedError):
+        # A banner that never arrives ends the connect one of two ways,
+        # whichever of paramiko's own timers fires first: the timeout itself,
+        # or the session it gave up on.
+        with pytest.raises((TimeoutError, ConnectionAbortedError)):
             backend.client(Source("sftp", "a:b", "127.0.0.1", port))
         assert time.monotonic() - start < 10
     finally:
