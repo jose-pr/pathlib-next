@@ -41,9 +41,9 @@ def test_http_session_backend_does_not_follow_join_to_another_host():
 
     literal = base / "http://other.invalid/steal"
     assert literal.source.host == "trusted.invalid"
-    # The empty segment collapses, as a path join does (`PurePosixPath`
-    # collapses "a//b" too); the point is that the host is unchanged.
-    assert literal.path == "/api/http:/other.invalid/steal"
+    # The empty segment is kept (RFC 3986 3.3); the point is that the host
+    # is unchanged.
+    assert literal.path == "/api/http://other.invalid/steal"
     assert literal.backend is base.backend  # still the trusted host
 
     for crossing in (

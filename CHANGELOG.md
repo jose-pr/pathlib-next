@@ -388,6 +388,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `source[0:2]` raised `TypeError`; it is the tuple slice. `from_str("file:")`
   had host `None` where `Uri("file:").source` has `""`, so the two compared
   unequal.
+- **A `str` join keeps an empty segment inside its key.** `Uri("http://h/d") /
+  "x//y"` was `http://h/d/x/y`, while `Uri("http://h/d") / Uri("x//y")`,
+  `Uri("http://h/d", "x//y")` and `Uri("http://h/d/x//y")` were all
+  `http://h/d/x//y`, so on an object store a key holding `//` could not be
+  addressed with `/` or `joinpath()`. The four spellings now give the same
+  URI (`http://h/d/x//y`), and so does a `str` destination of `rename()`,
+  `copy()` and `move()`. `normalized_path` still collapses, and a name a
+  listing yields as empty is still skipped. Code that relied on `p / "a//b"`
+  collapsing, as `pathlib` does, strips the empty segment itself.
 
 ## [0.9.12] - 2026-10-08
 

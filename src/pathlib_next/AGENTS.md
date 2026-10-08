@@ -450,7 +450,10 @@ not by a checker.
     A `Uri`/`UriPath` argument keeps URI semantics and is the only form that
     can cross to another endpoint -- where a credential-bearing backend is
     dropped. Dot segments are removed from the joined result either way, but
-    a `%2e%2e` in a `str` key is a literal name.
+    a `%2e%2e` in a `str` key is a literal name. An empty segment is a segment
+    (RFC 3986 3.3): `base / "a//b"`, `Uri(base, "a//b")` and
+    `base / Uri("a//b")` are all `base/a//b`, where `pathlib` collapses it --
+    on an object store `d//y` and `d/y` are two keys.
   - Properties: `source -> Source`, `path -> str` (percent-decoded),
     `query -> Query` (**percent-encoded as received**, sent unchanged; empty
     when there is none), `fragment -> str` (`""` when there is none),

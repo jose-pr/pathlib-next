@@ -430,7 +430,10 @@ class Uri(Pathname):
         code, including in schemes that give a name special meaning
         (`gitlab:`'s "-"). An absolute key restarts from the root of this
         same source. A key with `.` or `..` segments is joined as a whole
-        and has them removed as RFC 3986 5.2.4 says (`_join_dotted`).
+        and has them removed as RFC 3986 5.2.4 says (`_join_dotted`). An empty
+        segment inside the key is a segment (`x//y` is `x//y`, RFC 3986 3.3):
+        the constructor and a `Uri` argument keep it, and on an object store
+        `d//y` and `d/y` are two keys.
 
         A `data:` payload is an opaque octet string, so it never gets
         segment treatment: the key is appended verbatim, exactly as
@@ -446,20 +449,37 @@ class Uri(Pathname):
                 self.source, path + key, self.query, self.fragment
             )
         result = self
+        segments = key.split("/")
         if self._is_absolute_decoded(key):
             result = self.with_path("/")
-        segments = key.split("/")
+            if segments[0] == "":
+                segments = segments[1:]  # the root, which `result` already is
         if "." in segments or ".." in segments:
             return result._join_dotted(segments)
+        empty = 0
         for segment in segments:
-            if segment:
-                result = result._make_child_relpath(segment)
-        if segments[-1] == "" and not result.path.endswith("/"):
+            if not segment:
+                empty += 1
+                continue
+            if empty:
+                result = result._with_empty_segments(empty, between=True)
+                empty = 0
+            result = result._make_child_relpath(segment)
+        if empty:
             # A trailing "/" is load-bearing: for http/dav it is how a
             # directory URL is spelled, and `name`/`parent` are documented
             # to keep it (see docs/divergences.md).
-            result = result.with_path(result.path + "/")
+            result = result._with_empty_segments(empty, between=False)
         return result
+
+    def _with_empty_segments(self, count: int, *, between: bool) -> "Uri":
+        """This URI with `count` empty segments after its path: the slashes
+        that spell them, and the one that ends the last name before them. With
+        `between`, a name follows, and `_make_child_relpath()` supplies the
+        slash that precedes it only when the path does not end in one."""
+        path = self.path
+        slashes = count - (1 if path.endswith("/") else 0) + (1 if between else 0)
+        return self.with_path(path + "/" * slashes) if slashes > 0 else self
 
     def _join_dotted(self, segments: "list[str]") -> "Uri":
         """`_join_decoded()` for a key holding `.` or `..` segments.
@@ -476,7 +496,7 @@ class Uri(Pathname):
             base += "/"
         # A key ending in a slash, `.` or `..` names a directory.
         trailing = segments[-1] in ("", ".", "..")
-        joined = base + "/".join(given) + ("/" if segments[-1] == "" else "")
+        joined = base + "/".join(segments)
         final = _remove_dots(joined, self.source.scheme)
         names: list[str] = []
         for segment in given:
