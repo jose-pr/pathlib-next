@@ -511,7 +511,13 @@ not by a checker.
     `parent`, `parents`, `with_name()`, `with_suffix()`, `with_query()`,
     `relative_to()`, `UriPath(base, x)`, a `Uri`/`PurePath` join) never
     builds one -- so it never imports an I/O library either -- and takes the
-    backend its source path already holds, or none.
+    backend its source path already holds, or none. Paths derived from one
+    another on one endpoint share one slot for the backend they derive for
+    themselves: the first of them to need one calls `_initbackend()` (under a
+    lock, so two threads build one) and the rest then use that object, so 20
+    children of a fresh root open one connection. A path built separately
+    (`UriPath(url)` twice), one on another endpoint, the sourceless result of
+    `relative_to()` and a path that holds a supplied backend are not in it.
     `with_backend(backend)` returns a copy using `backend`. A backend is only
     shared within one endpoint (scheme, userinfo, host, port): a join,
     `with_source()` or `UriPath(base, url)` onto another endpoint takes none
@@ -873,6 +879,11 @@ chained (their text can carry credentials).
     the raw media type; symlink/submodule entries read as files;
     `st_mtime` is `0`.
   - Rate limits (403/429 with limit headers, any 429) → `OSError(EAGAIN)`.
+  - A JSON reply that is not the documented shape (HTML from a proxy, `null`,
+    a truncated body, an array where an object is expected, an entry without
+    a name and a type, a size that is not a non-negative integer) is
+    `OSError(EIO)` naming the path, so `exists()` is `False` and `stat()`
+    raises. A raw file body has no shape to check and is returned as sent.
 - **`GitLabPath`** (`gitlab://[TOKEN@]host[:port]/owner/repo/path`, or
   `.../group/sub/project/-/path` — a `-` segment at position 3 or later is
   the separator; `schemes.gitlab`) — same backend, properties and read-only
@@ -880,7 +891,10 @@ chained (their text can carry credentials).
   default). Without `?ref=` the default branch is fetched once
   (`GET /projects/:id`) and cached in `backend.cache`. Tree listings are
   paginated (100 per page); file entries carry no stat hint (a `stat()` per
-  file); `st_mtime` is `0`.
+  file, which is a `HEAD` of the files endpoint reading `X-Gitlab-Size`; a
+  reply without it, or a refused `HEAD`, is followed by a `GET` of the file's
+  metadata); `st_mtime` is `0`. Replies of the wrong shape are
+  `OSError(EIO)` as for `GitHubPath`.
 - **`GitPath`** (`git:`; `schemes.git`) — `git://github.com/...` constructs a
   `GitHubPath`, `git://gitlab.com/...` a `GitLabPath`; any other host →
   `ValueError`. `git+github:` (`GitHubGitPath`) and `git+gitlab:`

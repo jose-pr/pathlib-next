@@ -196,8 +196,10 @@ Conventions for a scheme implementation:
   than the authority (an archive, a container).
 - A derived path (`/`, `parent`, `with_name()`, `relative_to()`, ...) never
   calls `_initbackend()`: it takes the backend its source already holds, and
-  only for the same scheme, userinfo, host and port. A path with none builds
-  its own on first use.
+  only for the same scheme, userinfo, host and port. Paths derived from one
+  another share one slot for the backend they derive for themselves, which
+  the first of them to need one fills with `_initbackend()` (under a lock);
+  a path constructed on its own builds its own on first use.
 - Set `_host_filesystem_path = True` only when `self.path` is a real
   filesystem path on the remote host (as for `sftp:`); `os.fspath()` and
   `host_fspath()` then return it.

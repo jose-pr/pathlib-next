@@ -118,6 +118,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   has always been sent to the new host when `requests` follows a redirect to
   another one; nothing changed in the code. Keep a secret in `Authorization`
   or `auth=`, or point the path at the final URL.
+- **`stat()` of a `gitlab:` file asks with `HEAD`.** It was a `GET` of the files
+  endpoint, whose reply carries the file base64-encoded, so every `stat()`,
+  `exists()` and `is_file()` of a large file (and every file met by `walk()`,
+  `glob()` or `copy()`, which get no size from the tree listing) downloaded
+  it. The size now comes from the `X-Gitlab-Size` header of a `HEAD`; a reply
+  without it, or a server that refuses `HEAD`, is followed by the `GET` of the
+  metadata as before. `github:` still reads the contents object.
+- **Paths derived from one another on one endpoint share the backend the first
+  of them builds.** `root / name` on a fresh root, or `p.parent` beside `p`,
+  built a backend (an `http:` session, a `RepoBackend` with its own
+  default-branch cache, an SFTP connection) per path on first use: 20 children
+  of one root opened 20 connections, one TLS handshake each, where they open
+  one after `root` has done I/O itself, and `gitlab:` looked the default branch
+  up once per child. They now share one slot for the backend they derive for
+  themselves; deriving a path still builds nothing and imports no I/O library,
+  a thread race builds one, and a supplied backend (`backend=`,
+  `with_backend()`, `with_session()`) is carried as before and never replaced.
+  Paths constructed separately, on another endpoint, or with no source (the
+  result of `relative_to()`) do not share; two `UriPath(url)` calls still make
+  two connections, so build the root once and derive from it.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's
@@ -509,6 +529,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   accepted and ignored (`PUT` always went out). `DavPath.stat()` also accepts
   `walk_up_last_modified=` like `HttpPath.stat()`; the PROPFIND reply already
   carries the modification time, so it changes nothing.
+- **A `github:` or `gitlab:` API reply that is not the documented shape is
+  `OSError` (`EIO`) naming the path.** A 200 that was a proxy's HTML page,
+  `null`, a number, a truncated body, an array where an object belongs or an
+  entry without a name and a type raised `AttributeError`, `TypeError`,
+  `KeyError` or `requests`' `JSONDecodeError` from `stat()`, `iterdir()` and
+  `read_bytes()`, and `exists()` raised too (it only swallows `OSError`); a
+  tree reply without a `tree` listed as an empty directory, and a size that
+  was text broke `stat()`. Each reply is decoded and checked in one place per
+  provider now, `exists()` answers `False` and `stat()` raises `OSError`. A
+  raw file body has no shape to check and is returned as sent.
 
 ## [0.9.12] - 2026-10-08
 

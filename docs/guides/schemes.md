@@ -55,7 +55,10 @@ implemented by `LocalPath` and `sftp:` only; `readlink()` by `LocalPath` and
   deletes instead. A `str` target is a path (not URI syntax); a relative one
   is a sibling.
 - **Backends** are passed as `UriPath(uri, backend=...)` or
-  `path.with_backend(backend)`, and inherited by every derived path.
+  `path.with_backend(backend)`, and inherited by every derived path. Without
+  one, paths derived from one another (`root / name`, `parent`, ...) share the
+  one backend the first of them builds, so 20 children of a fresh root use one
+  connection; paths constructed separately do not share.
 
 ## Local and in-memory
 
@@ -291,8 +294,11 @@ are read-only views of a repository over the REST APIs, using plain
 - GitHub listings come from the contents API (with its type and size) and
   switch to the Git Trees API for directories at its 1,000-entry cap; file
   bodies use the raw media type. GitLab's tree listing has no sizes, so file
-  entries are `stat()`ed on demand. Symlinks and submodules read as plain
-  files. Git has no empty directories.
+  entries are `stat()`ed on demand (a `HEAD` request, no file content).
+  Symlinks and submodules read as plain files. Git has no empty directories.
+- A reply that is not the shape the API documents (a proxy's HTML page,
+  `null`, a truncated body, an array where an object belongs) raises
+  `OSError` (`EIO`) naming the path; `exists()` is `False`.
 - **`git:`** detects the provider for `github.com` and `gitlab.com` only;
   other hosts raise `ValueError` and need `github:`/`gitlab:` or the pinned
   `git+github:`/`git+gitlab:` forms.
