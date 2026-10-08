@@ -7,7 +7,11 @@ UriPath schemes) to be able to run against their own implementation -- see
 """
 
 import os
+import stat
+
 import pytest
+
+from capabilities import stores_question_marks
 
 import pathlib_next
 from pathlib_next.mempath import MemPath
@@ -19,6 +23,7 @@ from pathlib_next.testing import (
 )
 from pathlib_next.uri.schemes.file import FileUri
 from pathlib_next.uri.schemes.data import DataUri
+from pathlib_next.uri import UriPath
 from pathlib_next.uri.schemes.archive import ZipUri, TarUri
 
 
@@ -58,6 +63,8 @@ def make_tar_from_local(local_dir, tar_path):
 
 # Writable, full RW contract backends
 class TestLocalContract(PathContract):
+    supports_question_mark_names = stores_question_marks()
+
     @pytest.fixture
     def root(self, fixture_tree):
         return pathlib_next.LocalPath(fixture_tree)
@@ -66,6 +73,7 @@ class TestLocalContract(PathContract):
 class TestMemContract(PathContract):
     # MemPath has no rename(); move() falls back to copy + delete.
     supports_rename = False
+    supports_question_mark_names = True
 
     @pytest.fixture
     def root(self):
@@ -73,6 +81,8 @@ class TestMemContract(PathContract):
 
 
 class TestFileUriContract(PathContract):
+    supports_question_mark_names = stores_question_marks()
+
     @pytest.fixture
     def root(self, fixture_tree):
         return FileUri(fixture_tree.as_uri())
@@ -96,6 +106,7 @@ class TestHttpContract(ReadPathContract):
 class TestZipContract(PathContract):
     # Members are rewritten whole; open("a") raises NotImplementedError.
     supports_append = False
+    supports_question_mark_names = True
 
     @pytest.fixture
     def root(self, tmp_path_factory, fixture_tree):
@@ -113,6 +124,45 @@ class TestTarContract(ReadPathContract):
         tar_file = tmp_path_factory.mktemp("tar") / "tree.tar"
         make_tar_from_local(fixture_tree, tar_file)
         return TarUri(f"tar:{tar_file.as_uri()}!/")
+
+
+# `archive:` picks the format from the outer file's extension; `archive+zip:`
+# and `archive+tar:` pin it. Same trees as the `zip:` and `tar:` classes.
+class TestArchiveZipContract(PathContract):
+    supports_append = False
+    supports_question_mark_names = True
+
+    scheme = "archive"
+    # A pickled path of the extension-detecting scheme is equal to the
+    # original but `_same_filesystem()` does not place the two together.
+    supports_pickle = False
+
+    @pytest.fixture
+    def root(self, tmp_path_factory, fixture_tree):
+        zip_file = tmp_path_factory.mktemp("archive-zip") / "tree.zip"
+        make_zip_from_local(fixture_tree, zip_file)
+        return UriPath(f"{self.scheme}:{zip_file.as_uri()}!/")
+
+
+class TestArchivePinnedZipContract(TestArchiveZipContract):
+    scheme = "archive+zip"
+    supports_pickle = True
+
+
+class TestArchiveTarContract(ReadPathContract):
+    scheme = "archive"
+    supports_pickle = False  # as TestArchiveZipContract
+
+    @pytest.fixture
+    def root(self, tmp_path_factory, fixture_tree):
+        tar_file = tmp_path_factory.mktemp("archive-tar") / "tree.tar"
+        make_tar_from_local(fixture_tree, tar_file)
+        return UriPath(f"{self.scheme}:{tar_file.as_uri()}!/")
+
+
+class TestArchivePinnedTarContract(TestArchiveTarContract):
+    scheme = "archive+tar"
+    supports_pickle = True
 
 
 # DataUri read-only contract (represents single file)
@@ -151,6 +201,10 @@ class TestDataUriContract(ReadPathContract):
         with root.open("rb") as fh:
             assert fh.read() == b"a"
 
+    def test_stat_tells_a_directory_from_a_file(self, root):
+        assert stat.S_ISREG(root.stat().st_mode)
+        assert not stat.S_ISDIR(root.stat().st_mode)
+
     def test_stat_missing_raises_file_not_found(self, root):
         self._single_resource()
 
@@ -160,9 +214,18 @@ class TestDataUriContract(ReadPathContract):
     def test_read_directory_raises(self, root):
         self._single_resource()
 
+    def test_nothing_exists_below_a_file(self, root):
+        self._single_resource()
+
+    def test_partial_reads_continue_where_the_last_stopped(self, root):
+        self._single_resource()
+
 
 # Ftp contract
 class TestFtpContract(PathContract):
+    # The loopback server keeps the names on this machine's file system.
+    supports_question_mark_names = stores_question_marks()
+
     @pytest.fixture
     def root(self, ftp_server):
         from pathlib_next.uri.schemes.ftp import FtpPath
@@ -174,6 +237,9 @@ class TestFtpContract(PathContract):
 class TestDavContract(PathContract):
     # Uploads are whole-resource PUTs; open("a") raises NotImplementedError.
     supports_append = False
+    # The test server (WsgiDAV) cuts a MOVE destination at a percent-decoded
+    # "?", so a rename to such a name lands under the part before it.
+    supports_question_mark_names = False
 
     @pytest.fixture
     def root(self, dav_server):
@@ -189,6 +255,7 @@ class TestS3Contract(PathContract):
     # the same name can coexist) and objects are written whole.
     enforces_directory_hierarchy = False
     supports_append = False
+    supports_question_mark_names = True
 
     @pytest.fixture
     def root(self, s3_server):
@@ -230,12 +297,45 @@ class TestGitLabContract(ReadPathContract):
         return GitLabPath(f"gitlab://gitlab.com/{owner}/{repo}", backend=backend)
 
 
+# `git+github:` and `git+gitlab:` name the provider explicitly (a bare `git:`
+# URI picks one from a public host name). Against the same loopback fakes as
+# the two classes above; nothing reaches a real host.
+class TestGitGitHubContract(ReadPathContract):
+    supports_empty_directories = False
+
+    @pytest.fixture
+    def root(self, github_api_server):
+        pytest.importorskip("requests")
+        from pathlib_next.uri.schemes.git import GitHubGitPath
+        from pathlib_next.uri.schemes.github import RepoBackend
+
+        base_url, owner, repo = github_api_server
+        backend = RepoBackend(api_base=base_url)
+        return GitHubGitPath(f"git+github://github.com/{owner}/{repo}", backend=backend)
+
+
+class TestGitGitLabContract(ReadPathContract):
+    supports_empty_directories = False
+
+    @pytest.fixture
+    def root(self, gitlab_api_server):
+        pytest.importorskip("requests")
+        from pathlib_next.uri.schemes.git import GitLabGitPath
+        from pathlib_next.uri.schemes.gitlab import RepoBackend
+
+        base_url, owner, repo = gitlab_api_server
+        backend = RepoBackend(api_base=f"{base_url}/api/v4")
+        return GitLabGitPath(f"git+gitlab://gitlab.com/{owner}/{repo}", backend=backend)
+
+
 # SFTP contract — in-process asyncssh-backed server (see conftest.py's
 # sftp_server), parametrized across both CLIENT backends: paramiko and
 # asyncssh. The test server is the same regardless of which client backend
 # is under test -- a client library choice is independent of which library
 # the server uses.
 class TestSftpContract(PathContract):
+    supports_question_mark_names = stores_question_marks()
+
     @pytest.fixture(params=["paramiko", "asyncssh"])
     def root(self, request, sftp_server):
         from pathlib_next.uri.schemes.sftp import SftpPath
@@ -296,6 +396,7 @@ class TestGsContract(PathContract):
     # Same object-store model as TestS3Contract.
     enforces_directory_hierarchy = False
     supports_append = False
+    supports_question_mark_names = True
 
     @pytest.fixture
     def root(self, gs_server):
@@ -309,6 +410,7 @@ class TestAzContract(PathContract):
     # Same object-store model as TestS3Contract.
     enforces_directory_hierarchy = False
     supports_append = False
+    supports_question_mark_names = True
 
     @pytest.fixture
     def root(self, az_server):

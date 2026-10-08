@@ -42,15 +42,34 @@ affected tests then report as skipped, never as passed:
 - `PathContract.supports_append` -- `open("a")`/`open("ab")`.
 - `PathContract.supports_exclusive_create` -- `open("x")`.
 - `PathContract.enforces_directory_hierarchy` -- `mkdir()` and writes below
-  a missing parent raise `FileNotFoundError`, and writing a file over a
-  directory raises (object stores, whose directories are key prefixes,
-  cannot).
+  a missing parent raise `FileNotFoundError`, writing a file over a
+  directory raises, and `rename()` onto a non-empty directory raises (object
+  stores, whose directories are key prefixes, cannot).
+- `PathContract.supports_mkdir` -- `mkdir()`, and so every test that
+  creates a directory (a transport with no directories, such as TFTP, has
+  none).
+- `PathContract.supports_delete` -- `unlink()`, `rmdir()` and `rm()`.
+- `PathContract.supports_move` -- `move()`, by `rename()` or by copying and
+  then deleting; False for a backend that can do neither.
+- `PathContract.supports_unusual_names` -- names holding a space, `#`, `%`
+  (also followed by two hex digits), `+`, `&`, `=` and mixed case are stored
+  and listed exactly as written.
+- `PathContract.supports_question_mark_names` -- the same for names holding
+  `?`. False by default: a Windows file system cannot hold such a name, so
+  a correct local backend there would fail; set it True for a URI scheme or
+  a remote store.
+
+A test that needs an operation checks the matching switch first, so a
+backend without that operation needs no expected-failure marks. The tree
+itself is yours to build: `populate_fixture_tree()` uses `mkdir()` and
+`write_text()`, so a backend without them seeds `root` another way.
 """
 
 from __future__ import annotations
 
 import errno as _errno
 import pickle
+import stat as _stat
 
 import pytest
 
@@ -232,6 +251,31 @@ class ReadPathContract(PurePathContract):
     def test_stat(self, root):
         st = (root / "a.txt").stat()
         assert st.st_size == 1
+        assert isinstance(st.st_mtime, (int, float))
+        # A second, longer file: a backend that reports one size for all.
+        assert (root / ".hidden.txt").stat().st_size == len("hidden")
+
+    def test_stat_tells_a_directory_from_a_file(self, root):
+        self._require("distinguishes_file_types")
+        assert _stat.S_ISREG((root / "a.txt").stat().st_mode)
+        assert not _stat.S_ISDIR((root / "a.txt").stat().st_mode)
+        assert _stat.S_ISDIR((root / "sub").stat().st_mode)
+        assert not _stat.S_ISREG((root / "sub").stat().st_mode)
+
+    def test_listing_metadata_agrees_with_stat(self, root):
+        # `_scandir()` carries the metadata `walk()`, `rm()` and `PathSyncer`
+        # trust without a `stat()` per entry; `None` means unknown, never a
+        # different answer.
+        self._require("supports_listing")
+        listed = dict(root._scandir())
+        assert set(listed) == {"a.txt", "b.py", ".hidden.txt", "sub", "empty_dir"}
+        for name, entry in listed.items():
+            if entry is None:
+                continue
+            real = (root / name).stat()
+            assert _stat.S_ISDIR(entry.st_mode) == _stat.S_ISDIR(real.st_mode), name
+            if not _stat.S_ISDIR(real.st_mode):
+                assert entry.st_size == real.st_size, name
 
     def test_stat_missing_raises_file_not_found(self, root):
         with pytest.raises(FileNotFoundError):
@@ -247,6 +291,23 @@ class ReadPathContract(PurePathContract):
         self._require("distinguishes_file_types")
         with pytest.raises(DIRECTORY_ERRORS):
             (root / "sub").read_bytes()
+
+    def test_nothing_exists_below_a_file(self, root):
+        below = root / "a.txt" / "x"
+        assert below.exists() is False
+        assert below.is_file() is False
+        assert below.is_dir() is False
+        with pytest.raises((FileNotFoundError, NotADirectoryError)):
+            below.read_bytes()
+        with pytest.raises((FileNotFoundError, NotADirectoryError)):
+            below.stat()
+
+    def test_partial_reads_continue_where_the_last_stopped(self, root):
+        with (root / ".hidden.txt").open("rb") as fh:
+            assert fh.read(2) == b"hi"
+            assert fh.read(3) == b"dde"
+            assert fh.read() == b"n"
+            assert fh.read() == b""
 
     def test_glob(self, root):
         self._require("supports_listing")
@@ -303,6 +364,32 @@ class ReadPathContract(PurePathContract):
         assert bottom_up.index("sub/nested") < bottom_up.index("sub")
 
 
+#: Names that URL-shaped or shell-shaped code tends to cut, decode or fold:
+#: stored, listed and read back exactly as written.
+#: Several pairs only differ after a cut at `#` or a percent-decode, so a
+#: backend that applies either stores them under one name.
+UNUSUAL_NAMES = (
+    "with space.txt",
+    "hash#one.txt",
+    "hash#two.txt",
+    "pct%41.txt",
+    "pctA.txt",
+    "100%.txt",
+    "plus+amp&eq=.txt",
+    "Mixed Case.TXT",
+)
+
+#: The same, holding `?`, which not every file system can store.
+QUESTION_MARK_NAMES = ("q?one.txt", "q?two.txt", "q?x#y%41.txt")
+
+
+def _payload():
+    """About 290 KiB holding every byte value, runs of CR and LF, and a
+    counter that makes a dropped, repeated or reordered chunk visible."""
+    block = bytes(range(256)) + b"\r\n\r\n\n\r\x00\x00\x00"
+    return b"".join(index.to_bytes(4, "big") + block for index in range(1100))
+
+
 class PathContract(ReadPathContract):
     """Mixin of filesystem-contract tests every writable Path implementation
     (custom `Path` subclass, or `UriPath` scheme) must satisfy.
@@ -312,17 +399,26 @@ class PathContract(ReadPathContract):
     `populate_fixture_tree()`). Tests create fixed names under it without
     cleaning up.
 
-    Capability attributes (all default True; set one False only for a
-    documented gap): `supports_rename`, `supports_append`,
-    `supports_exclusive_create`, `enforces_directory_hierarchy`.
+    Capability attributes (all default True except
+    `supports_question_mark_names`; set one False only for a documented gap):
+    `supports_rename`, `supports_append`, `supports_exclusive_create`,
+    `enforces_directory_hierarchy`, `supports_mkdir`, `supports_delete`,
+    `supports_move`, `supports_unusual_names`, and `supports_question_mark_names`
+    (default False).
     """
 
     supports_rename = True
     supports_append = True
     supports_exclusive_create = True
     enforces_directory_hierarchy = True
+    supports_mkdir = True
+    supports_delete = True
+    supports_move = True
+    supports_unusual_names = True
+    supports_question_mark_names = False
 
     def test_mkdir_and_is_dir(self, root):
+        self._require("supports_mkdir")
         d = root / "new_dir"
         assert not d.exists()
         d.mkdir()
@@ -330,6 +426,7 @@ class PathContract(ReadPathContract):
         assert not d.is_file()
 
     def test_mkdir_existing_raises_file_exists(self, root):
+        self._require("supports_mkdir")
         with pytest.raises(FileExistsError):
             (root / "sub").mkdir()
         (root / "sub").mkdir(exist_ok=True)
@@ -339,6 +436,7 @@ class PathContract(ReadPathContract):
         assert (root / "a.txt").read_text() == "a"
 
     def test_mkdir_missing_parent_raises_file_not_found(self, root):
+        self._require("supports_mkdir")
         self._require("enforces_directory_hierarchy")
         with pytest.raises(FileNotFoundError):
             (root / "missing_parent" / "child").mkdir()
@@ -356,6 +454,61 @@ class PathContract(ReadPathContract):
         f = root / "write_f.bin"
         f.write_bytes(b"\x00\x01hello")
         assert f.read_bytes() == b"\x00\x01hello"
+
+    def test_every_byte_value_survives_a_multi_chunk_round_trip(self, root):
+        # Larger than any one transfer block, with every byte value and runs
+        # of CR/LF: a transport that translates line ends, keeps seven bits,
+        # or stops at its first chunk changes the bytes or the length.
+        payload = _payload()
+        f = root / "payload.bin"
+        f.write_bytes(payload)
+        assert f.stat().st_size == len(payload)
+        assert f.read_bytes() == payload
+
+        g = root / "payload_streamed.bin"
+        with g.open("wb") as fh:
+            fh.write(payload[:7])
+            fh.write(payload[7:70000])
+            fh.write(payload[70000:])
+        assert g.read_bytes() == payload
+
+        with f.open("rb") as fh:
+            assert fh.read(100) == payload[:100]
+            assert fh.read(70000) == payload[100:70100]
+            assert fh.read() == payload[70100:]
+
+    def test_names_with_url_characters_are_stored_and_listed_as_written(self, root):
+        self._require("supports_unusual_names")
+        self._round_trip_names(root, UNUSUAL_NAMES)
+
+    def test_names_with_a_question_mark_are_stored_and_listed_as_written(self, root):
+        self._require("supports_question_mark_names")
+        self._round_trip_names(root, QUESTION_MARK_NAMES)
+
+    def _round_trip_names(self, root, names):
+        for index, name in enumerate(names):
+            f = root / name
+            assert f.name == name
+            assert not f.exists(), name
+            text = f"content {index}"
+            f.write_text(text)
+            assert f.exists() and f.is_file(), name
+            assert f.read_text() == text, name
+            assert f.stat().st_size == len(text), name
+        if self.supports_listing:
+            expected = {"a.txt", "b.py", ".hidden.txt", "sub", "empty_dir", *names}
+            assert {p.name for p in root.iterdir()} == expected
+        if self.supports_rename:
+            for index, name in enumerate(names):
+                target = root / f"renamed {name}"
+                (root / name).rename(target)
+                assert not (root / name).exists(), name
+                assert target.read_text() == f"content {index}", name
+        if self.supports_delete:
+            for name in names:
+                path = root / (f"renamed {name}" if self.supports_rename else name)
+                path.unlink()
+                assert not path.exists(), name
 
     def test_write_missing_parent_raises_file_not_found(self, root):
         self._require("enforces_directory_hierarchy")
@@ -408,6 +561,7 @@ class PathContract(ReadPathContract):
         assert f.read_text() == "new"
 
     def test_unlink(self, root):
+        self._require("supports_delete")
         f = root / "write_unlink.txt"
         f.write_text("x")
         assert f.exists()
@@ -415,17 +569,21 @@ class PathContract(ReadPathContract):
         assert not f.exists()
 
     def test_unlink_missing_raises_then_missing_ok(self, root):
+        self._require("supports_delete")
         f = root / "missing_unlink.txt"
         with pytest.raises(FileNotFoundError):
             f.unlink()
         f.unlink(missing_ok=True)
 
     def test_unlink_directory_raises(self, root):
+        self._require("supports_delete")
         with pytest.raises(DIRECTORY_ERRORS):
             (root / "empty_dir").unlink()
         assert (root / "empty_dir").is_dir()
 
     def test_rmdir_requires_empty(self, root):
+        self._require("supports_mkdir")
+        self._require("supports_delete")
         d = root / "new_rmdir"
         d.mkdir()
         (d / "f.txt").write_text("x")
@@ -438,15 +596,19 @@ class PathContract(ReadPathContract):
         assert not d.exists()
 
     def test_rmdir_missing_raises_file_not_found(self, root):
+        self._require("supports_delete")
         with pytest.raises(FileNotFoundError):
             (root / "missing_rmdir").rmdir()
 
     def test_rmdir_file_raises_not_a_directory(self, root):
+        self._require("supports_delete")
         with pytest.raises(NotADirectoryError):
             (root / "a.txt").rmdir()
         assert (root / "a.txt").read_text() == "a"
 
     def test_rm_recursive(self, root):
+        self._require("supports_mkdir")
+        self._require("supports_delete")
         d = root / "new_rm_rec"
         d.mkdir()
         (d / "f.txt").write_text("x")
@@ -459,6 +621,8 @@ class PathContract(ReadPathContract):
         # `rm()` takes `follow_symlinks=` and `follow_binds=` on every
         # implementation; a tree holding no link or binding comes out the
         # same under each of them.
+        self._require("supports_mkdir")
+        self._require("supports_delete")
         policies = (
             {"follow_symlinks": False, "follow_binds": False},
             {"follow_symlinks": True, "follow_binds": True},
@@ -475,6 +639,8 @@ class PathContract(ReadPathContract):
             assert not d.exists()
 
     def test_rm_rejects_a_policy_that_is_not_one(self, root):
+        self._require("supports_mkdir")
+        self._require("supports_delete")
         d = root / "new_rm_bad_policy"
         d.mkdir()
         (d / "f.txt").write_text("x")
@@ -483,6 +649,7 @@ class PathContract(ReadPathContract):
         assert (d / "f.txt").read_text() == "x"
 
     def test_rm_non_recursive_directory_requires_empty(self, root):
+        self._require("supports_delete")
         with pytest.raises(OSError) as info:
             (root / "sub").rm()
         assert info.value.errno in NOT_EMPTY_ERRNOS
@@ -491,6 +658,7 @@ class PathContract(ReadPathContract):
         assert not (root / "empty_dir").exists()
 
     def test_rm_missing_ok(self, root):
+        self._require("supports_delete")
         with pytest.raises(FileNotFoundError):
             (root / "missing_rm").rm()
         (root / "missing_rm").rm(missing_ok=True)
@@ -509,8 +677,9 @@ class PathContract(ReadPathContract):
         with pytest.raises(FileExistsError):
             src.copy(dst)
         assert dst.read_text() == "existing"
-        src.copy(dst, overwrite=True)
-        assert dst.read_text() == "a"
+        if self.supports_delete:  # replacing a file removes it first
+            src.copy(dst, overwrite=True)
+            assert dst.read_text() == "a"
 
     def test_copy_missing_source_raises_file_not_found(self, root):
         dst = root / "dst_copy_missing.txt"
@@ -537,6 +706,7 @@ class PathContract(ReadPathContract):
         assert child._same_filesystem(root / "sub" / "c.py")
 
     def test_copy_recursive(self, root):
+        self._require("supports_mkdir")
         dst = root / "sub_copy"
         (root / "sub").copy(dst, recursive=True)
         assert (dst / "c.py").read_text() == "c"
@@ -547,11 +717,13 @@ class PathContract(ReadPathContract):
         with pytest.raises(FileExistsError):
             (root / "sub").copy(dst, recursive=True)
         assert (dst / "c.py").read_text() == "c"
-        (root / "sub").copy(dst, recursive=True, overwrite=True)
-        assert (dst / "c.py").read_text() == "changed"
-        assert (dst / "nested" / "d.py").read_text() == "d"
+        if self.supports_delete:  # replacing a file removes it first
+            (root / "sub").copy(dst, recursive=True, overwrite=True)
+            assert (dst / "c.py").read_text() == "changed"
+            assert (dst / "nested" / "d.py").read_text() == "d"
 
     def test_move(self, root):
+        self._require("supports_move")
         # We write a temp file to move so we don't destroy a.txt for other tests
         src = root / "src_move.txt"
         src.write_text("data")
@@ -561,6 +733,7 @@ class PathContract(ReadPathContract):
         assert dst.read_text() == "data"
 
     def test_move_existing_target_raises_without_overwrite(self, root):
+        self._require("supports_move")
         src = root / "src_move_existing.txt"
         src.write_text("data")
         dst = root / "b.py"
@@ -573,6 +746,8 @@ class PathContract(ReadPathContract):
         assert dst.read_text() == "data"
 
     def test_move_directory(self, root):
+        self._require("supports_move")
+        self._require("supports_mkdir")
         src = root / "sub"
         dst = root / "moved_sub"
         src.move(dst)
@@ -592,6 +767,20 @@ class PathContract(ReadPathContract):
         with pytest.raises(FileNotFoundError):
             src.rename(root / "never.txt")
 
+    def test_rename_onto_a_non_empty_directory_raises_and_keeps_both(self, root):
+        self._require("supports_rename")
+        self._require("enforces_directory_hierarchy")
+        src = root / "src_rename_onto_dir.txt"
+        src.write_text("data")
+        with pytest.raises(OSError):
+            src.rename(root / "sub")
+        assert src.read_text() == "data"
+        assert (root / "sub" / "c.py").read_text() == "c"
+        with pytest.raises(OSError):
+            (root / "empty_dir").rename(root / "sub")
+        assert (root / "empty_dir").is_dir()
+        assert (root / "sub" / "nested" / "d.py").read_text() == "d"
+
     def test_touch(self, root):
         f = root / "touch_new.txt"
         f.touch()
@@ -608,6 +797,7 @@ class PathContract(ReadPathContract):
         assert f.read_text() == "keep"
 
     def test_mkdir_parents(self, root):
+        self._require("supports_mkdir")
         d = root / "parent_a" / "parent_b" / "parent_c"
         d.mkdir(parents=True)
         assert d.is_dir()
@@ -618,11 +808,13 @@ class PathContract(ReadPathContract):
     def test_listing_reflects_writes(self, root):
         self._require("supports_listing")
         (root / "empty_dir" / "new.txt").write_text("n")
-        (root / "empty_dir" / "new_sub").mkdir()
-        assert {p.name for p in (root / "empty_dir").iterdir()} == {
-            "new.txt",
-            "new_sub",
-        }
+        if self.supports_mkdir:
+            (root / "empty_dir" / "new_sub").mkdir()
+        expected = {"new.txt", "new_sub"} if self.supports_mkdir else {"new.txt"}
+        assert {p.name for p in (root / "empty_dir").iterdir()} == expected
+        if not self.supports_delete:
+            return
         (root / "empty_dir" / "new.txt").unlink()
-        (root / "empty_dir" / "new_sub").rmdir()
+        if self.supports_mkdir:
+            (root / "empty_dir" / "new_sub").rmdir()
         assert list((root / "empty_dir").iterdir()) == []
