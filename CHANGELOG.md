@@ -344,6 +344,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   share the backend object (supplied or built by the path) instead of copying a
   connection, so a deep copy (`dataclasses.asdict()` makes one) no longer fails
   on a `zip:` path.
+- **`Source.is_local()` answers for the host alone and forgets.** It cached per
+  whole `Source`, password included, so three paths differing only in password
+  cost three lookups and the cache kept the `Source` objects (and passwords)
+  alive for the life of the process; an answer never changed even if an
+  interface came or went. The answer is now kept per host for 60 seconds, for at
+  most 256 hosts.
 
 ## [0.9.12] - 2026-10-08
 

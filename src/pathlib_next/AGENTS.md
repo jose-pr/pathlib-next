@@ -559,8 +559,8 @@ not by a checker.
   stays the decoded `user:password` text),
   `get_scheme_cls(schemesmap=None) -> type[UriPath]`, `is_local()` —
   `localhost`/empty host or an address of this machine (IP literal, or any
-  A/AAAA answer via `netimps`); cached per `Source` (`lru_cache(256)`), does
-  DNS on a miss.
+  A/AAAA answer via `netimps`); the answer depends on the host alone and is
+  kept for 60 seconds for at most 256 hosts, so a miss does DNS.
 - **`Query(query, *, encoding="utf-8", separator="&")`** (`uri.query`) —
   `str` subclass holding the encoded query; built from a `str` (taken as
   encoded), a mapping (a sequence value repeats the key) or `(key, value)`

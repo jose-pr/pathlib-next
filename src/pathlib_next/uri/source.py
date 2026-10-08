@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import functools as _functools
 import ipaddress as _ip
 import re as _re
+import threading as _threading
+import time as _time
 import typing as _ty
 
 import uritools as _uritools
@@ -540,29 +541,23 @@ class Source(_ty.NamedTuple):
             return _cls if _cls else UriPath
         return UriPath
 
-    @_functools.lru_cache(maxsize=256)
-    def is_local(self):
+    def is_local(self) -> bool:
         """Whether `host` resolves to this machine.
 
-        Caches per unique Source (Source is an immutable value type), since
-        this does a DNS/hosts-file lookup -- never call it on a hot path
-        uncached.
+        The answer depends on the host alone (userinfo, port and scheme play
+        no part) and is remembered for `_LOCAL_TTL` seconds, at most
+        `_LOCAL_CACHE_SIZE` hosts: it comes from a DNS/hosts-file lookup and
+        the machine's interfaces, so it is neither free nor forever.
 
         The hostname->address step uses `netimps.resolve()` (default
         backend chain: dnspython, then the OS resolver via
         `getaddrinfo()` -- hosts file, NSS, DNS, OS cache -- then
         `nslookup` as a last resort), trying both `"a"`/`"aaaa"` record
         types and treating `host` as local if ANY resolved address is.
-        `netimps.resolve()` gained OS-resolver-chain support in 0.2.0 --
-        before that it was dnspython-only, which is why this method
-        originally kept `socket.gethostbyname()` for this step. The
-        "is this address MINE" comparison uses `netimps.is_local_address()`,
-        which enumerates real network interfaces
-        (`netimps.get_interfaces()`) instead of the weaker
-        `socket.getaddrinfo(socket.gethostname(), None)` this project used
-        originally -- that approach missed addresses not tied to the
-        resolvable hostname (VMs, containers, VPN interfaces, additional
-        NICs on a multi-homed host).
+        The "is this address MINE" comparison uses
+        `netimps.is_local_address()`, which enumerates the real network
+        interfaces (`netimps.get_interfaces()`), so VMs, containers, VPN
+        interfaces and additional NICs count.
 
         `host` as a bare IP-literal `str` (e.g. a directly-constructed
         `Source(..., host="::1", ...)`, bypassing `_decode_host()`'s usual
@@ -572,17 +567,52 @@ class Source(_ty.NamedTuple):
         host = self.host
         if not host or host == "localhost":
             return True
-        # Imported here, not at module top: only this method needs netimps,
-        # and every `import pathlib_next` would otherwise pay for its import.
-        import netimps as _netimps
+        return _host_is_local(host)
 
-        if not isinstance(host, str):
-            return _netimps.is_local_address(host)
-        literal = _netimps.try_parse(host)
-        if literal is not None:
-            return _netimps.is_local_address(literal)
-        addresses = _netimps.resolve(host, "a") + _netimps.resolve(host, "aaaa")
-        return any(_netimps.is_local_address(address) for address in addresses)
+
+#: How long `Source.is_local()` remembers an answer, in seconds, and for how
+#: many hosts.
+_LOCAL_TTL = 60.0
+_LOCAL_CACHE_SIZE = 256
+_local_cache: "dict[object, tuple[float, bool]]" = {}
+_local_lock = _threading.Lock()
+
+
+def _host_is_local(host: "str | _IPAddress") -> bool:
+    now = _time.monotonic()
+    with _local_lock:
+        entry = _local_cache.get(host)
+    if entry is not None and entry[0] > now:
+        return entry[1]
+    answer = _resolve_is_local(host)
+    with _local_lock:
+        if len(_local_cache) >= _LOCAL_CACHE_SIZE:
+            for key in [k for k, (until, _) in _local_cache.items() if until <= now]:
+                del _local_cache[key]
+        while len(_local_cache) >= _LOCAL_CACHE_SIZE:
+            del _local_cache[next(iter(_local_cache))]
+        _local_cache[host] = (now + _LOCAL_TTL, answer)
+    return answer
+
+
+def _resolve_is_local(host: "str | _IPAddress") -> bool:
+    # Imported here, not at module top: only this needs netimps, and every
+    # `import pathlib_next` would otherwise pay for its import.
+    try:
+        import netimps as _netimps
+    except ImportError as error:
+        raise ImportError(
+            'netimps is not installed: pip install "pathlib-next[uri]"',
+            name="netimps",
+        ) from error
+
+    if not isinstance(host, str):
+        return _netimps.is_local_address(host)
+    literal = _netimps.try_parse(host)
+    if literal is not None:
+        return _netimps.is_local_address(literal)
+    addresses = _netimps.resolve(host, "a") + _netimps.resolve(host, "aaaa")
+    return any(_netimps.is_local_address(address) for address in addresses)
 
 
 _NOSOURCE = Source(None, None, None, None)
