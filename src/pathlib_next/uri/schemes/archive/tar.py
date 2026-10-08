@@ -3,6 +3,12 @@ from __future__ import annotations
 import io as _io
 import stat as _stat
 import tarfile as _tarfile
+import zlib as _zlib
+
+try:
+    from lzma import LZMAError as _LZMAError
+except ImportError:  # pragma: no cover - a Python built without lzma
+    _LZMAError = _zlib.error
 
 from ....utils.stat import FileStat
 from ._base import ArchiveUri, _ArchiveBackend
@@ -21,18 +27,30 @@ def _member_name(name: str) -> str:
 class _TarBackend(_ArchiveBackend):
     __slots__ = ("_members",)
 
+    _FORMAT_ERROR = _tarfile.ReadError
+
     def __init__(self, outer):
         super().__init__(outer)
         self._members = {}
 
+    def _is_format_error(self, error):
+        # What the decompressors raise over an in-memory archive that is cut
+        # short or damaged. Their `OSError`s (a bad gzip header or CRC, bzip2's
+        # "Invalid data stream") carry no errno, which an I/O failure does.
+        return isinstance(
+            error, (_tarfile.TarError, EOFError, _zlib.error, _LZMAError)
+        ) or (isinstance(error, OSError) and error.errno is None)
+
     def _open(self):
-        handle = _tarfile.open(fileobj=_io.BytesIO(self.outer.read_bytes()), mode="r:*")
-        members = {}
-        for info in handle.getmembers():
-            name = _member_name(info.name)
-            if name:
-                # A later entry of the same name wins, as in tarfile itself.
-                members[name] = info
+        data = self._outer_bytes()
+        with self._damage_as_format_error():
+            handle = _tarfile.open(fileobj=_io.BytesIO(data), mode="r:*")
+            members = {}
+            for info in handle.getmembers():
+                name = _member_name(info.name)
+                if name:
+                    # A later entry of the same name wins, as in tarfile itself.
+                    members[name] = info
         self._members = members
         return handle
 
@@ -45,12 +63,13 @@ class _TarBackend(_ArchiveBackend):
         with self._lock:
             handle = self.handle
             member = self._members[path]  # raises KeyError if missing
-            f = handle.extractfile(member)
+            with self._damage_as_format_error():
+                f = handle.extractfile(member)
             if f is None:
                 raise IsADirectoryError(path)
             # Fully read under the lock: a live stream shares the handle's
             # file object (and decompressor) with every other reader.
-            with f:
+            with self._damage_as_format_error(), f:
                 return _io.BytesIO(f.read())
 
     def member_stat(self, path):

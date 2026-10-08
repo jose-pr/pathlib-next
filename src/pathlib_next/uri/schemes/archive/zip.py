@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno as _errno
 import io as _io
 import os as _os
 import shutil as _shutil
@@ -8,6 +9,7 @@ import struct as _struct
 import tempfile as _tempfile
 import time as _time
 import zipfile as _zipfile
+import zlib as _zlib
 from contextlib import contextmanager as _contextmanager
 
 from ....utils.stat import FileStat
@@ -111,6 +113,19 @@ class _LazyReadFile:
 class _ZipBackend(_ArchiveBackend):
     __slots__ = ()
 
+    _FORMAT_ERROR = _zipfile.BadZipFile
+
+    def _is_format_error(self, error):
+        # `zipfile` lets the decoders' own errors through for a damaged
+        # archive: an inflate failure, a short header, a truncated stream, a
+        # name that does not decode, an offset that cannot be seeked to, and a
+        # version it does not know (`NotImplementedError` while reading the
+        # central directory).
+        return isinstance(
+            error,
+            (_zlib.error, _struct.error, EOFError, UnicodeDecodeError, OverflowError),
+        ) or (isinstance(error, OSError) and error.errno == _errno.EINVAL)
+
     @property
     def writable(self) -> bool:
         # Writing entries needs a real seekable local file -- not a
@@ -125,10 +140,19 @@ class _ZipBackend(_ArchiveBackend):
             # an end-of-central-directory record to a file that is not a zip.
             fp = _LazyReadFile(str(self.outer.filepath))
             try:
-                return _zipfile.ZipFile(fp, mode="r")
+                return self._read_directory(fp)
             finally:
                 fp.release()
-        return _zipfile.ZipFile(_io.BytesIO(self.outer.read_bytes()), mode="r")
+        return self._read_directory(_io.BytesIO(self._outer_bytes()))
+
+    def _read_directory(self, fileobj):
+        try:
+            with self._damage_as_format_error():
+                return _zipfile.ZipFile(fileobj, mode="r")
+        except NotImplementedError as error:
+            # An extract version the central directory declares and
+            # `zipfile` does not know: the directory is not one.
+            raise _zipfile.BadZipFile(str(error)) from error
 
     def _close_handle(self):
         # `ZipFile.close()` leaves a passed-in file object open.
@@ -144,7 +168,8 @@ class _ZipBackend(_ArchiveBackend):
         with self._lock:
             handle = self.handle
             try:
-                yield handle
+                with self._damage_as_format_error():
+                    yield handle
             finally:
                 if isinstance(handle.fp, _LazyReadFile):
                     handle.fp.release()
@@ -168,7 +193,9 @@ class _ZipBackend(_ArchiveBackend):
                 # First write into a missing archive creates it ("x": never
                 # clobber a file that appeared in the meantime).
                 self._close_handle()
-                with _zipfile.ZipFile(outer_path, "x") as archive:
+                with _zipfile.ZipFile(
+                    outer_path, "x", compression=_zipfile.ZIP_DEFLATED
+                ) as archive:
                     archive.writestr(path, data)
                 return
             if path in self.names():
@@ -195,7 +222,9 @@ class _ZipBackend(_ArchiveBackend):
                 _shutil.copyfileobj(original, tmp)
             # zipfile only persists the central directory to disk when the
             # *archive* (not just the entry) is closed.
-            with _zipfile.ZipFile(tmp, "a") as archive:
+            with _zipfile.ZipFile(
+                tmp, "a", compression=_zipfile.ZIP_DEFLATED
+            ) as archive:
                 archive.writestr(path, data)
 
         self._replace_outer(fill)
@@ -208,6 +237,13 @@ class _ZipBackend(_ArchiveBackend):
         leaves the original untouched and no temp file behind. Must be
         called with `self._lock` held."""
         outer_path = _os.path.realpath(str(self.outer.filepath))
+        if not _os.access(outer_path, _os.W_OK):
+            # Replacing swaps the file for a new one and so ignores its mode:
+            # a read-only archive is refused here, as an `open(..., "ab")`
+            # would refuse it.
+            raise PermissionError(
+                _errno.EACCES, _os.strerror(_errno.EACCES), outer_path
+            )
         self._close_handle()
         fd, tmp_name = _tempfile.mkstemp(
             dir=_os.path.dirname(outer_path), prefix=".pathlib_next-zip-", suffix=".tmp"
@@ -355,11 +391,13 @@ class ZipUri(ArchiveUri):
     existing entries, `unlink`/`rmdir`/`rename`) works when the outer
     archive is a local `file:` URI; every other outer scheme is read-only
     (fetched fully into memory first). Every mutation replaces the archive
-    atomically (temp file + `os.replace`): a new entry is appended to a
-    byte copy of the archive (nothing recompressed); overwriting/deleting/
-    renaming an existing entry rewrites the whole archive
-    (`_ZipBackend._rewrite`), since `zipfile` has no in-place entry
-    mutation, keeping every other entry's metadata. Write methods (`_open` write
+    atomically (temp file + `os.replace`), so the result is a new file: other
+    hard links keep the old content, and an archive the caller may not write
+    is refused first. A new entry is appended, deflated, to a byte copy of the
+    archive (nothing recompressed); overwriting/deleting/renaming an existing
+    entry rewrites the whole archive (`_ZipBackend._rewrite`), since `zipfile`
+    has no in-place entry mutation, keeping every other entry's metadata and
+    compression method. Write methods (`_open` write
     modes, `_mkdir`, `unlink`, `rmdir`, `rename`) live on the shared
     `ArchiveUri` base -- they're generic, gated on `self.backend.writable`,
     which only this backend ever reports `True`."""

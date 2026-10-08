@@ -952,12 +952,22 @@ chained (their text can carry credentials).
   `ArchiveUri` (`archive:`, detects the format from the outer name
   `.zip`/`.jar` vs `.tar`/`.tgz`/`.tar.*`, else a `PK` magic sniff),
   `ArchiveZipUri` (`archive+zip:`), `ArchiveTarUri` (`archive+tar:`).
+  - `archive:` settles the format on first use, not when the path is built:
+    constructing, printing, joining, copying and pickling a path read nothing,
+    a non-local outer that had to be read to decide is not fetched a second
+    time, and a failure to read the outer propagates and decides nothing, so
+    the next call tries again (an `archive:` path to an outer that is missing
+    and has no extension raises `FileNotFoundError` on a write, as it does on
+    a read).
   - Syntax `<scheme>:<archive-uri>!/<member>`; `<archive-uri>` must carry a
     scheme (`ValueError` otherwise) and may be any URI, including another
     archive (each leading archive scheme consumes one `!/`; nested archives
     are read-only). A member name containing `!/` is written `%21/`.
     `name`/`parent`/`glob()` work on the member path; `as_uri()`
-    percent-encodes it.
+    percent-encodes it, and a name that is not valid UTF-8 (a tar member
+    written in another charset, held as surrogate escapes) keeps its bytes as
+    `%XX` (`caf%E9.txt`), so such a path prints, hashes, compares and parses
+    back to the same member.
   - One shared handle per archive (keyed by the real local path, or the outer
     URI), released when no path references it. A non-local outer is read into
     memory.
@@ -980,7 +990,15 @@ chained (their text can carry credentials).
   - The archive root is the archive: `exists()`/`is_dir()`/`stat()` of it
     open the archive, so a missing one does not exist (`FileNotFoundError`
     from `stat()`) and a file that is not an archive raises
-    `zipfile.BadZipFile` / `tarfile.ReadError`, as a listing does.
+    `zipfile.BadZipFile` / `tarfile.ReadError`, as a listing does. So does any
+    other damage that stops the archive from being read -- a bad deflate
+    stream, a short or inconsistent header, a zip version `zipfile` does not
+    know, a truncated or corrupt gzip/bzip2/xz stream -- whichever decoder
+    noticed it, and never as `zlib.error`, `struct.error`, `EOFError` or an
+    `OSError` without an errno. A member that is encrypted raises
+    `RuntimeError`, and one stored with a compression method `zipfile` lacks
+    `NotImplementedError`, as `zipfile` raises them. A member another thread's
+    rewrite removed between the lookup and its stat is `FileNotFoundError`.
   - A file has no children: with a file `y` and a member `y/z`, `y/z` does
     not exist for `exists()`, `stat()`, `open()`, `unlink()` and `rename()`
     (`FileNotFoundError`; writing or `mkdir()` below `y` is
@@ -994,7 +1012,12 @@ chained (their text can carry credentials).
     replaces the archive atomically (temp file + `os.replace`) and keeps
     other members' metadata, the comment and any prefix bytes. A write uses
     the normalized name; a name that escapes the root fails and creates
-    nothing.
+    nothing. A new member is stored deflated; an existing member that is
+    overwritten keeps its compression method. The archive is replaced by a
+    new file, so another hard link to it keeps the old content and the
+    writing user owns the result; an archive the caller may not write
+    (`os.access(..., W_OK)`) is refused with `PermissionError`, on every
+    platform, before anything is written.
   - Removing a file never removes its directory: when `unlink()`, `rename()`
     or `rm()` takes the last member out of a directory that exists only
     through its members, the directory's own entry (`name/`) is written in

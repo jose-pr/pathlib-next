@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib as _contextlib
 import errno as _errno
 import io as _io
 import os as _os
@@ -8,13 +9,11 @@ import threading as _threading
 import typing as _ty
 import weakref as _weakref
 
-import uritools as _uritools
-
 from ....path import _check_follow
 from ....utils import as_error_handler, is_safe_child_name
 from ....utils.stat import FileStat
 from ... import Uri, UriPath
-from ...source import _SAFE_PATH, Source
+from ...source import _SAFE_PATH, Source, _encode
 from ..file import FileUri
 
 _SEP = "!/"
@@ -212,8 +211,12 @@ class _ArchiveBackend:
         "_lock",
         "_index",
         "_spellings",
+        "_prefetched",
         "__weakref__",
     )
+
+    #: What a damaged archive raises, whatever decoder noticed it.
+    _FORMAT_ERROR: "type[Exception]" = OSError
 
     def __init__(self, outer: "UriPath"):
         self.outer = outer
@@ -221,7 +224,46 @@ class _ArchiveBackend:
         self._signature = None
         self._index = None
         self._spellings = None
+        self._prefetched = None
         self._lock = _threading.RLock()
+
+    @property
+    def lock(self):
+        """Held across a lookup and the use of its result: another thread's
+        rewrite reopens the handle, and a name found before that may be gone
+        after it."""
+        return self._lock
+
+    def _offer(self, data: bytes) -> None:
+        """Hands over the bytes of a non-local outer that were read to decide
+        its format, so opening does not fetch them a second time."""
+        with self._lock:
+            if self._handle is None and self._prefetched is None:
+                self._prefetched = data
+
+    def _outer_bytes(self) -> bytes:
+        """The whole outer archive of a non-local outer."""
+        with self._lock:
+            data, self._prefetched = self._prefetched, None
+        return self.outer.read_bytes() if data is None else data
+
+    def _is_format_error(self, error: Exception) -> bool:
+        """Whether `error`, raised by the decoder, says the archive is damaged."""
+        return False
+
+    @_contextlib.contextmanager
+    def _damage_as_format_error(self):
+        """Re-raises what a decoder raises for a damaged archive as the
+        format's own error, so a caller handles one family per format.
+        Anything else (a missing member, an I/O error) passes unchanged."""
+        try:
+            yield
+        except Exception as error:
+            if isinstance(error, self._FORMAT_ERROR) or not self._is_format_error(
+                error
+            ):
+                raise
+            raise self._FORMAT_ERROR(str(error) or type(error).__name__) from error
 
     def __del__(self):
         try:
@@ -325,27 +367,62 @@ class _ArchiveBackend:
         raise NotImplementedError
 
 
-def _detect_backend_cls(outer: "UriPath") -> type:
+def _detect_backend_cls(outer: "UriPath") -> "tuple[type, bytes | None]":
     """Detect zip vs tar for `outer` (extension, then magic-byte sniff --
-    see `utils.archive._detect_format`) and return the matching backend
-    class. Lazily imports `.zip`/`.tar` (rather than at module level) to
-    avoid a circular import: both submodules import `ArchiveUri`/
-    `_ArchiveBackend` from this module, so this module can't import them
-    back at load time -- only safe once this module has finished loading,
-    which it always has by the time `_init` (the only caller) runs."""
+    see `utils.archive._detect_format`): the matching backend class and, when
+    the sniff had to read a non-local outer whole, those bytes. An error
+    reading the outer propagates. Lazily imports `.zip`/`.tar` (rather than
+    at module level) to avoid a circular import: both submodules import
+    `ArchiveUri`/`_ArchiveBackend` from this module."""
     from ....utils.archive import _detect_format
     from .tar import _TarBackend
     from .zip import _ZipBackend
 
+    local = _local_outer_path(outer) is not None
+    whole: "list[bytes]" = []
+
     def _peek() -> bytes:
-        try:
+        if local:
             with outer.open("rb") as f:
                 return f.read(4)
-        except Exception:
-            return b""
+        whole.append(outer.read_bytes())
+        return whole[0][:4]
 
     fmt = _detect_format(outer.name, _peek)
-    return _ZipBackend if fmt == "zip" else _TarBackend
+    return (_ZipBackend if fmt == "zip" else _TarBackend), (whole[0] if whole else None)
+
+
+class _UndecidedBackend:
+    """Stands in for the backend of an `archive:` path until something needs
+    it: the format is settled on first use, from the extension or, failing
+    that, from the bytes of the outer archive. Building a path, printing it
+    and joining names onto it never reach the outer. A failure to read the
+    outer propagates and decides nothing, so the next use tries again."""
+
+    __slots__ = ("outer", "_lock", "_resolved", "__weakref__")
+
+    def __init__(self, outer: "UriPath"):
+        self.outer = outer
+        self._lock = _threading.RLock()
+        self._resolved = None
+
+    def resolve(self) -> "_ArchiveBackend":
+        resolved = self._resolved
+        if resolved is None:
+            with self._lock:
+                resolved = self._resolved
+                if resolved is None:
+                    backend_cls, data = _detect_backend_cls(self.outer)
+                    if type(self.outer) is UriPath:
+                        # No class serves the outer's scheme: it must not
+                        # borrow a handle another path opened.
+                        resolved = backend_cls(self.outer)
+                    else:
+                        resolved = _get_backend(backend_cls, self.outer)
+                    if data is not None:
+                        resolved._offer(data)
+                    self._resolved = resolved
+        return resolved
 
 
 class _ArchiveWriteStream(_io.BytesIO):
@@ -399,9 +476,9 @@ class ArchiveUri(UriPath):
 
     Also registered directly as the `archive:` catch-all scheme (see
     `__SCHEMES` below): `zip:`/`tar:` (via `ZipUri`/`TarUri`, which just
-    pin `_backend_cls`) fix the format; plain `archive:` auto-detects it
-    per-instance in `_init` when `_backend_cls` is left at its `None`
-    sentinel. Write methods below are format-agnostic -- gated on
+    pin `_backend_cls`) fix the format; plain `archive:` leaves it `None`
+    and settles it on first use (`_UndecidedBackend`). Write methods below
+    are format-agnostic -- gated on
     `self.backend.writable`, which only `_ZipBackend` (and only for a
     local `file:` outer) ever reports `True` -- so a tar-backed instance,
     whether reached via `tar:` or auto-detected via `archive:`, correctly
@@ -440,9 +517,12 @@ class ArchiveUri(UriPath):
                 inner = inner.lstrip("/")
             outer = _open_outer(archive_str, self._schemes_in_use)
             # `ZipUri`/`TarUri` pin `_backend_cls`; the base `archive:`
-            # scheme leaves it `None`, meaning "detect per outer archive".
-            backend_cls = self._backend_cls or _detect_backend_cls(outer)
-            if type(outer) is UriPath:
+            # scheme leaves it `None`: its format is settled on first use
+            # (`_UndecidedBackend`), so building the path reads nothing.
+            backend_cls = self._backend_cls
+            if backend_cls is None:
+                backend = _UndecidedBackend(outer)
+            elif type(outer) is UriPath:
                 # No class serves the outer's scheme (not in `schemesmap`, or
                 # unknown): it must not borrow a handle another path opened.
                 backend = backend_cls(outer)
@@ -465,19 +545,32 @@ class ArchiveUri(UriPath):
             inst._raw_uris = [args[0]]
         return inst
 
+    @property
+    def backend(self):
+        backend = super().backend
+        if isinstance(backend, _UndecidedBackend):
+            backend = backend.resolve()
+        return backend
+
+    def _outer_path(self) -> "UriPath":
+        """The archive's own path. Never decides the format."""
+        return super().backend.outer
+
     def as_uri(self, /, sanitize=False):
         if not self.source:
             # A derived relative path (`relative_to`): no archive to name.
             return super().as_uri(sanitize=sanitize)
         # Encoded so the string parses back to the same member: the inner
         # path's `%`, `?` and `#`, and a literal "!/" inside the outer URI.
-        outer = self.backend.outer
+        outer = self._outer_path()
         outer_uri = outer.as_uri(sanitize=sanitize)
         if not isinstance(outer, ArchiveUri):
             # A nested archive's outer keeps its own separator (it already
             # encodes any other "!/"); see `_split_archive_path`.
             outer_uri = outer_uri.replace(_SEP, "%21/")
-        inner = _uritools.uriencode(self.path, _SAFE_PATH).decode()
+        # The composer's own encoding: a name that is not UTF-8 (a tar member
+        # written in another charset) keeps its bytes as `%XX`.
+        inner = _encode(self.path, _SAFE_PATH)
         # A "!/" inside a member name must never read as a separator once
         # this URI is itself the outer of a nested archive.
         inner = inner.replace(_SEP, "%21/")
@@ -554,7 +647,7 @@ class ArchiveUri(UriPath):
                     files = {}
                 is_file = files.get(ancestor)
                 if is_file is None:
-                    stat = self.backend.member_stat(index[ancestor])
+                    stat = self._member_stat(index[ancestor])
                     is_file = files[ancestor] = not stat.is_dir()
                 if is_file:
                     return True
@@ -581,25 +674,37 @@ class ArchiveUri(UriPath):
                 return None
         return marker
 
+    def _member_stat(self, raw: str) -> FileStat:
+        """The backend's stat of the entry it knows as `raw`; one that has
+        gone since the name was looked up is not found."""
+        try:
+            return self.backend.member_stat(raw)
+        except KeyError as error:
+            raise FileNotFoundError(self) from error
+
     def stat(self, *, follow_symlinks=True):
         path = self._member
         if path is None:
             raise FileNotFoundError(self)
-        # The root too: a missing or unreadable archive is not a directory
-        # that exists, and a listing of it fails the same way.
-        index = self._member_index()
-        if path == "":
-            return FileStat(is_dir=True)
-        if self._is_hidden(path, index):
+        backend = self.backend
+        # The lookup and the stat of what it found run under one hold of the
+        # lock: another thread's rewrite reopens the handle in between.
+        with backend.lock:
+            # The root too: a missing or unreadable archive is not a
+            # directory that exists, and a listing of it fails the same way.
+            index = self._member_index()
+            if path == "":
+                return FileStat(is_dir=True)
+            if self._is_hidden(path, index):
+                raise FileNotFoundError(self)
+            if path in index:
+                return self._member_stat(index[path])
+            dirmarker = f"{path}/"
+            if dirmarker in index:
+                return self._member_stat(index[dirmarker])
+            if any(n.startswith(dirmarker) for n in index):
+                return FileStat(is_dir=True)
             raise FileNotFoundError(self)
-        if path in index:
-            return self.backend.member_stat(index[path])
-        dirmarker = f"{path}/"
-        if dirmarker in index:
-            return self.backend.member_stat(index[dirmarker])
-        if any(n.startswith(dirmarker) for n in index):
-            return FileStat(is_dir=True)
-        raise FileNotFoundError(self)
 
     def _is_dir_member(self) -> bool:
         try:
