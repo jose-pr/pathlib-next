@@ -252,8 +252,14 @@ The `<archive-uri>` is any absolute URI with an explicit scheme, so
   memory.
 - **`tar:`** (also `.tar.gz`/`.tar.bz2`/`.tar.xz`) is read-only.
 - **`archive:`** detects the format from the outer name, then from the file's
-  magic bytes; `archive+zip:`/`archive+tar:` pin it. All spellings of one
-  archive share one open handle.
+  magic bytes, on first use (building or printing a path reads nothing);
+  `archive+zip:`/`archive+tar:` pin it. All spellings of one archive share one
+  open handle. A remote outer is read once and kept while a path to it lives;
+  `path.refresh()` makes the next use read it again.
+- **Cost.** Listing and `stat()` are served from a table built once per open
+  archive. A member is read into memory up to 16 MiB and into a temporary file
+  beyond that. A zip change copies the members it does not touch without
+  decompressing them. A new zip member is stored deflated.
 - An archive inside an archive is addressed by nesting
   (`zip:zip:file:///outer.zip!/inner.zip!/x.txt`) and is read-only; a `!/`
   inside a member name is written `%21/`.

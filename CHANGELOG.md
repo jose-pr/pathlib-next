@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `PermissionError`, `EACCES`) and a host key that is unknown, changed or
   refused the second (a `ConnectionError`, `ECONNABORTED`), on both SFTP
   backends. Catch `OSError`, or these two to tell a login from a host key.
+- **`ArchiveUri.refresh()`.** A remote archive (`zip:http://...!/m`) is read once
+  and kept while any path to it lives, so a change at its source was never seen
+  by a program that held a path. `path.refresh()` forgets what is held of the
+  archive, for every path to it, and the next use reads it again. A local
+  archive is checked against its file on every use and needs none.
 
 ### Changed
 - **`from pathlib_next import *` publishes only the documented names.** It also
@@ -733,6 +738,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   supported by this server")` without the reply. It is still
   `NotImplementedError` (so `copy()` skips it), now with the server's reply in
   the message and as `__cause__`.
+- **Walking, listing and `stat()` of an archive no longer scan every name for
+  each directory.** `iterdir()` of a directory compared every member name of the
+  archive against the directory's prefix and then `stat()`-ed each child with a
+  second validation of the file, so a `walk()` grew with directories times
+  members. The members, their directories (those that exist only through their members
+  too) and each entry's stat data are derived once per open handle; a listing
+  costs one validation of the file and work in the size of the directory, and
+  the children `iterdir()` returns answer their first `stat()` from it.
+- **Reading a member of an archive holds a bounded amount of memory.** A local
+  `tar:` was read whole into memory and kept for the life of the handle, and a
+  member read built the whole member in memory at about twice its size (a zip
+  member that declares 512 MiB peaked at over 1 GiB). A local tar is now read
+  from its file as members are reached, and a member larger than
+  `schemes.archive._base.MEMBER_SPOOL_BYTES` (16 MiB) is copied to an unnamed
+  temporary file instead of memory, so reading it costs disk in the size the
+  archive declares. A non-local archive is still read whole into memory. Code
+  that read a member through `open("rb")` is unchanged: the stream is still
+  seekable and independent of the archive.
+- **A zip change copies the entries it does not change as they lie in the
+  archive.** `unlink()`, `rmdir()`, `rename()`, `rm(recursive=True)` and an
+  overwrite decompressed and compressed every member of the archive again, so
+  their cost was the archive's uncompressed size, and one encrypted member (or
+  one stored with a compression method `zipfile` lacks) made every such change
+  to the archive fail with `RuntimeError` or `NotImplementedError`. Untouched
+  entries are copied without being decompressed, a renamed entry gets a new
+  local header and its data is copied, and a member with a non-ASCII name that
+  the archive stores without the UTF-8 flag gets the flag, as before.
+- **`stat()` of a tar hard link reports the size of its target however the
+  target is spelled.** A link to `d//real.txt` or `d/./real.txt` reported
+  size 0 while reading it returned the data; tar and zip now use the one name
+  rule.
+- **`archive+zip:` and `archive+tar:` are second names of `zip:` and `tar:`.**
+  Both schemes, both class names (`ArchiveZipUri`, `ArchiveTarUri`, now aliases
+  of `ZipUri` and `TarUri`) and the printed and pickled form of a path (it keeps
+  the scheme it was written with) are unchanged. `type(path)` of an
+  `archive+zip:` path is `ZipUri`, so `repr()` shows that name, and
+  `isinstance(path, ArchiveZipUri)` is also true for a `zip:` path.
 
 ## [0.9.12] - 2026-10-08
 
