@@ -18,11 +18,13 @@ from .http import (
     _UploadStream,
     _path_error,
     _response_reader,
+    _server_size,
     _split_userinfo,
     _translate_http_errors,
 )
 
 _NS = {"D": "DAV:"}
+_MULTISTATUS = "{DAV:}multistatus"
 
 _PROPFIND_BODY = b"""<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">
@@ -64,13 +66,23 @@ def _parse_response(elem) -> "tuple[str, bool, int, str]":
         resourcetype is not None and resourcetype.find("D:collection", _NS) is not None
     )
     size_elem = _find_prop(props, "D:getcontentlength")
-    size_text = size_elem.text if size_elem is not None else None
-    size = int(size_text) if size_text else 0
+    # A missing, non-numeric or negative length is no size.
+    size = _server_size(size_elem.text if size_elem is not None else None) or 0
     lm_elem = _find_prop(props, "D:getlastmodified")
     lm = lm_elem.text if lm_elem is not None else None
     # Still percent-encoded: decoding before `urlsplit()` would read a
     # literal "#" or "?" in a name as URL syntax.
     return href, is_dir, size, lm
+
+
+def _decoded_segments(path: str) -> "list[str]":
+    """The decoded segments of a percent-encoded URL path, a trailing slash
+    ignored. A segment that was `%2F` stays one segment. Undecodable bytes
+    are kept (`surrogateescape`) as the URI layer keeps them."""
+    return [
+        _urlparse.unquote(segment, errors="surrogateescape")
+        for segment in path.rstrip("/").split("/")
+    ]
 
 
 def _status_code(text: "str | None") -> "int | None":
@@ -203,18 +215,27 @@ class DavPath(HttpPath):
         return resp
 
     def _propfind(self, depth="0"):
+        return self._propfind_reply(depth)[0]
+
+    def _propfind_reply(self, depth: str) -> "tuple[_ET.Element, str]":
+        """The `<D:multistatus>` element of a PROPFIND reply, and the URL
+        that answered it (not this path's own after a redirect)."""
         resp = self._dav_request(
             "PROPFIND",
             headers={"Depth": depth, "Content-Type": "application/xml"},
             data=_PROPFIND_BODY,
         )
         try:
-            return _ET.fromstring(resp.content)
+            root = _ET.fromstring(resp.content)
         except _ET.ParseError:
-            # A non-WebDAV endpoint or proxy answering 200 with HTML: an
-            # I/O error, so `exists()`/`is_dir()` report False instead of
-            # leaking a SyntaxError subclass.
-            raise OSError(_errno.EIO, f"Invalid PROPFIND response for {self}") from None
+            root = None
+        if root is None or root.tag != _MULTISTATUS:
+            # A non-WebDAV endpoint or proxy answering 200 with HTML or some
+            # other XML: an I/O error, so `exists()`/`is_dir()` report False
+            # instead of leaking a SyntaxError subclass, and a login page is
+            # not an empty directory.
+            raise OSError(_errno.EIO, f"Invalid PROPFIND response for {self}")
+        return root, getattr(resp, "url", None) or self._wire_uri()
 
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
@@ -230,27 +251,54 @@ class DavPath(HttpPath):
     def _scandir(self):
         # One PROPFIND (Depth: 1) already carries type/size/mtime for every
         # child -- reuse it instead of `iterdir()` + a stat per child.
-        root = self._propfind(depth="1")
-        # Both sides compared decoded: the wire path is percent-encoded, so
-        # a directory named "my dir" otherwise listed itself as a child.
-        self_path = _urlparse.unquote(_urlparse.urlsplit(self._wire_uri()).path).rstrip(
-            "/"
-        )
+        root, answered = self._propfind_reply("1")
+        collection = _urlparse.urlsplit(answered)
+        # Compared segment by segment, decoded: the wire path is
+        # percent-encoded, so a directory named "my dir" otherwise listed
+        # itself as a child.
+        here = _decoded_segments(collection.path)
+        host = (collection.hostname or "").lower()
+        base = collection._replace(
+            path=collection.path.rstrip("/") + "/", query="", fragment=""
+        ).geturl()
+        selves = []
+        members = []
+        replies = 0
         for elem in root.findall("D:response", _NS):
+            replies += 1
             href, is_dir, size, lm = _parse_response(elem)
-            # Split first, decode after: a literal "#"/"?" in a name arrives
-            # encoded and must stay part of the name.
-            href_path = _urlparse.unquote(_urlparse.urlsplit(href).path).rstrip("/")
-            if not href_path or href_path == self_path:
-                # The "." entry describing self, per RFC 4918. A Depth:1
-                # PROPFIND on a non-collection answers with only this entry,
-                # which read as an empty directory.
-                if not is_dir:
-                    raise NotADirectoryError(
-                        _errno.ENOTDIR, _os.strerror(_errno.ENOTDIR), str(self)
-                    )
+            if not href.strip():
                 continue
-            name = href_path.rsplit("/", 1)[-1]
+            try:
+                # Split first, decode after: a literal "#"/"?" in a name
+                # arrives encoded and must stay part of the name. Resolved
+                # against the collection, as RFC 4918 8.3 reads a reference.
+                where = _urlparse.urlsplit(_urlparse.urljoin(base, href.strip()))
+            except ValueError:
+                continue
+            if (where.hostname or "").lower() != host:
+                continue
+            segments = _decoded_segments(where.path)
+            if segments == here:
+                selves.append(is_dir)
+            elif segments[:-1] == here:
+                # A direct member only: a deeper one (a server that ignores
+                # the Depth) or one elsewhere is not listed here.
+                members.append((segments[-1], is_dir, size, lm))
+        if replies and not (selves or members):
+            raise OSError(
+                _errno.EIO,
+                f"The PROPFIND reply for {self} names neither the collection "
+                "nor any member of it",
+            )
+        if selves and not any(selves):
+            # The "." entry describing self, per RFC 4918. A Depth:1
+            # PROPFIND on a non-collection answers with only this entry,
+            # which read as an empty directory.
+            raise NotADirectoryError(
+                _errno.ENOTDIR, _os.strerror(_errno.ENOTDIR), str(self)
+            )
+        for name, is_dir, size, lm in members:
             # The href is untrusted: an entry such as `%2E%2E/` decodes to
             # "..", which let a recursive copy write outside its destination.
             if _utils.is_safe_child_name(name):

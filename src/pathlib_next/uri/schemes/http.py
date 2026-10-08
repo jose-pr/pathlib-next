@@ -26,6 +26,12 @@ request unless the caller supplies `timeout` (via `with_session(...,
 timeout=...)` / `requests_args`, or per request); `timeout=None` there
 restores requests' unbounded wait."""
 
+MAX_LISTING_BYTES = 8 * 1024 * 1024
+"""Most bytes of a directory-index body `HttpPath` reads to list a directory
+(after any content decoding); a longer body raises `OSError(EFBIG)`. Raise it
+for an index that is legitimately larger; parsing costs about a second per
+megabyte. Read at the time of each listing."""
+
 _RE_URL_SCHEME = _re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 
 _IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
@@ -71,6 +77,15 @@ def _path_error(error_cls, path_obj) -> OSError:
     filename)` -- so `e.errno` and `e.filename` are set."""
     code = _ERRNOS.get(error_cls, _errno.EIO)
     return error_cls(code, _os.strerror(code), str(path_obj))
+
+
+def _server_size(text: "str | None") -> "int | None":
+    """A byte count a server stated (`Content-Length`, `getcontentlength`) as
+    an int, or `None` when it is not a plain non-negative decimal number."""
+    text = (text or "").strip()
+    if text.isascii() and text.isdigit() and len(text) <= 19:
+        return int(text)
+    return None
 
 
 @_contextlib.contextmanager
@@ -168,8 +183,13 @@ def _human2bytes(s):
 def _aherf2filename(a_href):
     isdir = "/" if a_href.endswith("/") else ""
     path = _urlparse.urlsplit(a_href).path
-    return _urlparse.unquote(path.rstrip("/")).rsplit("/", 1)[-1] + isdir
+    # The URI layer's handler: a name that is not UTF-8 (`caf%E9`) keeps its
+    # bytes, so the child's request names the file the server listed.
+    name = _urlparse.unquote(path.rstrip("/"), errors="surrogateescape")
+    return name.rsplit("/", 1)[-1] + isdir
 
+
+_CHUNK = 64 * 1024
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -712,9 +732,16 @@ class HttpAppendStream(_UploadStream):
                 resp.raise_for_status()
 
 
-_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PROPFIND"})
-"""Methods whose redirects `requests` follows. Every other method changes
-state, and a redirect must not turn it into a different request."""
+_FOLLOWED_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+"""Methods whose redirects `requests` follows. Every other method is sent by
+`_send_without_redirects`: `requests` would turn a state-changing one into
+a different request, and a PROPFIND into a GET or one without its body."""
+
+_RESENT_STATUSES = {"PROPFIND": (301, 302, 303, 307, 308)}
+"""The redirect statuses after which a method is sent again, same method and
+body, to a Location on the same scheme, host and port. PROPFIND only reads,
+so it is repeated for every redirect; any other method only for 307 and 308,
+which are defined to keep the method and the body."""
 
 
 def _redirect_location(url: str, resp) -> "str | None":
@@ -732,6 +759,23 @@ def _redirect_location(url: str, resp) -> "str | None":
         return _split_userinfo(_urlparse.urljoin(url, location))[0]
     except ValueError:
         return None
+
+
+def _redirect_target(uri: "HttpPath|str", resp) -> "HttpPath|str":
+    """The URL for `HttpBackend.request` that the redirect `resp`, the answer
+    to `uri`, leads to. Within the same scheme, host and port it keeps the
+    userinfo of `uri` (the credentials continue, as `requests` continues them
+    through a followed redirect); `uri` itself when there is no usable
+    `Location`."""
+    full = uri if isinstance(uri, str) else uri.as_uri(False)
+    url = _split_userinfo(full)[0]
+    location = _redirect_location(url, resp)
+    if location is None:
+        return uri
+    target = _urlparse.urlsplit(location)
+    if _origin(target) == _origin(_urlparse.urlsplit(url)):
+        target = target._replace(netloc=_urlparse.urlsplit(full).netloc)
+    return target.geturl()
 
 
 def _refused_redirect(method, url, resp, location, reason) -> OSError:
@@ -754,19 +798,25 @@ def _can_resend_body(args: dict) -> bool:
 
 
 def _send_without_redirects(session, method: str, url: str, args: dict):
-    """Send a state-changing request. `requests` follows a redirect as a
-    browser does: a 301 re-sends a PUT without its body, a 302 or 303 turns
-    it into a GET, and the final 2xx then reads as the write succeeding. So
-    nothing is followed by `requests` here: a 307 or 308 to the same scheme,
-    host and port is sent once more with the same method and body, and any
-    other 3xx raises `OSError(EIO)` naming the status and the `Location`."""
+    """Send a request that `requests` must not redirect. It follows a
+    redirect as a browser does: a 301 re-sends a PUT without its body, a 302
+    or 303 turns it into a GET, and the final 2xx then reads as the write
+    succeeding. So nothing is followed by `requests` here: a redirect with a
+    status in `_RESENT_STATUSES` to the same scheme, host and port is sent
+    once more with the same method and body, and any other 3xx raises
+    `OSError(EIO)` naming the status and the `Location`."""
     args = {**args, "allow_redirects": False}
     resp = session.request(method=method, url=url, **args)
     if not 300 <= resp.status_code < 400:
         return resp
     location = _redirect_location(url, resp)
-    if resp.status_code not in (307, 308):
-        reason = "only 307 and 308 send the request again"
+    resent = _RESENT_STATUSES.get(method.upper(), (307, 308))
+    if resp.status_code not in resent:
+        reason = (
+            "only "
+            + ", ".join(map(str, resent[:-1]))
+            + f" and {resent[-1]} send the request again"
+        )
     elif location is None:
         reason = "no usable Location"
     elif _origin(_urlparse.urlsplit(location)) != _origin(_urlparse.urlsplit(url)):
@@ -794,13 +844,13 @@ class HttpBackend(_ty.NamedTuple):
     password)` -- unless `requests_args`/the call pass their own `auth`
     or the session has `session.auth` set, which win as they did before.
 
-    Redirects: `GET`, `HEAD`, `OPTIONS` and `PROPFIND` follow them as
-    `requests` does. Any other method (`PUT`, `PATCH`, `DELETE`, `MKCOL`,
-    `MOVE`, a `write_method` such as `POST`) is sent with
-    `allow_redirects=False`, whatever `requests_args` or the call say: a 307
-    or 308 to the same scheme, host and port is sent once more with the same
-    method and body, and any other 3xx, a redirect to another origin or a
-    second redirect raises `OSError(EIO)`."""
+    Redirects: `GET`, `HEAD` and `OPTIONS` follow them as `requests` does.
+    Any other method (`PROPFIND`, `PUT`, `PATCH`, `DELETE`, `MKCOL`, `MOVE`,
+    a `write_method` such as `POST`) is sent with `allow_redirects=False`,
+    whatever `requests_args` or the call say: a 307 or 308 (for `PROPFIND`
+    also a 301, 302 or 303) to the same scheme, host and port is sent once
+    more with the same method and body, and any other 3xx, a redirect to
+    another origin or a second redirect raises `OSError(EIO)`."""
 
     session: _req.Session
     requests_args: dict
@@ -823,7 +873,7 @@ class HttpBackend(_ty.NamedTuple):
             and not getattr(self.session, "auth", None)
         ):
             args["auth"] = auth
-        if method.upper() in _READ_METHODS:
+        if method.upper() in _FOLLOWED_METHODS:
             return self.session.request(method=method, url=url, **args)
         return _send_without_redirects(self.session, method, url, args)
 
@@ -853,16 +903,17 @@ class HttpPath(UriPath):
         return _DerivedHttpBackend(_req.Session(), {})
 
     def _listdir(self) -> list[_FileEntry]:
-        # requests follows GET redirects by default, so a redirecting
-        # server (e.g. Apache/nginx 301-ing "/sub" -> "/sub/") already
-        # works with a single request. This retry only helps a
-        # non-redirecting server/proxy that 404s the slash-less path.
+        # The slash form first: a server redirects a directory's slash-less
+        # URL to it, which costs a round trip per listing. One that answers
+        # 404 for it (a file, or a server that serves the bare path only) is
+        # asked again for the path as given.
+        slashed = self if self.path.endswith("/") else self.with_path(self.path + "/")
         try:
-            req = self._get_listing(self)
+            req = self._get_listing(slashed)
         except FileNotFoundError:
-            if self.path.endswith("/"):
+            if slashed is self:
                 raise
-            req = self._get_listing(self.with_path(self.path + "/"))
+            req = self._get_listing(self)
         try:
             content_type = req.headers.get("Content-Type") or ""
             mime = content_type.split(";", 1)[0].strip().lower()
@@ -870,7 +921,7 @@ class HttpPath(UriPath):
                 # A file: pathlib's iterdir() raises, and its body -- maybe
                 # gigabytes -- is never downloaded to look for links.
                 raise _path_error(NotADirectoryError, self)
-            text = req.text
+            text = self._read_listing(req)
         finally:
             req.close()
         # Scoped by the URL actually answered (after redirects), not by the
@@ -879,6 +930,34 @@ class HttpPath(UriPath):
         parser.feed(text)
         parser.close()
         return parser.listing
+
+    def _read_listing(self, req: _req.Response) -> str:
+        """The body of the directory index `req` as text, read the way
+        `open()` reads a file: a cut-short, stalled or undecodable body
+        raises `TimeoutError`/`OSError` naming the path, and one longer than
+        `MAX_LISTING_BYTES` raises `OSError(EFBIG)`."""
+        limit = MAX_LISTING_BYTES
+        too_large = OSError(
+            _errno.EFBIG,
+            f"Directory index of {self} is larger than {limit} bytes "
+            "(MAX_LISTING_BYTES)",
+        )
+        stated = _server_size(req.headers.get("Content-Length"))
+        if stated is not None and stated > limit:
+            raise too_large
+        reader = _ResponseReader(self, req, _CHUNK)
+        chunks = []
+        size = 0
+        while chunk := reader.read(_CHUNK):
+            size += len(chunk)
+            if size > limit:
+                raise too_large
+            chunks.append(chunk)
+        body = b"".join(chunks)
+        try:
+            return body.decode(req.encoding or "utf-8", "replace")
+        except LookupError:
+            return body.decode("utf-8", "replace")
 
     def _get_listing(self, uri) -> _req.Response:
         with _translate_http_errors(self):
@@ -931,11 +1010,9 @@ class HttpPath(UriPath):
         # Judged on the FINAL response, after redirects: a redirect itself
         # is no directory signal (http->https, CDN and "latest" download
         # links all redirect to files).
-        return (
-            resp.url.endswith("/")
-            or resp.url.endswith("/..")
-            or resp.url.endswith("/.")
-        )
+        # The path of that URL: a query or fragment does not make a
+        # directory a file.
+        return _urlparse.urlsplit(resp.url).path.endswith(("/", "/..", "/."))
 
     def stat(self, *, follow_symlinks=True, walk_up_last_modified=False):
         hint = self._pop_stat_hint()
@@ -975,7 +1052,9 @@ class HttpPath(UriPath):
                     break
 
             if resp.is_redirect:
-                resp = self.backend.request("HEAD", uri, headers=_IDENTITY_ENCODING)
+                # Where the first answer pointed, not the same request again.
+                target = _redirect_target(uri, resp)
+                resp = self.backend.request("HEAD", target, headers=_IDENTITY_ENCODING)
                 resp.close()
                 if resp.status_code == 405:
                     # Mirror the pre-redirect loop's HEAD-405 fallback --
@@ -983,14 +1062,16 @@ class HttpPath(UriPath):
                     # everywhere (not just pre-redirect) surfaced
                     # PermissionError for an existing, redirect-only path.
                     resp = self.backend.request(
-                        "GET", uri, stream=True, headers=_IDENTITY_ENCODING
+                        "GET", target, stream=True, headers=_IDENTITY_ENCODING
                     )
                     resp.close()
             resp.raise_for_status()
             # From the final URL, once any redirect has been followed.
             is_dir = self._is_dir(resp)
 
-        st_size = 0 if is_dir else int(resp.headers.get("Content-Length", 0))
+        # A missing, non-numeric or negative Content-Length is no size.
+        stated = None if is_dir else _server_size(resp.headers.get("Content-Length"))
+        st_size = stated or 0
         lm = resp.headers.get("Last-Modified")
         if lm is None and walk_up_last_modified:
             parent = self.parent
@@ -1007,7 +1088,7 @@ class HttpPath(UriPath):
                 except (StopIteration, OSError):
                     pass
 
-        size_stated = is_dir or "Content-Length" in resp.headers
+        size_stated = is_dir or stated is not None
         stat = FileStat(st_size=st_size, st_mtime=_utils.parsedate(lm), is_dir=is_dir)
         return stat, size_stated
 

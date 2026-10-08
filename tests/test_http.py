@@ -3,6 +3,8 @@ http_server fixture) serving fixture_tree's directory listing. Skipped
 entirely if the http extra isn't installed.
 """
 
+import io
+
 import pytest
 
 pytest.importorskip("requests")
@@ -314,6 +316,12 @@ class _MockHttpResponse:
         self.url = url or "http://example.com/file.txt"
         self.is_redirect = status_code in (301, 302, 303, 307, 308)
         self.reason = "OK" if status_code < 400 else "Not Found"
+        self.encoding = "utf-8"
+        self.raw = io.BytesIO(self.content)
+
+    def iter_content(self, chunk_size=1):
+        while chunk := self.raw.read(chunk_size):
+            yield chunk
 
     def raise_for_status(self):
         if self.status_code >= 400:
