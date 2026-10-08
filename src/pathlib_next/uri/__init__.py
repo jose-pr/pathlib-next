@@ -4,6 +4,7 @@ import os
 import pathlib as _pathlib
 import re as _re
 import posixpath as _posix
+import threading as _threading
 import typing as _ty
 import weakref as _weakref
 
@@ -86,6 +87,23 @@ class _DerivedBackend:
     cannot be recorded in `_DERIVED_BACKENDS` (a tuple, say)."""
 
     __slots__ = ()
+
+
+class _BackendCell:
+    """The slot that paths derived from one another on one endpoint share for
+    the backend they derive for themselves. It starts empty, so deriving a
+    path builds nothing; the first of them to need a backend fills it and the
+    rest read it. `lock` makes two threads that ask at once build one."""
+
+    __slots__ = ("backend", "lock")
+
+    def __init__(self):
+        self.backend = None
+        self.lock = _threading.RLock()
+
+
+#: Makes "create the cell of a path unless it has one" atomic.
+_CELL_LOCK = _threading.Lock()
 
 
 _U = _ty.TypeVar("_U", bound="Uri")
@@ -1087,14 +1105,17 @@ class UriPath(Uri, Path):
 
     #: `_backend` is the backend object, or None until one is built or
     #: inherited; `_backend_derived` says the path built it (or inherited one
-    #: that was); `_backend_candidates` holds the join segments' backends
-    #: until the path knows its own endpoint; `_schemes_in_use` is the
-    #: `schemesmap=` the path was constructed with, which every path and
-    #: destination it makes is dispatched with.
+    #: that was); `_backend_candidates` holds the join segments (with their
+    #: backends) until the path knows its own endpoint; `_derived_cell` is the
+    #: `_BackendCell` shared by the paths derived from one another on one
+    #: endpoint, None for a path that was not derived or holds a backend;
+    #: `_schemes_in_use` is the `schemesmap=` the path was constructed with,
+    #: which every path and destination it makes is dispatched with.
     __slots__ = (
         "_backend",
         "_backend_derived",
         "_backend_candidates",
+        "_derived_cell",
         "_stat_hint",
         "_schemes_in_use",
     )
@@ -1235,18 +1256,15 @@ class UriPath(Uri, Path):
                 # Which of these a path inherits depends on the endpoint it
                 # ends up with, known once it is parsed (`_inherit_backend`).
                 for segment in args:
-                    if isinstance(segment, cls) and (
-                        segment._backend is not None
-                        or segment._backend_candidates is not None
-                    ):
-                        # Parsing the segment settles its own inheritance.
-                        origin = segment.source
-                        if segment._backend is not None:
-                            if inst._backend_candidates is None:
-                                inst._backend_candidates = []
-                            inst._backend_candidates.append(
-                                (origin, segment._backend, segment._backend_derived)
-                            )
+                    if isinstance(segment, cls):
+                        if segment._backend_candidates is not None:
+                            # Parsing the segment settles its own inheritance.
+                            segment._load_parts()
+                        if inst._backend_candidates is None:
+                            inst._backend_candidates = []
+                        inst._backend_candidates.append(
+                            (segment, segment._backend, segment._backend_derived)
+                        )
         return inst
 
     def _initbackend(self):
@@ -1254,17 +1272,54 @@ class UriPath(Uri, Path):
 
     def _inherit_backend(self, source: Source) -> None:
         """Settle which join segment's backend this path takes now that its
-        endpoint is `source`: the rightmost one that belongs to that same
-        endpoint (scheme, userinfo, host, port), else none. A backend never
-        crosses to another endpoint, so credentials and sessions stay put."""
+        endpoint is `source`: the rightmost one that holds a backend and
+        belongs to that same endpoint (scheme, userinfo, host, port), else
+        none. A backend never crosses to another endpoint, so credentials and
+        sessions stay put. With none, the path joins the family of the
+        rightmost segment on its endpoint (`_family_for()`)."""
         candidates = self._backend_candidates
         if candidates is None:
             return
-        for origin, backend, derived in reversed(candidates):
-            if _same_authority(origin, source):
+        family = None
+        for segment, backend, derived in reversed(candidates):
+            if not _same_authority(segment.source, source):
+                continue
+            if backend is not None:
                 self._backend, self._backend_derived = backend, derived
+                family = None
                 break
+            if family is None and source:
+                family = segment._family()
+        if family is not None:
+            self._derived_cell = family
         self._backend_candidates = None
+
+    def _family(self) -> _BackendCell:
+        """The cell this path and the paths derived from it share, made when
+        it is first asked for."""
+        cell = self._derived_cell
+        if cell is None:
+            with _CELL_LOCK:
+                cell = self._derived_cell
+                if cell is None:
+                    cell = self._derived_cell = _BackendCell()
+                    if self._backend is not None and self._backend_derived:
+                        # Already built on its own: the family reads that one.
+                        cell.backend = self._backend
+        return cell
+
+    def _family_for(self, source: Source) -> "_BackendCell | None":
+        """The cell a path at `source` shares with this one: this path's own
+        when `source` is its endpoint, else none. Never builds a backend, and
+        a path that holds one hands that on instead (`_backend_for()`)."""
+        if not self._initiated:
+            self._load_parts()
+        if self._backend is not None:
+            return None
+        mine = self._source
+        if mine and (source is mine or _same_authority(source, mine)):
+            return self._family()
+        return None
 
     def _backend_for(self, source: Source):
         """`(backend, derived)` a path at `source` inherits from this one:
@@ -1287,6 +1342,8 @@ class UriPath(Uri, Path):
         ):
             # Given, or nothing to carry: the usual case before any I/O.
             inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
+            if "backend" not in kwargs:
+                inst._derived_cell = self._family_for(source)
         else:
             backend, derived = self._backend_for(source)
             if backend is not None:
@@ -1294,6 +1351,8 @@ class UriPath(Uri, Path):
             inst = super()._from_parsed_parts(source, path, query, fragment, **kwargs)
             if backend is not None and inst._backend is backend:
                 inst._backend_derived = derived
+            elif backend is None:
+                inst._derived_cell = self._family_for(source)
         inst._schemes_in_use = self._schemes_in_use
         return inst
 
@@ -1321,13 +1380,28 @@ class UriPath(Uri, Path):
             self._load_parts()
         backend = self._backend
         if backend is None:
-            backend = self._backend = self._initbackend()
+            cell = self._derived_cell
+            built = False
+            if cell is None:
+                backend = self._initbackend()
+                built = backend is not None
+            else:
+                # The family builds one, whichever of them asks first.
+                with cell.lock:
+                    backend = cell.backend
+                    if backend is None:
+                        backend = self._initbackend()
+                        if backend is not None:
+                            cell.backend = backend
+                            built = True
             if backend is not None:
+                self._backend = backend
                 self._backend_derived = True
-                try:
-                    _DERIVED_BACKENDS[id(backend)] = backend
-                except TypeError:
-                    pass
+                if built:
+                    try:
+                        _DERIVED_BACKENDS[id(backend)] = backend
+                    except TypeError:
+                        pass
         return backend
 
     def _supplied_backend(self):
@@ -1380,6 +1454,8 @@ class UriPath(Uri, Path):
             backend, derived = self._backend_for(destination.source)
             if backend is not None:
                 destination._backend, destination._backend_derived = backend, derived
+            else:
+                destination._derived_cell = self._family_for(destination.source)
             return destination
         # `/` joins a decoded path on this endpoint and carries the backend.
         return self.parent / target
@@ -1446,6 +1522,8 @@ class UriPath(Uri, Path):
             backend, derived = self._backend_for(source)
             if backend is not None:
                 inst._backend, inst._backend_derived = backend, derived
+            else:
+                inst._derived_cell = self._family_for(source)
         inst._schemes_in_use = self._schemes_in_use
         inst._init(source, self.path, self.query, self.fragment)
         return inst
