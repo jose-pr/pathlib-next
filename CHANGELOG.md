@@ -179,6 +179,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   documented to return an `int`. The console script's exit status is the same;
   a program that called `main()` and caught `SystemExit` reads the returned
   status instead.
+- **The SSH library's message for a failed SFTP handshake is logged at DEBUG.**
+  A handshake or session failure that is neither a refused login nor a host key
+  is a `ConnectionAbortedError` whose text names only the library's exception
+  class (`SFTP connection failed (KeyExchangeFailed)`), so the reason was lost.
+  The library's message is now logged on the logger `pathlib_next.sftp` at
+  DEBUG, on both backends; the exception is unchanged. The record can hold what
+  the library put in its message, including a credential, so enable that logger
+  for troubleshooting only.
 
 ### Fixed
 - **`copy()` makes two `stat()` calls per file, not three to five.** The source's

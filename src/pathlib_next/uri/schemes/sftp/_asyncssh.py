@@ -242,7 +242,7 @@ def _transport_error(
         return _errors.lost()
     if isinstance(error, (_asyncssh.DisconnectError, _asyncssh.ChannelOpenError)):
         return _errors.aborted(error)
-    return OSError(_errno.EIO, f"SFTP request failed ({type(error).__name__})")
+    return _errors.request_failed(error)
 
 
 def _library_error(

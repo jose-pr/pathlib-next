@@ -821,6 +821,12 @@ chained (their text can carry credentials).
     connection is `ConnectionRefusedError`; a timeout is `TimeoutError` (a
     banner that never arrives is reported as `ConnectionAbortedError` by
     paramiko). Both exception classes import from `pathlib_next.uri.schemes.sftp`.
+    The SSH library's own message for a `ConnectionAbortedError` (and for the
+    rare request failure reported as `OSError(EIO)`) is logged at DEBUG on the
+    logger `pathlib_next.sftp`, as `SFTP connection failed: <ExceptionClass>:
+    <message>`; the exception carries only the class name. A DEBUG record can
+    hold what the SSH library put in its message, so enable that logger for
+    troubleshooting and keep it out of shared logs.
   - A name the server sends that is not UTF-8 is the string of its bytes as lone
     surrogates (pathlib's spelling on POSIX), on both backends: it lists beside
     its siblings, and `stat()`, `open()`, `unlink()`, `rm()` and `copy()` send

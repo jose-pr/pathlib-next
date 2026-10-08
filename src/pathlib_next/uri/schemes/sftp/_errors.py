@@ -4,16 +4,28 @@ key, as the `OSError` subclasses `SftpPath` raises instead.
 Neither SSH library is imported here: each backend decides which of its own
 exceptions is which and builds the result with these functions, so a failure
 reads the same on both. The library exception is never chained: its text can
-carry credentials.
+carry credentials. The text of the library exceptions that `aborted()` and
+`request_failed()` reduce to a class name is logged at DEBUG on the logger
+`pathlib_next.sftp`.
 """
 
 from __future__ import annotations
 
 import errno as _errno
+import logging as _logging
 import typing as _ty
 
 if _ty.TYPE_CHECKING:
     from ... import Source
+
+
+_logger = _logging.getLogger("pathlib_next.sftp")
+
+
+def _log_library_error(what: str, library_error: BaseException) -> None:
+    # A DEBUG record, not part of the exception: the library's text can carry
+    # credentials, and only a handler the program installed ever sees it.
+    _logger.debug("%s: %s: %s", what, type(library_error).__name__, library_error)
 
 
 class SftpAuthenticationError(PermissionError):
@@ -70,11 +82,20 @@ def lost() -> ConnectionResetError:
 
 def aborted(library_error: BaseException) -> ConnectionAbortedError:
     """The SSH handshake or session failed for a reason other than a login or
-    a host key; only the name of the library's exception is carried over."""
+    a host key; only the name of the library's exception is carried over, and
+    its text is logged at DEBUG."""
+    _log_library_error("SFTP connection failed", library_error)
     return ConnectionAbortedError(
         _errno.ECONNABORTED,
         f"SFTP connection failed ({type(library_error).__name__})",
     )
+
+
+def request_failed(library_error: BaseException) -> OSError:
+    """A failure of the SSH library that is neither the connection, the login
+    nor the host key; like `aborted()`, only the exception's name is carried."""
+    _log_library_error("SFTP request failed", library_error)
+    return OSError(_errno.EIO, f"SFTP request failed ({type(library_error).__name__})")
 
 
 def login_refused(source: "Source | None" = None) -> SftpAuthenticationError:

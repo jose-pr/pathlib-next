@@ -9,7 +9,10 @@ the developer's is read.
 """
 
 import errno
+import logging
 import pathlib
+import socket
+import threading
 
 import pytest
 
@@ -247,6 +250,79 @@ def test_an_unknown_host_key_is_a_host_key_error(
 
     with pytest.raises(sftp_pkg.SftpHostKeyError):
         SftpPath(server.url("a"), backend=backend).stat()
+
+
+@pytest.fixture
+def old_protocol_port():
+    """The port of a loopback server that greets with SSH protocol version 1.5
+    and then waits: both clients refuse it on their own, so the handshake
+    fails for a reason that is neither the login nor the host key."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.1)
+    accepted, done = [], threading.Event()
+
+    def serve():
+        while not done.is_set():
+            try:
+                connection, _address = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            accepted.append(connection)
+            try:
+                connection.sendall(b"SSH-1.5-old\r\n")
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    yield listener.getsockname()[1]
+    done.set()
+    thread.join(10)
+    listener.close()
+    for connection in accepted:
+        connection.close()
+
+
+_LIBRARY_ERROR = {"paramiko": "IncompatiblePeer", "asyncssh": "ProtocolNotSupported"}
+
+
+def test_a_failed_handshake_logs_the_library_error_at_debug(
+    old_protocol_port, kind, backends, caplog
+):
+    backend = make_backend(kind, backends)
+    path = SftpPath(f"sftp://x:x@127.0.0.1:{old_protocol_port}/a", backend=backend)
+
+    with caplog.at_level(logging.DEBUG, logger="pathlib_next.sftp"):
+        with pytest.raises(ConnectionAbortedError) as raised:
+            path.stat()
+
+    name = _LIBRARY_ERROR[kind]
+    error = raised.value
+    assert error.errno == errno.ECONNABORTED
+    assert str(error) == f"[Errno {errno.ECONNABORTED}] SFTP connection failed ({name})"
+    assert unchained(error)
+    records = [r for r in caplog.records if r.name == "pathlib_next.sftp"]
+    assert [r.levelno for r in records] == [logging.DEBUG]
+    message = records[0].getMessage()
+    prefix = f"SFTP connection failed: {name}: "
+    assert message.startswith(prefix) and len(message) > len(prefix)
+
+
+def test_a_failed_handshake_logs_nothing_above_debug(
+    old_protocol_port, kind, backends, caplog
+):
+    backend = make_backend(kind, backends)
+    path = SftpPath(f"sftp://x:x@127.0.0.1:{old_protocol_port}/a", backend=backend)
+
+    with caplog.at_level(logging.INFO, logger="pathlib_next.sftp"):
+        with pytest.raises(ConnectionAbortedError):
+            path.stat()
+
+    assert [r for r in caplog.records if r.name == "pathlib_next.sftp"] == []
 
 
 def test_a_trusted_host_key_connects(root, wire, servers, kind, backends, tmp_path):
