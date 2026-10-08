@@ -87,6 +87,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   passes `follow_symlinks=True`. The header and `docs/divergences.md` no longer
   say that `LocalPath` protects a following walk from a loop; neither does
   `pathlib`.
+- **`utils.as_mode()` and `utils.as_owner()` refuse what cannot be a mode or an
+  owner.** `as_mode(-1)` returned `-1`, `as_mode("07777777777777")` a number
+  wider than any mode, and `as_owner(True, False)` was `(1, 0)` on 3.14 and
+  `(True, False)` on 3.9. A `bool` is now `TypeError`, a mode outside
+  `0..0o177777` (a `st_mode` with its type bits still passes, as `os.chmod`
+  accepts it; `stat.S_IMODE()` drops them) and an id outside `0..2**32-1`
+  (`-1` stays "unchanged") `ValueError`.
 - **The scheme extras now declare version ranges.** `uritools`, `requests`,
   `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
   `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the
@@ -121,6 +128,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   still refuses: the same file under two spellings, an existing target without
   `overwrite=True`, a directory in the way. A move by copy and delete saves one
   more.
+- **`LRU(maxsize=0)` stores nothing.** It stored the new value, evicted it at
+  once and handed it to `on_evict` (a connection cache closed the connection it
+  was about to return). `maxsize=None` was a `TypeError`; it is now unbounded,
+  as for `functools.lru_cache`.
+- **`FileStat(st_mode=0o644)` is a file, and `FileStat(st_mode=0o755,
+  is_dir=True)` a directory.** `is_dir` was consulted only when `st_mode` was
+  empty, so a bare permission mode was neither. The type bits are now ORed in; a
+  mode that carries a type keeps it. `setmode()` read a block device or a
+  socket as a directory.
 - **`full_match()` on a generic path treats the root as a component of its own.**
   `MemPath("/a/b.txt").full_match("*/*/*.txt")` was `True` (the first `*`
   matched the empty root), `MemPath("/").full_match("/**")` was `False`,
@@ -139,6 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   A generic `Path` builds a `str` target with `with_segments()`, so a subclass
   with per-instance state (a `MemPath` backend) no longer receives a target
   bound to a fresh one.
+- **`utils.parsedate()` says what it accepts.** `bytes`, a `datetime` and a
+  tuple of fewer than six items raise, and "31 Feb" rolls over to March; the
+  docstring and the header now say so. Nothing else changed.
 - **`LocalPath.copy()` and `move()` are `Path.copy()` and `Path.move()`**
   (`LocalPath.copy is Path.copy`): the two forwarding methods are gone, and with
   them one call frame. A subclass that overrode the private

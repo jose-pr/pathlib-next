@@ -72,12 +72,16 @@ class LRU(_ty.Generic[K, V]):
     The computation itself runs outside the lock, so concurrent misses on
     one key may each call `func`; the first stored result wins and is
     returned to every caller, and the others are passed to `on_evict`.
+
+    `maxsize` follows `functools.lru_cache`: `None` is unbounded, and `0` (or
+    less) stores nothing, so `func` runs on every call and its result is
+    returned without reaching `on_evict`.
     """
 
     def __init__(
         self,
         func: _ty.Callable[K, V],
-        maxsize=128,
+        maxsize: int | None = 128,
         on_evict: "_ty.Callable[[tuple, V], object] | None" = None,
     ):
         self.cache = collections.OrderedDict()
@@ -101,12 +105,12 @@ class LRU(_ty.Generic[K, V]):
         return self._maxsize
 
     @maxsize.setter
-    def maxsize(self, maxsize: int):
+    def maxsize(self, maxsize: int | None):
         cache = self.cache
         evicted = []
         with self.lock:
             self._maxsize = maxsize
-            while len(cache) > maxsize:
+            while maxsize is not None and len(cache) > max(maxsize, 0):
                 evicted.append(cache.popitem(last=False))
         self._dispose(evicted)
 
@@ -117,6 +121,8 @@ class LRU(_ty.Generic[K, V]):
                 cache.move_to_end(args)
                 return cache[args]
         result = self.func(*args)
+        if self._maxsize is not None and self._maxsize <= 0:
+            return result
         evicted = []
         with self.lock:
             if args in cache:
@@ -129,7 +135,7 @@ class LRU(_ty.Generic[K, V]):
                 result = existing
             else:
                 cache[args] = result
-                if len(cache) > self._maxsize:
+                if self._maxsize is not None and len(cache) > self._maxsize:
                     evicted.append(cache.popitem(last=False))
         self._dispose(evicted)
         return result
@@ -158,7 +164,11 @@ def parsedate(date: _ty.Union[str, _time.struct_time, tuple, int, float, None]):
     - `int`/`float`: already epoch seconds, returned unchanged.
     - `struct_time`/tuple: read as UTC (`calendar.timegm`), minus its
       `tm_gmtoff` (or a `parsedate_tz`-style 10th element) when one is set.
-    - `None` or an unparseable string: `0`.
+    - `None` or an unparseable string: `0`. A string naming a date that does
+      not exist ("31 Feb") is not refused: it rolls over to the next month.
+
+    Nothing else is accepted: `bytes`, a `datetime` and a tuple of fewer than
+    six items raise `ValueError` or `TypeError` instead of returning `0`.
 
     Local time (`time.mktime`) is never involved: it shifted every HTTP/DAV
     `st_mtime` by the host's UTC offset and overflowed on Windows for dates
@@ -244,6 +254,10 @@ def as_error_handler(
     return lambda *args, **kwargs: result
 
 
+#: A `st_mode` is 16 bits: four of file type, twelve of permissions.
+_MODE_MASK = 0o177777
+
+
 def as_mode(mode: _ty.Union[int, str]) -> int:
     """Normalize a permission `mode` to an int, parsing `str` as **octal**.
 
@@ -263,24 +277,38 @@ def as_mode(mode: _ty.Union[int, str]) -> int:
     `ValueError` rather than being coerced -- a mode is not a number that
     happens to be written in octal, it is octal.
 
-    An `int` passes through untouched (including `0o755`, which *is* an
-    int by the time it gets here -- the literal is resolved by the parser,
-    so `chmod(0o755)` and `chmod("0755")` agree).
+    An `int` passes through (including `0o755`, which *is* an int by the time
+    it gets here -- the literal is resolved by the parser, so `chmod(0o755)`
+    and `chmod("0755")` agree). A `bool` is `TypeError`, and a number that
+    cannot be a mode (negative, or wider than the 16 bits of a `st_mode`) is
+    `ValueError`, for an `int` and a `str` alike. The file-type bits of a
+    `st_mode` are in range, as `os.chmod` accepts them; `stat.S_IMODE()` drops
+    them.
     """
+    if isinstance(mode, bool):
+        raise TypeError("a mode is an int or an octal str, not bool")
     if isinstance(mode, str):
         text = mode.strip()
         if text[:2].lower() == "0o":
             text = text[2:]
         if not text or any(character not in "01234567" for character in text):
             raise ValueError(f"invalid octal mode: {mode!r}")
-        return int(text, 8)
-    return _operator.index(mode)
+        value = int(text, 8)
+    else:
+        value = _operator.index(mode)
+    if not 0 <= value <= _MODE_MASK:
+        raise ValueError(f"mode out of range (0 to {_MODE_MASK:#o}): {mode!r}")
+    return value
 
 
 #: Canonical "leave this ownership field unchanged" sentinel for `chown()`.
 #: `None` is the API-level spelling; `-1` is accepted too because that is
 #: `os.chown`'s own sentinel and callers coming from it reach for it.
 UNCHANGED = None
+
+
+#: `uid_t` and `gid_t` are 32 bits wide.
+_ID_MAX = 0xFFFFFFFF
 
 
 def as_owner(
@@ -308,8 +336,14 @@ def as_owner(
     def _one(value):
         if value is None or isinstance(value, str):
             return value
+        if isinstance(value, bool):
+            raise TypeError("an owner is an id, a name or None, not bool")
         value = _operator.index(value)
-        return None if value == -1 else value
+        if value == -1:
+            return None
+        if not 0 <= value <= _ID_MAX:
+            raise ValueError(f"id out of range (0 to {_ID_MAX}): {value!r}")
+        return value
 
     return _one(uid), _one(gid)
 

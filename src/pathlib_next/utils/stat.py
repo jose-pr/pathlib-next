@@ -58,6 +58,9 @@ class FileStat(_FStat):
         is_dir: bool = False,
     ):
         self.mode_known = bool(st_mode)
+        if st_mode and not _stat.S_IFMT(st_mode):
+            # Permission bits alone: the type comes from `is_dir`.
+            st_mode |= _stat.S_IFDIR if is_dir else _stat.S_IFREG
         self.st_mode = st_mode or (
             _stat.S_IFDIR | 0o555 if is_dir else _stat.S_IFREG | 0o444
         )
@@ -74,7 +77,7 @@ class FileStat(_FStat):
 
     def setmode(self, value, isdir=None):
         if isdir is None:
-            isdir = self.st_mode & _stat.S_IFDIR
+            isdir = _stat.S_ISDIR(self.st_mode)
         if isdir:
             self.st_mode = _stat.S_IFDIR | value
         else:

@@ -963,7 +963,9 @@ class TestMyPath(PathContract):
     (always-`False` callables when missing).
 - **`stat.FileStat(st_mode=None, st_size=0, st_mtime=0, is_dir=False)`** —
   slotted stat for non-`os` backends. Without `st_mode`, a placeholder
-  (`S_IFREG|0o444` / `S_IFDIR|0o555`) with `mode_known=False`.
+  (`S_IFREG|0o444` / `S_IFDIR|0o555`) with `mode_known=False`. A bare
+  permission `st_mode` (`0o644`) gets the type bits of `is_dir` ORed in and
+  counts as reported; one that carries a type keeps it.
   `from_stat(stat)` (a `FileStat` passes through; `None` fields become 0),
   `from_path(path, *, follow_symlink=True) -> FileStat | None` (`None` only
   on `FileNotFoundError`), `settime(value)`, `setmode(value, isdir=None)`,
@@ -996,10 +998,15 @@ class TestMyPath(PathContract):
   value (overflow, `maxsize` shrink, `invalidate`/`discard`, a losing
   concurrent miss), outside the lock, exceptions suppressed. `discard(*args)
   -> bool`, `invalidate(*args)` (discard + recompute), settable `maxsize`.
+  `maxsize=None` is unbounded; `maxsize=0` (or less) stores nothing, so every
+  call runs `func` and its result never reaches `on_evict`.
 - **`as_mode(mode) -> int`** — `int` passes through; `str` is octal (optional
-  `0o`), any non-octal digit → `ValueError`.
+  `0o`), any non-octal digit → `ValueError`. A `bool` → `TypeError`; a number
+  below 0 or above `0o177777` (the 16 bits of a `st_mode`, type bits
+  included) → `ValueError`.
 - **`as_owner(uid, gid) -> (int | None, int | None)`** — `-1` → `None`;
-  `str` names pass through. **`UNCHANGED = None`**.
+  `str` names pass through; a `bool` → `TypeError`, an id outside
+  0..2**32-1 → `ValueError`. **`UNCHANGED = None`**.
 - **`as_error_handler(ignore_error, *, default=False) -> callable`** — a
   callable passes through untouched (arity is the call site's: `rm` `(error,
   path)`, `copy` `(error)`, `PathSyncer` `(error, source, target, event)`);
@@ -1009,4 +1016,7 @@ class TestMyPath(PathContract):
 - **`sizeof_fmt(num) -> str`** — `1536` → `"1.5K"`.
 - **`parsedate(date) -> float | int`** — UTC epoch seconds from an HTTP date
   string (zone offset applied, none = UTC), a `struct_time`/tuple (UTC minus
-  any offset), or a number (returned unchanged); `None` or unparseable → `0`.
+  any offset), or a number (returned unchanged); `None` or an unparseable
+  string → `0`. `bytes`, a `datetime` and a tuple of fewer than six items are
+  not accepted (`ValueError`/`TypeError`), and a date that does not exist
+  (31 Feb) rolls over instead of being refused.
