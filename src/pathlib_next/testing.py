@@ -27,7 +27,8 @@ pathlib itself differs by OS (reading or unlinking a directory raises
 `IsADirectoryError` on Linux and `PermissionError` on Windows/macOS), the
 contract accepts that documented set. A backend that genuinely cannot meet a
 rule sets the matching capability attribute to False on its test class; the
-affected tests then report as skipped, never as passed:
+affected tests then report as skipped, never as passed. Every attribute
+defaults to True except `supports_question_mark_names`:
 
 - `ReadPathContract.supports_listing` -- `iterdir()`, `glob()`, `walk()`.
 - `ReadPathContract.supports_empty_directories` -- `empty_dir/` lists as
@@ -48,7 +49,8 @@ affected tests then report as skipped, never as passed:
 - `PathContract.supports_mkdir` -- `mkdir()`, and so every test that
   creates a directory (a transport with no directories, such as TFTP, has
   none).
-- `PathContract.supports_delete` -- `unlink()`, `rmdir()` and `rm()`.
+- `PathContract.supports_delete` -- `unlink()`, `rmdir()` and `rm()`, and
+  replacing a file in `copy(overwrite=True)`.
 - `PathContract.supports_move` -- `move()`, by `rename()` or by copying and
   then deleting; False for a backend that can do neither.
 - `PathContract.supports_unusual_names` -- names holding a space, `#`, `%`
