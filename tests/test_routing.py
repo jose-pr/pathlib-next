@@ -206,6 +206,11 @@ class _AzContainer:
     def get_blob_client(self, name):
         return _AzBlob(self, name)
 
+    def list_blobs(self, name_starts_with=""):
+        return iter(
+            [name for name in sorted(self.objects) if name.startswith(name_starts_with)]
+        )
+
 
 def _az_path(uri, container):
     from pathlib_next.uri.schemes.az import AzPath, BaseAzBackend
