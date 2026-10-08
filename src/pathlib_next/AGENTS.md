@@ -111,8 +111,10 @@ ABC for a pure (no I/O) path. Abstract: `segments`,
 `parts`, `parent`, `with_segments()`, `as_uri()`,
 `relative_to()`. Derived: `name`, `suffix`, `suffixes`, `stem`
 (suffix rules of the running interpreter), `with_name`/`with_stem`/
-`with_suffix` (`ValueError` for `""`, `.` or a separator; from 3.13
-`with_stem("")` also raises when the name has a suffix), `parents`,
+`with_suffix` (`with_name()` and `with_stem()` raise `ValueError` for `""`,
+`.` or a separator; the edge cases of `with_stem("")` and `with_suffix(".")`
+are those of the running `pathlib`: from 3.13 `with_stem("")` raises when the
+name has a suffix), `parents`,
 `is_relative_to()`, `joinpath()`, `/` and `"prefix" / path`,
 `root`/`drive`/`anchor` (`root` is `"/"` when the first segment is empty;
 `drive` is `""`), `match()` (pathlib's
@@ -278,13 +280,15 @@ Base class for I/O paths.
     seen, the same line `find -L` draws. A backend whose stat carries no
     identity (`MemPath`, most remote schemes, a `st_ino` of 0 or `None`) is
     walked unbounded.
-  - **`native=True`** (default) follows the running interpreter on the two
+  - **`native=True`** (default) follows the running interpreter on the three
     rules pathlib changed mid-series: a trailing `/` is ignored before 3.11
     and selects directories only from 3.11; `a**` raises `ValueError`
-    before 3.13 and is a plain wildcard from 3.13. `native=False` applies
-    one rule on every version (trailing `/` → directories only, `a**` → a
-    plain wildcard), so a pattern answers the same on every interpreter and
-    backend; `pathlib_next.testing`'s contract suite uses it.
+    before 3.13 and is a plain wildcard from 3.13; a trailing `**` selects
+    directories only before 3.13 and files too from 3.13. `native=False`
+    applies one rule on every version (trailing `/` → directories only,
+    `a**` → a plain wildcard, trailing `**` → files too), so a pattern
+    answers the same on every interpreter and backend;
+    `pathlib_next.testing`'s contract suite uses it.
 - `rglob()` — `glob(f"**/{pattern}", recursive=True)`.
   `pattern=None` is `glob(None)`. `LocalPath` raises the audit events
   `pathlib.Path.glob` and `pathlib.Path.rglob` with the arguments `pathlib`
@@ -317,10 +321,8 @@ Base class for I/O paths.
   behind it too, then the entry: a followed symlink is unlinked), `None`
   (leave it in place — the enclosing directory is then not empty and says
   so), or a callable `policy(path) -> bool | None` asked per entry, so one
-  tree can keep one mount and follow another. The name matches
-  `stat()`/`walk()`/`copy()`'s `follow_symlinks=` rather than a second
-  vocabulary for the same idea. Path components before the final one are
-  followed as usual; the path `rm()` is called on is decided by the same
+  tree can keep one mount and follow another. Path components before the
+  final one are followed as usual; the path `rm()` is called on is decided by the same
   policy as one met on the way down (without `recursive` a symlink is only
   unlinked). A policy that is not `True`/`False`/`None`/a callable, or a
   callable's answer that is not one of the three, raises `ValueError`
@@ -491,6 +493,10 @@ pure classes over
 class MemPath(Path):
     def __init__(self, *segments, backend=None): ...
     backend
+    normalized
+
+class MemBytesIO(BytesIO):
+    def __init__(self, dest, *, append=False): ...
 ```
 
 `Path` over nested dicts; the
@@ -500,8 +506,9 @@ for `/` and `joinpath()`, and an explicit `backend=` wins over it; another
 `Path` → `NotImplementedError`). Joined and normalized like `PurePosixPath`.
 An unknown keyword → `TypeError`.
 
-- `backend` (a `MemPathBackend`); `segments` is a tuple (`("", "a")` for
-  `/a`); `parts` is `(segments, backend)`; `as_uri()` →
+- `backend` (a `MemPathBackend`); `normalized` is the list of names with `..`
+  applied to the text and clamped at the root (`[""]` for the root);
+  `segments` is a tuple (`("", "a")` for `/a`); `parts` is `(segments, backend)`; `as_uri()` →
   `mempath:<quoted posix path>` (no `mempath:` scheme is registered; build
   `MemPath` directly).
 - `..` is applied to the tree, as on a POSIX filesystem: the directory it
@@ -511,7 +518,9 @@ An unknown keyword → `TypeError`.
 - `stat()` → `FileStat` with `st_size` and `st_mtime` (time of the last
   write); the mode is a placeholder (`mode_known=False`).
 - `open()` supports `r`, `w`, `x`, `a` (binary or text); `+` modes →
-  `NotImplementedError`. Writes are visible after `flush()`/`close()`; two
+  `NotImplementedError`. A binary handle is a `MemBytesIO`, a `BytesIO` that
+  writes its buffer back into the file's `bytearray` (`dest`) on `flush()` and
+  close; with `append=True` every write lands at the end. Writes are visible after `flush()`/`close()`; two
   `a` handles on one file both land (each adds only what it wrote).
 - `rmdir()` of the root → `OSError(EBUSY)`, so `root.rm(recursive=True)`
   empties the tree and then raises that.
@@ -632,6 +641,8 @@ def glob(
     include_hidden=False, case_sensitive=None, native=True, on_error=None,
     bound_loops=False,
 ) -> Iterator[_Globable]: ...
+def compile_pattern(pat, case_sensitive): ...
+WILCARD_PATTERN = WILDCARD_PATTERN
 def parse_pattern(pattern, *, native=True) -> Tuple[List[str], bool]: ...
 def select(
     base, parts, *, dironly=False, recursive=True, include_hidden=True,
@@ -652,12 +663,16 @@ called, the selection is lazy. `glob.parse_pattern()` (`ValueError`/`NonRelative
 `glob.select()` (the engine behind
 `Path.glob()`), `glob.full_match()`,
 `glob.NonRelativePatternError(NotImplementedError, ValueError)`,
-`glob.RECURSIVE = "**"`.
+`glob.RECURSIVE = "**"`, `glob.compile_pattern()` (one shell-style component
+as a compiled regular expression, cached), `glob.ANY_PATTERN` (a lone `*`) and
+`glob.WILDCARD_PATTERN` (a wildcard character), both compiled expressions, and
+`glob.WILCARD_PATTERN`, the old misspelling of `WILDCARD_PATTERN`.
 
 ### `sync` (`pathlib_next.utils.sync`)
 
 ```python
 class PathSyncer:
+    EVENT_LOG_FORMAT = "[%s] Source:%s Target:%s DryRun:%s"
     def __init__(
         self, checksum=None, /, remove_missing=False, follow_symlinks=True,
         symlink_mode="preserve", hook=None, ignore_error=False,
@@ -685,7 +700,9 @@ One-way tree sync between any two
   (`source` and `target` are `PathAndStat`), offered once per error; a
   tolerated error is logged at WARNING on logger
   `pathlib_next.sync` and reported to `hook` as `SyncEvent.Error`.
-  `.log(msg, *args)` (INFO on the same logger) is overridable by a subclass.
+  `.log(msg, *args)` (INFO on the same logger) is overridable by a subclass;
+  `EVENT_LOG_FORMAT` (`"[%s] Source:%s Target:%s DryRun:%s"`) is the format
+  it receives for each event.
 - Safety, all through `ignore_error`: a missing root `source` →
   `FileNotFoundError`; overlapping `source`/`target` (one inside the other,
   or two names of one file: decided like `copy()`/`move()` decide "same
@@ -778,6 +795,15 @@ class PathAndStat:
 
 ```python
 class FileStat:
+    st_mode: int
+    st_nlink: int
+    st_uid: int
+    st_gid: int
+    st_size: int
+    st_atime: float
+    st_mtime: float
+    st_ctime: float
+    mode_known
     def __init__(self, st_mode=None, st_size=0, st_mtime=0, is_dir=False): ...
     @classmethod
     def from_stat(cls, stat) -> FileStat: ...
@@ -788,7 +814,9 @@ class FileStat:
     def items(self): ...
 ```
 
-Slotted stat for non-`os` backends. Without `st_mode`, a placeholder
+Slotted stat for non-`os` backends, with the fields of `os.stat_result`
+(`st_mode`, `st_nlink`, `st_uid`, `st_gid`, `st_size`, `st_atime`, `st_mtime`,
+`st_ctime`) and `mode_known`. Without `st_mode`, a placeholder
 (`S_IFREG|0o444` / `S_IFDIR|0o555`) with `mode_known=False`. A bare
 permission `st_mode` (`0o644`) gets the type bits of `is_dir` ORed in and
 counts as reported; one that carries a type keeps it.
@@ -909,9 +937,7 @@ FIXTURE_TREE = {
 }
 ```
 
-`{"a.txt": "a", "b.py": "b", ".hidden.txt": "hidden",
-"sub": None, "sub/c.py": "c", "sub/nested": None, "sub/nested/d.py": "d",
-"empty_dir": None}` (`None` = directory).
+Directories are the entries whose value is `None`.
 
 ### `populate_fixture_tree`
 
@@ -1018,6 +1044,8 @@ class Uri(Pathname):
     path: str
     query: str
     fragment: str
+    stem
+    suffix
     parts
     normalized_path
     segments
@@ -1077,6 +1105,9 @@ is a path with no scheme whose I/O raises `NotImplementedError` and
   (`s3://b`/`http://h` count as the root), `is_local()`
   (`Source.is_local()`), `as_posix()` (`user@host:path` when a host is
   present).
+- `stem` and `suffix` are those of `name` (the last segment of the decoded
+  path; the query and the fragment are not part of it). `UriLike` =
+  `str | Uri | os.PathLike`, what the constructor and the join accept.
 - `str()`/`repr()` drop the password (`sftp://u:pw@h/p` → `sftp://u@h/p`);
   `as_uri(sanitize=False)` keeps it. Non-ASCII hosts render as IDNA. A
   query or fragment is printed as it is: a token carried there shows in
@@ -1101,7 +1132,7 @@ is a path with no scheme whose I/O raises `NotImplementedError` and
 class UriPath(Uri, Path):
     def __init__(
         self, *args, schemesmap=None, findclass=False, **kwargs,
-    ) -> UriPath: ...
+    ): ...
     backend
     def with_backend(self, backend): ...
     def _initbackend(self): ...
@@ -1112,7 +1143,9 @@ class UriPath(Uri, Path):
 
 `Uri` + `Path`. The bare class (or `findclass=True`)
 returns the subclass registered for the scheme, or plain `UriPath` for an
-unknown scheme (its I/O raises `NotImplementedError`). Resolution: classes
+unknown scheme (its I/O raises `NotImplementedError`). Keywords other than
+`schemesmap` and `findclass` are options of the path: `backend=` (see `backend`
+below) and those the scheme class reads (`ssh_config=` for `SftpPath`). Resolution: classes
 already imported → entry point in group `pathlib_next.schemes` → built-in
 `pathlib_next.uri.schemes.*` module. An explicit `schemesmap` is the only
 map consulted. It is an allow-list of classes for dispatch, not a sandbox:
@@ -1183,8 +1216,9 @@ class does.
   copy works; without one it is a decoded path on this endpoint — absolute
   replaces the path, relative is a sibling, as `rename()` resolves it — and
   keeps this path's source and backend rather than opening a second
-  connection. A one-letter scheme is a Windows drive, so `C:/Temp/x` is a
-  path.
+  connection. A one-letter scheme is read as a drive, so `C:/Temp/x` is a
+  decoded path: the Windows path of that name on a `file:` path, a relative
+  sibling (`http://h/d/C:/Temp/x`) on any other scheme.
 
 ### `Source` (`pathlib_next.uri.source`)
 
@@ -1194,6 +1228,7 @@ class Source(NamedTuple):
     def as_str(self, sanitize=True) -> str: ...
     @classmethod
     def from_str(cls, source, strict=True): ...
+    def keys(self): ...
     def parsed_userinfo(self) -> tuple[str, str]: ...
     def get_scheme_cls(self, schemesmap=None): ...
     def is_local(self) -> bool: ...
@@ -1209,7 +1244,8 @@ authority as `Uri` does (`ValueError` for a path/query/fragment when
 strict, naming the component and never the input),
 `parsed_userinfo() -> (user, password)` (`""` when absent; `userinfo`
 stays the decoded `user:password` text),
-`get_scheme_cls(schemesmap=None) -> type[UriPath]`, `is_local()` —
+`get_scheme_cls(schemesmap=None) -> type[UriPath]`, `keys()` (the field
+names, so `dict(source)` works), `is_local()` —
 `localhost`/empty host or an address of this machine (IP literal, or any
 A/AAAA answer via `netimps`); the answer depends on the host alone and is
 kept for 60 seconds for at most 256 hosts, so a miss does DNS.
@@ -1218,6 +1254,8 @@ kept for 60 seconds for at most 256 hosts, so a miss does DNS.
 
 ```python
 class Query(str):
+    ENCODING = "utf-8"
+    SEPARATOR = "&"
     def __init__(self, query, *, encoding="utf-8", separator="&"): ...
     def decode(self) -> list[tuple[str, str | None]]: ...
     def to_dict(self, *, single=False): ...
@@ -1231,7 +1269,8 @@ escaped (`{"sig": "ab+cd=="}` is `sig=ab%2Bcd%3D%3D`).
 `decode() -> list[tuple[str, str | None]]` follows RFC 3986, not
 form-urlencoding: only `%XX` escapes are decoded and a `+` stays a plus
 (`urllib.parse.parse_qsl` reads form text). Iteration yields the decoded
-pairs, `to_dict(*, single=False)`.
+pairs, `to_dict(*, single=False)`. `Query.ENCODING` (`"utf-8"`) and
+`Query.SEPARATOR` (`"&"`) are the defaults of `encoding=` and `separator=`.
 
 ## Built-in schemes (`pathlib_next.uri.schemes`)
 
@@ -1294,6 +1333,9 @@ class HttpBackend(NamedTuple):
     ): ...
     def request(self, method, uri, **kwargs): ...
 
+class HttpWriteStream(BytesIO): ...
+class HttpAppendStream(BytesIO): ...
+
 DEFAULT_TIMEOUT = (10, 60)
 MAX_LISTING_BYTES = 8388608
 ```
@@ -1338,12 +1380,13 @@ MAX_LISTING_BYTES = 8388608
   listed.
 - `open("r")` streams `GET` with `Accept-Encoding: identity`; the mode is
   matched exactly, so `"r+"`, `"w+"` and `"a+"` raise `NotImplementedError`.
-  `"w"`/`"x"`
+  `"w"`/`"x"` (an `HttpWriteStream`)
   buffer and send `write_method` on close. `"x"` first calls `stat()`: found
   → `FileExistsError`, a failure other than not-found raises with nothing
   sent; the upload then carries `If-None-Match: *`, and a 412 reply →
   `FileExistsError` (a server that ignores the header leaves the window
-  between probe and upload open). `"a"`: `append_mode="rewrite"` (GET + full
+  between probe and upload open). `"a"` (an `HttpAppendStream`):
+  `append_mode="rewrite"` (GET + full
   re-upload, not atomic) or `"patch"` (`PATCH` with `Content-Range` from the
   `HEAD` size; a `HEAD` reply without `Content-Length` → `OSError(EIO)`
   naming the path, nothing sent; a refusal raises `PermissionError` for
@@ -1391,6 +1434,9 @@ DEFAULT_TIMEOUT = 30.0
 IDLE_PROBE_SECONDS = 1.0
 
 class FtpBackend(BaseFtpBackend):
+    timeout
+    ssl_context
+    verify
     def __init__(
         self, timeout=30.0, ssl_context=None, verify=True,
     ) -> None: ...
@@ -1558,7 +1604,14 @@ class SftpBackend(BaseSftpBackend):
     @classmethod
     def default(cls, ssh_config=...) -> SftpBackend: ...
     def close(self) -> None: ...
+    def opts(self, source): ...
+    def transport(self, source) -> Transport: ...
 ```
+
+`opts(source)` returns the keyword arguments `SSHClient.connect()` is called with
+for `source` (`connect_opts` merged with the ssh_config of the host; a
+`ProxyCommand` starts its process here), and `transport(source)` connects and
+returns the `paramiko.Transport`.
 
 Host keys are verified: `known_hosts` default is
 `~/.ssh/known_hosts` plus ssh_config `UserKnownHostsFile` (`None` loads
@@ -1604,7 +1657,7 @@ unbounded (use asyncssh's
 source), served by one shared background event loop thread; not
 fork-safe (rebuilt after `fork()`). A sync `Path` call made on that loop
 thread (inside a callback running there) raises `RuntimeError`.
-`max_concurrency` (`None` → `DEFAULT_MAX_CONCURRENCY = 16`) bounds
+`max_concurrency` (`None` → the class attribute `DEFAULT_MAX_CONCURRENCY`, 16) bounds
 requests in flight and files open during recursive `copy()` (target on
 the same host and the same tree: two distinct supplied backends copy
 through the generic walk) and `rm()`. Such a call that raises, times out
@@ -1624,6 +1677,7 @@ class S3Path(UriPath):
     key: str
 
 class S3Backend(BaseS3Backend):
+    client_kwargs
     def __init__(self, **client_kwargs): ...
 
 class BaseS3Backend:
@@ -1651,9 +1705,18 @@ True` is pickled with its path, secrets and all).
   credentials that may write but not list are not stopped). `mkdir()` treats
   only `FileNotFoundError` from `stat()` as absent; any other probe error is
   raised and no marker is written.
-- Reads stream; `"w"`/`"x"`/`"r+"` spool and upload on close; `"x"` is a
+- Reads stream, and the stream is not seekable: `seekable()` is False and
+  `seek()`/`tell()` raise `io.UnsupportedOperation`, binary or text.
+  `"w"`/`"x"`/`"r+"` spool and upload on close; `"x"` is a
   conditional put (check-then-put above 5 GiB); `"a"` unsupported.
   `st_mtime` from `LastModified`.
+- Timeouts and retries are boto3's own: with the default configuration a
+  connection and a read may each wait 60 seconds, and botocore retries before
+  it gives up. Pass `config=botocore.config.Config(...)` in `client_kwargs` to
+  change them.
+- A key that begins with `/` cannot be addressed (`s3://bkt//lead.txt` names
+  the key `lead.txt`) and is not listed at the bucket root; a key with an empty
+  segment (`a//b`) can be addressed and is never listed.
 - Errors (the same on `GsPath` and `AzPath`): the store's answer is
   `FileNotFoundError` (a key or a bucket), `PermissionError`, or
   `OSError(EIO)`; a request that runs out of time is `TimeoutError`, an
@@ -1708,7 +1771,8 @@ call a path makes (`BaseGsBackend.call_options()` is the hook); left out,
 the SDK's defaults apply, under which an unreachable endpoint fails after
 about two minutes. Same prefix model, rename, error and
 recursive-copy/remove rules as `S3Path` (same bucket); `rmdir()` of the
-bucket root → `PermissionError`; reads load the whole object; `"x"` uses
+bucket root → `PermissionError`; reads load the whole object into memory
+(the stream is seekable) and writes buffer in memory until close; `"x"` uses
 `if_generation_match=0`; `"a"` unsupported; `st_mtime` from `updated`.
 
 ### `AzPath` — `az://account/container/key` (`pathlib_next.uri.schemes.az`, `az` extra)
@@ -1744,8 +1808,9 @@ children are the containers; a path with no account and no `backend=`
 does not exist; `rmdir()` of the container root → `PermissionError`;
 `rename()` within one container waits for the server-side copy for at most
 `schemes.az.COPY_POLL_TIMEOUT` (300 s), then aborts it and raises
-`TimeoutError` with the source untouched; `"x"` sends
-`If-None-Match: *`; `"a"` unsupported; `st_mtime` from `last_modified`.
+`TimeoutError` with the source untouched; reads load the whole object into
+memory (the stream is seekable) and writes buffer in memory until close;
+`"x"` sends `If-None-Match: *`; `"a"` unsupported; `st_mtime` from `last_modified`.
 
 ### `GitHubPath` — `github://[TOKEN@]host/owner/repo/path?ref=REF` (`pathlib_next.uri.schemes.github`, `pathlib_next.uri.schemes._gitrepo`, `http` extra)
 
@@ -1897,13 +1962,16 @@ with the scheme it was written with.
   and a lookup always agree. The spelling as written still addresses the
   member. A name that would leave the root -- `../x`, `/abs`, or a `..`
   with nothing to spend it on -- has no name inside the archive: it is
-  never listed, never readable, and cannot be written (the write fails and
-  creates nothing). A name only a *Windows destination* would misread
-  (`C:drive.txt`, `a\b`) IS a member, because it is an ordinary POSIX
+  never listed and never readable. A URI cannot name it either: dot
+  segments are resolved before the archive is asked, so
+  `zip:file:///a.zip!/../x` is the member `x`, and a write through such a
+  spelling lands on that member. A name only a *Windows destination* would
+  misread (`C:drive.txt`, `a\b`) IS a member, because it is an ordinary POSIX
   filename; refusing to join it is the destination's rule, applied by
   whatever writes there (see `copy()` below, `PathSyncer`,
-  `unpack_archive()`). `zipfile` itself rewrites `\` to `/`, so a
-  backslash name only survives in a tar. When two spellings normalize to one name the
+  `unpack_archive()`). On Windows `zipfile` rewrites `\` to `/` in a zip
+  member name; elsewhere (and in a tar) a backslash name is a member like any
+  other. When two spellings normalize to one name the
   later member wins, as in `zipfile`/`tarfile`. Exception types are POSIX on every
   platform.
 - The archive root is the archive: `exists()`/`is_dir()`/`stat()` of it
@@ -1930,8 +1998,7 @@ with the scheme it was written with.
   `OSError(EINVAL)`); parents must exist; `"a"` unsupported. Every mutation
   replaces the archive atomically (temp file + `os.replace`) and keeps
   other members' metadata, the comment and any prefix bytes. A write uses
-  the normalized name; a name that escapes the root fails and creates
-  nothing. A new member is stored deflated; an existing member that is
+  the normalized name. A new member is stored deflated; an existing member that is
   overwritten keeps its compression method. The archive is replaced by a
   new file, so another hard link to it keeps the old content and the
   writing user owns the result; an archive the caller may not write
@@ -2058,7 +2125,7 @@ read their own variables and files (`requests`' proxy settings and
   is why a symlink check cannot protect a walk from one. `is_dir_binding()`
   is the pair, and is what `rm(recursive=True)` consults: it removes the
   binding itself rather than the contents behind it (`rmdir()` on a live
-  mount fails loudly, which beats emptying the mounted filesystem).
+  mount fails instead of emptying the mounted filesystem).
   Default False everywhere; `LocalPath`/`FileUri` answer for real.
 
 ### URI layer
