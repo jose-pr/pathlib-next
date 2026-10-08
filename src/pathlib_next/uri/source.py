@@ -409,9 +409,8 @@ class Source(_ty.NamedTuple):
         host = self.host
         if not host or host == "localhost":
             return True
-        # Imported here, not at module top: netimps calls platform.node() at
-        # import (a WMI query on Windows), a cost every `import pathlib_next`
-        # paid although only this method needs it.
+        # Imported here, not at module top: only this method needs netimps,
+        # and every `import pathlib_next` would otherwise pay for its import.
         import netimps as _netimps
 
         if not isinstance(host, str):

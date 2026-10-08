@@ -46,7 +46,8 @@ uripath = "pathlib_next.tools.uripath:main"
 uri = [
     # uritools 6 needs Python 3.10; 5.0 is the newest release for 3.9.
     "uritools>=5.0,<7",
-    "netimps>=0.3.1",
+    # 0.3.3 and 0.3.4 break asyncssh's SFTP server on Windows; 0.4.0 does not.
+    "netimps>=0.4.0,<0.5",
 ]
 http = [
     # Before 2.18 the bundled urllib3 imports the ABCs from `collections`

@@ -16,7 +16,7 @@ resulting contract.
 | Extra | Installs | Needed for |
 | --- | --- | --- |
 | *(none)* | — | `Path`, `LocalPath`, `MemPath`, `utils`, `testing`, `uripath` on local paths |
-| `uri` | `uritools`, `netimps>=0.3.1` | `pathlib_next.uri` and **every** URI scheme (`file:`, `data:`, `ftp(s):`, archives included) |
+| `uri` | `uritools`, `netimps>=0.4.0,<0.5` | `pathlib_next.uri` and **every** URI scheme (`file:`, `data:`, `ftp(s):`, archives included) |
 | `http` | `requests` + `uri` | `http(s):`, `dav(s):`, `github:`, `gitlab:`, `git:` |
 | `sftp` | `paramiko` + `uri` | `sftp:` (paramiko backend) |
 | `sftp-async` | `asyncssh` + `uri` | `sftp:` (asyncssh backend) |

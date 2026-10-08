@@ -15,9 +15,6 @@ except ImportError:  # Python < 3.11
 
 PYPROJECT = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
 
-# netimps is still 0.x and has no release line to cap against yet.
-NO_CEILING = {"netimps"}
-
 
 @pytest.fixture(scope="module")
 def project():
@@ -51,11 +48,7 @@ def test_every_dependency_declares_a_floor(project):
 
 
 def test_every_dependency_declares_a_ceiling(project):
-    unbounded = [
-        str(r)
-        for r in _declared_requirements(project)
-        if r.name not in NO_CEILING and not _bounds(r)[1]
-    ]
+    unbounded = [str(r) for r in _declared_requirements(project) if not _bounds(r)[1]]
     assert unbounded == []
 
 
