@@ -160,6 +160,25 @@ def _segment_text(item) -> str:
     return _pathlib.PurePath(path).as_posix()
 
 
+def _child_path(path: str, name: str, has_authority: bool) -> str:
+    """The path of the child `name` of a directory at `path`: exactly one "/"
+    joins them (a directory's own path conventionally carries a trailing "/"
+    for some schemes, and "/" + "sub" must not become "//sub"). An empty path
+    with an authority is the same root as "/" (RFC 3986: "http://host" and
+    "http://host/" are equivalent); without one ("file:", "data:") it is
+    relative and stays so."""
+    if not path:
+        return f"/{name}" if has_authority else name
+    return (path if path.endswith("/") else f"{path}/") + name
+
+
+def _empty_slashes(path: str, count: int, between: bool) -> int:
+    """How many "/" spell `count` empty segments after `path`. With `between`
+    a name follows, and `_child_path()` supplies the slash that precedes it
+    only when `path` does not end in one."""
+    return count - (1 if path.endswith("/") else 0) + (1 if between else 0)
+
+
 def _forget_entry_points() -> None:
     global _ENTRY_POINTS
     _ENTRY_POINTS = None
@@ -484,14 +503,42 @@ class Uri(Pathname):
             return self._from_parsed_parts(
                 self.source, path + key, self.query, self.fragment
             )
-        result = self
         segments = key.split("/")
-        if self._is_absolute_decoded(key):
-            result = self.with_path("/")
-            if segments[0] == "":
-                segments = segments[1:]  # the root, which `result` already is
+        absolute = self._is_absolute_decoded(key)
+        if absolute and segments[0] == "":
+            segments = segments[1:]  # the root, which the join starts from
         if "." in segments or ".." in segments:
-            return result._join_dotted(segments)
+            return (self.with_path("/") if absolute else self)._join_dotted(segments)
+        if type(self)._make_child_relpath not in _DEFAULT_CHILD_BUILDERS:
+            return self._join_children(segments, absolute)
+        # Nothing special about a child: the path is written once.
+        path = "/" if absolute else self.path
+        has_authority = self._has_authority()
+        empty = 0
+        named = False
+        for segment in segments:
+            if not segment:
+                empty += 1
+                continue
+            if empty:
+                path += "/" * _empty_slashes(path, empty, True)
+                empty = 0
+            path = _child_path(path, segment, has_authority)
+            named = True
+        if empty:
+            # A trailing "/" is load-bearing: for http/dav it is how a
+            # directory URL is spelled, and `name`/`parent` are documented
+            # to keep it (see docs/divergences.md).
+            path += "/" * _empty_slashes(path, empty, False)
+        if named:
+            return self._from_parsed_parts(self.source, path, "", "")
+        return self._from_parsed_parts(self.source, path, self.query, self.fragment)
+
+    def _join_children(self, segments: "list[str]", absolute: bool) -> "Uri":
+        """`_join_decoded()` for a scheme that overrides
+        `_make_child_relpath()`: it is asked for every name, one child at a
+        time, exactly as a listing asks it."""
+        result = self.with_path("/") if absolute else self
         empty = 0
         for segment in segments:
             if not segment:
@@ -502,19 +549,13 @@ class Uri(Pathname):
                 empty = 0
             result = result._make_child_relpath(segment)
         if empty:
-            # A trailing "/" is load-bearing: for http/dav it is how a
-            # directory URL is spelled, and `name`/`parent` are documented
-            # to keep it (see docs/divergences.md).
             result = result._with_empty_segments(empty, between=False)
         return result
 
     def _with_empty_segments(self, count: int, *, between: bool) -> "Uri":
-        """This URI with `count` empty segments after its path: the slashes
-        that spell them, and the one that ends the last name before them. With
-        `between`, a name follows, and `_make_child_relpath()` supplies the
-        slash that precedes it only when the path does not end in one."""
+        """This URI with `count` empty segments after its path."""
         path = self.path
-        slashes = count - (1 if path.endswith("/") else 0) + (1 if between else 0)
+        slashes = _empty_slashes(path, count, between)
         return self.with_path(path + "/" * slashes) if slashes > 0 else self
 
     def _join_dotted(self, segments: "list[str]") -> "Uri":
@@ -735,20 +776,7 @@ class Uri(Pathname):
         return self._fragment
 
     def _make_child_relpath(self, name: str, **kwargs) -> _ty.Self:
-        # Ensure exactly one "/" joins path and name -- a directory's own
-        # path conventionally carries a trailing "/" for some schemes
-        # (http/dav listings, or any Uri explicitly constructed that way);
-        # joining against it unconditionally (the old `f"{self.path}/{name}"`)
-        # doubled the slash (e.g. path="/" + name "sub" => "//sub").
-        path = self.path
-        if not path:
-            # An empty path with an AUTHORITY is the same root as "/" (RFC
-            # 3986: "http://host" and "http://host/" are equivalent), so a
-            # child gets "/name". Without one ("file:", "data:") the path is
-            # relative and stays that way: "file:" / "test" is "file:test".
-            new_path = f"/{name}" if self._has_authority() else name
-        else:
-            new_path = (path if path.endswith("/") else f"{path}/") + name
+        new_path = _child_path(self.path, name, self._has_authority())
         # Through `_from_parsed_parts`, so a scheme that carries per-instance
         # state rebuilds it (`SftpPath._ssh_config`); building the instance
         # directly dropped it, and `/` now walks segments through here.
@@ -1512,3 +1540,11 @@ class UriPath(Uri, Path):
     def iterdir(self) -> "_ty.Iterator[Self]":
         for name, stat in self._scandir():
             yield self._make_child_relpath(name, stat_hint=stat)
+
+
+#: The `_make_child_relpath` implementations that only write a child's path:
+#: a class with any other builds a joined key one child at a time
+#: (`Uri._join_children`).
+_DEFAULT_CHILD_BUILDERS = frozenset(
+    {Uri._make_child_relpath, UriPath._make_child_relpath}
+)
