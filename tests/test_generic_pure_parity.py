@@ -278,9 +278,12 @@ def test_312_match_does_not_read_a_newline_in_a_name_as_a_separator(as_python_31
 @pytest.mark.skipif(
     sys.version_info[:2] != (3, 12), reason="the reference is 3.12's own"
 )
-@pytest.mark.parametrize("path", NEWLINE_PATHS)
-@pytest.mark.parametrize("pattern", NEWLINE_PATTERNS)
-def test_the_reference_is_what_python_312_answers(path, pattern):
-    assert pathlib.PurePosixPath(path).match(pattern) is _reference_match_312(
-        path, pattern
-    )
+def test_the_reference_is_what_python_312_answers():
+    differences = [
+        (path, pattern)
+        for path in NEWLINE_PATHS
+        for pattern in NEWLINE_PATTERNS
+        if pathlib.PurePosixPath(path).match(pattern)
+        is not _reference_match_312(path, pattern)
+    ]
+    assert differences == []
