@@ -3,15 +3,15 @@ from __future__ import annotations
 import contextlib as _contextlib
 import errno as _errno
 import io as _io
+import itertools as _itertools
 import sys as _sys
 import threading as _thread
 import time as _time
 import typing as _ty
 
 from ... import utils as _utils
-from ...path import _check_follow
 from ...utils.stat import FileStat
-from .. import Uri, UriPath
+from .. import Uri
 from . import _objstore as _store
 from ._extras import import_client as _import_client
 
@@ -195,41 +195,7 @@ def _translate_errors(path, *, create=False):
         raise translated from None
 
 
-class _AzWriteStream(_io.BytesIO):
-    """Buffers the write and uploads it on close(). `exclusive`
-    (`open("x")`) uploads with `overwrite=False`: atomic, failing with
-    FileExistsError if the blob exists. With `initial` (`open("r+")`) the
-    buffer starts with the blob's content at position 0 and is uploaded only
-    if it was modified."""
-
-    def __init__(self, path: "AzPath", exclusive=False, initial=None):
-        super().__init__(b"" if initial is None else initial)
-        self._path = path
-        self._exclusive = exclusive
-        self._dirty = initial is None
-
-    def write(self, data):
-        self._dirty = True
-        return super().write(data)
-
-    def writelines(self, lines):
-        self._dirty = True
-        return super().writelines(lines)
-
-    def truncate(self, size=None):
-        self._dirty = True
-        return super().truncate(size)
-
-    def close(self):
-        if self.closed:
-            return
-        try:
-            if self._dirty:
-                self._path._upload(self.getvalue(), exclusive=self._exclusive)
-        finally:
-            # Closed even when the upload fails, so `IOBase.__del__` does not
-            # retry it (over newer content) at garbage collection.
-            super().close()
+_AzWriteStream = _store.BufferedUploadStream
 
 
 COPY_POLL_TIMEOUT = 300.0
@@ -260,7 +226,7 @@ def _copy_status(props) -> "str | None":
     return getattr(getattr(props, "copy", None), "status", None)
 
 
-class AzPath(UriPath):
+class AzPath(_store.ObjectStorePath):
     """`az:` scheme (`az://account/container/key/path`): read/write/list via
     `azure.storage.blob`. Requires the `az` extra. Azure Blob has no real
     directories -- `is_dir()` is prefix emulation (any blob key under
@@ -276,6 +242,8 @@ class AzPath(UriPath):
 
     __SCHEMES = ("az",)
     __slots__ = ()
+    _TOP = "container"
+    _LISTING_ERRORS = (Exception,)
 
     if _ty.TYPE_CHECKING:
         backend: BaseAzBackend
@@ -332,54 +300,6 @@ class AzPath(UriPath):
         except FileNotFoundError:
             return None
 
-    def stat(self, *, follow_symlinks=True):
-        hint = self._pop_stat_hint()
-        if hint is not None:
-            return hint
-        key = self.key
-        if key == "":
-            # A container root (or `az://account`, which holds containers):
-            # ask the server, as s3: does with HeadBucket, so a mistyped
-            # name does not read as an existing directory. A one-item
-            # listing needs only the permission the rest of the path uses.
-            with _translate_errors(self):
-                if self.container:
-                    listing = self._container.list_blobs(
-                        name_starts_with="", results_per_page=1
-                    )
-                else:
-                    listing = self._client.list_containers(results_per_page=1)
-                for _ in listing:
-                    break
-            return FileStat(is_dir=True)
-        # Only a not-found reply falls through to the prefix probe: a
-        # transient or permission error read as "missing" let copy() replace
-        # an existing blob.
-        props = self._properties(key)
-        if props is not None:
-            return FileStat(
-                st_size=props["size"],
-                st_mtime=(
-                    int(props["last_modified"].timestamp())
-                    if props.get("last_modified")
-                    else 0
-                ),
-                is_dir=False,
-            )
-        return self._stat_prefix()
-
-    def _stat_prefix(self) -> FileStat:
-        """`stat()` of a key already known not to be a blob -- emulate a
-        directory: any blob under the "<key>/" prefix means this is a
-        "directory", and none means there is nothing here."""
-        with _translate_errors(self):
-            # One item answers; the default page would carry up to 5000.
-            for _ in self._container.list_blobs(
-                name_starts_with=f"{self.key}/", results_per_page=1
-            ):
-                return FileStat(is_dir=True)
-        raise FileNotFoundError(self)
-
     def _scandir(self):
         # Each walk_blobs call already carries size/mtime for every blob --
         # reuse it instead of `iterdir()` + a stat call per child.
@@ -434,10 +354,6 @@ class AzPath(UriPath):
                     st_size=item.size or 0, st_mtime=mtime, is_dir=False
                 )
 
-    def _listdir(self):
-        for name, _stat in self._scandir():
-            yield name
-
     def _open(self, mode="r", buffering=-1):
         self._check_account()
         if mode in ("r", "r+"):
@@ -472,180 +388,12 @@ class AzPath(UriPath):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _AzWriteStream(self, exclusive=(mode == "x"))
 
-    def _holds_keys(self, key: str) -> bool:
-        """Whether any blob lies under the prefix `key/`: a write or rename
-        onto it would hide those blobs behind one. Credentials that may write
-        but not list cannot ask, and are not stopped."""
-        if not key:
-            return False
-        try:
-            with _translate_errors(self):
-                for _ in self._container.list_blobs(
-                    name_starts_with=f"{key}/", results_per_page=1
-                ):
-                    return True
-        except PermissionError:
-            pass
-        return False
-
     def _upload(self, data: bytes, *, key=None, exclusive=False) -> None:
         blob_client = self._container.get_blob_client(self.key if key is None else key)
         with _translate_errors(self, create=exclusive):
             # overwrite=False sends If-None-Match: *, so a concurrent creator
             # makes this fail (409), never silently overwritten.
             blob_client.upload_blob(data, overwrite=not exclusive)
-
-    def _mkdir(self, mode):
-        # stat(), not exists(): a failed probe must not read as "missing".
-        try:
-            self.stat()
-        except FileNotFoundError:
-            pass
-        else:
-            raise FileExistsError(self)
-        self._upload(b"", key=f"{self.key}/", exclusive=True)
-
-    def unlink(self, missing_ok=False):
-        try:
-            st = self.stat()
-        except FileNotFoundError:
-            if missing_ok:
-                return
-            raise
-        if st.is_dir():
-            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
-        blob_client = self._container.get_blob_client(self.key)
-        try:
-            with _translate_errors(self):
-                blob_client.delete_blob()
-        except FileNotFoundError:
-            # Deleted since the stat() above. Anything else -- a lease, a
-            # permission error -- is not "already gone" and raises.
-            if not missing_ok:
-                raise
-
-    def rmdir(self):
-        if not self.stat().is_dir():
-            raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
-        if not self.key:
-            raise PermissionError(
-                _errno.EACCES, "removing a container is not supported", str(self)
-            )
-        marker = f"{self.key}/"
-        count = 0
-        with _translate_errors(self):
-            for blob in self._container.list_blobs(
-                name_starts_with=marker, results_per_page=2
-            ):
-                if blob.name != marker:
-                    raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
-                count += 1
-                if count > 1:
-                    break
-        marker_blob = self._container.get_blob_client(marker)
-        try:
-            with _translate_errors(self):
-                marker_blob.delete_blob()
-        except FileNotFoundError:
-            pass
-
-    def rm(
-        self,
-        /,
-        recursive=False,
-        missing_ok=False,
-        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
-        *,
-        follow_symlinks=False,
-        follow_binds=False,
-    ):
-        # An object store holds no symlinks or bindings: the policies are
-        # checked and have nothing to decide.
-        _check_follow("follow_symlinks", follow_symlinks)
-        _check_follow("follow_binds", follow_binds)
-        if not recursive:
-            return super().rm(
-                recursive=recursive,
-                missing_ok=missing_ok,
-                ignore_error=ignore_error,
-                follow_symlinks=follow_symlinks,
-                follow_binds=follow_binds,
-            )
-
-        def on_error(error, path=None):
-            if callable(ignore_error):
-                return ignore_error(error, self if path is None else path)
-            return bool(ignore_error)
-
-        if not self.key:
-            error = PermissionError("recursive container delete is not enabled")
-            if not on_error(error):
-                raise error
-            return
-
-        keys = []
-        try:
-            if self._properties(self.key) is not None:
-                keys.append(self.key)
-        except OSError as error:
-            # Not "missing": deleting the prefix tree instead of the blob
-            # would remove the wrong thing.
-            if not on_error(error):
-                raise
-            return
-
-        if not keys:
-            marker = f"{self.key}/"
-            try:
-                entries = self._flat_entries(marker)
-            except FileNotFoundError:
-                # A missing container holds nothing: the same answer as a
-                # missing blob.
-                entries = []
-            except Exception as error:
-                if not on_error(error):
-                    raise
-                return
-            keys = [key for key, _size in entries]
-            # What a walk of the directory would not visit is not removed
-            # with it: a move copies by walking and then removes this set.
-            unreachable = _store.unreachable_keys(marker, entries)
-            if unreachable:
-                error = _store.refusal(self, "remove", unreachable)
-                if not on_error(error):
-                    raise error
-                skipped = set(unreachable)
-                keys = [key for key in keys if key not in skipped]
-                if not keys:
-                    return
-
-        if not keys:
-            if missing_ok:
-                return
-            error = FileNotFoundError(self)
-            if not on_error(error):
-                raise error
-            return
-
-        try:
-            delete_blobs = getattr(self._container, "delete_blobs")
-        except AttributeError:
-            delete_blobs = None
-        if callable(delete_blobs):
-            for index in range(0, len(keys), 256):
-                batch = keys[index : index + 256]
-                try:
-                    delete_blobs(*batch)
-                except Exception:
-                    # A partial failure has already deleted the other keys;
-                    # a rejected batch (auth on the batch endpoint, an
-                    # emulator without batch support) has deleted none.
-                    # Either way every key is retried on its own, so one
-                    # failing blob does not leave the rest behind.
-                    self._delete_each(batch, on_error, ignore_missing=True)
-            return
-
-        self._delete_each(keys, on_error)
 
     def _flat_entries(self, prefix: str) -> "list[tuple[str, int]]":
         """`(name, size)` of every blob under `prefix`, with no delimiter."""
@@ -654,39 +402,6 @@ class AzPath(UriPath):
                 (blob.name, blob.size or 0)
                 for blob in self._container.list_blobs(name_starts_with=prefix)
             ]
-
-    def _unreachable_keys(self) -> "list[str]":
-        """The names under this prefix directory that a walk does not reach,
-        or `[]` for a blob or a missing path."""
-        key = self.key
-        if key and self._properties(key) is not None:
-            return []
-        prefix = f"{key}/" if key else ""
-        return _store.unreachable_keys(prefix, self._flat_entries(prefix))
-
-    def copy(
-        self,
-        target,
-        *,
-        overwrite=False,
-        follow_symlinks=True,
-        preserve_metadata=True,
-        recursive=False,
-        ignore_error=None,
-        progress=None,
-    ):
-        # A prefix is copied by walking it; one that holds keys the walk
-        # cannot reach is refused up front rather than copied incompletely.
-        with _store.checked_copy(self, recursive):
-            return super().copy(
-                target,
-                overwrite=overwrite,
-                follow_symlinks=follow_symlinks,
-                preserve_metadata=preserve_metadata,
-                recursive=recursive,
-                ignore_error=ignore_error,
-                progress=progress,
-            )
 
     def _delete_each(self, keys, on_error, *, ignore_missing=False):
         for key in keys:
@@ -717,28 +432,107 @@ class AzPath(UriPath):
             except Exception:
                 pass
 
-    def rename(self, target: "AzPath | Uri | str"):
-        target = self._rename_target(target)
+    def _stat_root(self) -> FileStat:
+        # A container root (or `az://account`, which holds containers): ask
+        # the server, as s3: does with HeadBucket, so a mistyped name does
+        # not read as an existing directory. A one-item listing needs only
+        # the permission the rest of the path uses.
+        with _translate_errors(self):
+            if self.container:
+                listing = self._container.list_blobs(
+                    name_starts_with="", results_per_page=1
+                )
+            else:
+                listing = self._client.list_containers(results_per_page=1)
+            for _ in listing:
+                break
+        return FileStat(is_dir=True)
+
+    def _stat_object(self, key: str) -> "FileStat | None":
+        # Only a not-found reply means "no such blob": a transient or
+        # permission error read as "missing" let copy() replace an existing
+        # blob.
+        props = self._properties(key)
+        if props is None:
+            return None
+        return FileStat(
+            st_size=props["size"],
+            st_mtime=(
+                int(props["last_modified"].timestamp())
+                if props.get("last_modified")
+                else 0
+            ),
+            is_dir=False,
+        )
+
+    def _has_object(self, key: str) -> bool:
+        return self._properties(key) is not None
+
+    def _has_prefix(self, key: str) -> bool:
+        with _translate_errors(self):
+            # One item answers; the default page would carry up to 5000.
+            for _ in self._container.list_blobs(
+                name_starts_with=f"{key}/", results_per_page=1
+            ):
+                return True
+        return False
+
+    def _first_keys(self, prefix: str, limit: int) -> "list[str]":
+        with _translate_errors(self):
+            return [
+                blob.name
+                for blob in _itertools.islice(
+                    self._container.list_blobs(
+                        name_starts_with=prefix, results_per_page=limit
+                    ),
+                    limit,
+                )
+            ]
+
+    def _put_marker(self, key: str) -> None:
+        self._upload(b"", key=key, exclusive=True)
+
+    def _delete_object(self, key: str, *, missing_ok: bool) -> None:
+        blob_client = self._container.get_blob_client(key)
+        try:
+            with _translate_errors(self):
+                blob_client.delete_blob()
+        except FileNotFoundError:
+            # Deleted since the caller looked. Anything else -- a lease, a
+            # permission error -- is not "already gone" and raises.
+            if not missing_ok:
+                raise
+
+    def _delete_keys(self, keys: "list[str]", on_error) -> None:
+        try:
+            delete_blobs = getattr(self._container, "delete_blobs")
+        except AttributeError:
+            delete_blobs = None
+        if callable(delete_blobs):
+            for index in range(0, len(keys), 256):
+                batch = keys[index : index + 256]
+                try:
+                    delete_blobs(*batch)
+                except Exception:
+                    # A partial failure has already deleted the other keys;
+                    # a rejected batch (auth on the batch endpoint, an
+                    # emulator without batch support) has deleted none.
+                    # Either way every key is retried on its own, so one
+                    # failing blob does not leave the rest behind.
+                    self._delete_each(batch, on_error, ignore_missing=True)
+            return
+
+        self._delete_each(keys, on_error)
+
+    def _rename_dest(self, target) -> "AzPath":
         # `with_path`, not `with_segments(target)`: the latter joined the Uri
         # object itself as a segment and raised TypeError for every str target.
-        dest = target if isinstance(target, AzPath) else self.with_path(target.path)
-        dest_key = dest.key
-        if dest_key == self.key:
-            # Copying a blob onto itself and then deleting the "source"
-            # deletes the only copy; a name that is not there is not renamed.
-            # pathlib returns the new path.
-            if self._properties(self.key) is None:
-                self._pop_stat_hint()
-                self.stat()
-            return dest
-        if self._properties(self.key) is None:
-            # No blob at the key: a prefix directory (FileNotFoundError
-            # when there is nothing at all). move() falls back to copy + rm
-            # for it.
-            self._stat_prefix()
-            raise NotImplementedError(f"rename() of the prefix directory {self}")
-        if self._holds_keys(dest_key):
-            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
+        return target if isinstance(target, AzPath) else self.with_path(target.path)
+
+    def _rename_source(self, key: str):
+        return self._properties(key)
+
+    def _rename_copy(self, props, dest: "AzPath", dest_key: str) -> None:
         source_blob_client = self._container.get_blob_client(self.key)
         source_url = source_blob_client.url
         dest_blob_client = self._container.get_blob_client(dest_key)
@@ -760,6 +554,5 @@ class AzPath(UriPath):
                 dest_blob_client = self._container.get_blob_client(dest_key)
                 copy_props = dest_blob_client.get_blob_properties()
             if _copy_status(copy_props) != "success":
-                raise OSError(f"Copy failed: {self} -> {target}")
+                raise OSError(f"Copy failed: {self} -> {dest}")
             source_blob_client.delete_blob()
-        return dest

@@ -8,9 +8,7 @@ import threading as _threading
 import typing as _ty
 
 from ... import utils as _utils
-from ...path import _check_follow
 from ...utils.stat import FileStat
-from .. import Uri, UriPath
 from . import _objstore as _store
 from ._extras import import_client as _import_client
 
@@ -180,44 +178,10 @@ def _translate_errors(path, *, create=False):
         raise translated from None
 
 
-class _GsWriteStream(_io.BytesIO):
-    """Buffers the write and uploads it on close(). `exclusive`
-    (`open("x")`) uploads with `if_generation_match=0`: atomic, failing
-    with FileExistsError if the object exists. With `initial`
-    (`open("r+")`) the buffer starts with the object's content at position
-    0 and is uploaded only if it was modified."""
-
-    def __init__(self, path: "GsPath", exclusive=False, initial=None):
-        super().__init__(b"" if initial is None else initial)
-        self._path = path
-        self._exclusive = exclusive
-        self._dirty = initial is None
-
-    def write(self, data):
-        self._dirty = True
-        return super().write(data)
-
-    def writelines(self, lines):
-        self._dirty = True
-        return super().writelines(lines)
-
-    def truncate(self, size=None):
-        self._dirty = True
-        return super().truncate(size)
-
-    def close(self):
-        if self.closed:
-            return
-        try:
-            if self._dirty:
-                self._path._upload(self.getvalue(), exclusive=self._exclusive)
-        finally:
-            # Closed even when the upload fails, so `IOBase.__del__` does not
-            # retry it (over newer content) at garbage collection.
-            super().close()
+_GsWriteStream = _store.BufferedUploadStream
 
 
-class GsPath(UriPath):
+class GsPath(_store.ObjectStorePath):
     """`gs:` scheme (`gs://bucket/key/path`): read/write/list via
     `google.cloud.storage`. Requires the `gs` extra. GCS has no real
     directories -- `is_dir()` is prefix emulation (any object key under
@@ -229,6 +193,7 @@ class GsPath(UriPath):
 
     __SCHEMES = ("gs",)
     __slots__ = ()
+    _LISTING_ERRORS = (Exception,)
 
     if _ty.TYPE_CHECKING:
         backend: BaseGsBackend
@@ -262,10 +227,6 @@ class GsPath(UriPath):
         options = getattr(self.backend, "call_options", None)
         return options() if callable(options) else {}
 
-    def _key_path(self, key: str) -> "GsPath":
-        """The path of the object `key` in this path's bucket."""
-        return self.with_path(f"/{key}")
-
     def _reload(self, key: str):
         """The reloaded blob at `key`, or None if there is no such object.
         Any other failure raises (as OSError when it is an API error)."""
@@ -276,43 +237,6 @@ class GsPath(UriPath):
         except FileNotFoundError:
             return None
         return blob
-
-    def stat(self, *, follow_symlinks=True):
-        hint = self._pop_stat_hint()
-        if hint is not None:
-            return hint
-        key = self.key
-        if key == "":
-            # The bucket root: ask the server, as s3: does with HeadBucket,
-            # so a mistyped bucket does not read as an existing directory.
-            # A one-item listing (NotFound for a missing bucket) needs only
-            # the object-list permission the rest of the path uses.
-            with _translate_errors(self):
-                for _ in self._bucket.list_blobs(max_results=1, **self._options):
-                    break
-            return FileStat(is_dir=True)
-        # Only a not-found reply falls through to the prefix probe: a
-        # transient or permission error read as "missing" let copy() replace
-        # an existing object.
-        blob = self._reload(key)
-        if blob is not None:
-            return FileStat(
-                st_size=blob.size,
-                st_mtime=int(blob.updated.timestamp()) if blob.updated else 0,
-                is_dir=False,
-            )
-        return self._stat_prefix()
-
-    def _stat_prefix(self) -> FileStat:
-        """`stat()` of a key already known not to be an object -- emulate a
-        directory: any object under the "<key>/" prefix means this is a
-        "directory", and none means there is nothing here."""
-        with _translate_errors(self):
-            for _ in self._bucket.list_blobs(
-                prefix=f"{self.key}/", max_results=1, **self._options
-            ):
-                return FileStat(is_dir=True)
-        raise FileNotFoundError(self)
 
     def _scandir(self):
         # Each list_blobs call already carries size/mtime for every object --
@@ -356,10 +280,6 @@ class GsPath(UriPath):
                     st_size=blob.size or 0, st_mtime=mtime, is_dir=False
                 )
 
-    def _listdir(self):
-        for name, _stat in self._scandir():
-            yield name
-
     def _open(self, mode="r", buffering=-1):
         if not self.bucket_name:
             raise FileNotFoundError(
@@ -395,22 +315,6 @@ class GsPath(UriPath):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _GsWriteStream(self, exclusive=(mode == "x"))
 
-    def _holds_keys(self, key: str) -> bool:
-        """Whether any object lies under the prefix `key/`: a write or rename
-        onto it would hide those objects behind one. Credentials that may
-        write but not list cannot ask, and are not stopped."""
-        if not key:
-            return False
-        try:
-            with _translate_errors(self):
-                for _ in self._bucket.list_blobs(
-                    prefix=f"{key}/", max_results=1, **self._options
-                ):
-                    return True
-        except PermissionError:
-            pass
-        return False
-
     def _upload(self, data: bytes, *, key=None, exclusive=False) -> None:
         blob = self._bucket.blob(self.key if key is None else key)
         with _translate_errors(self, create=exclusive):
@@ -421,140 +325,6 @@ class GsPath(UriPath):
             else:
                 blob.upload_from_string(data, **self._options)
 
-    def _mkdir(self, mode):
-        # stat(), not exists(): a failed probe must not read as "missing".
-        try:
-            self.stat()
-        except FileNotFoundError:
-            pass
-        else:
-            raise FileExistsError(self)
-        self._upload(b"", key=f"{self.key}/", exclusive=True)
-
-    def unlink(self, missing_ok=False):
-        try:
-            st = self.stat()
-        except FileNotFoundError:
-            if missing_ok:
-                return
-            raise
-        if st.is_dir():
-            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
-        blob = self._bucket.blob(self.key)
-        try:
-            with _translate_errors(self):
-                blob.delete(**self._options)
-        except FileNotFoundError:
-            # Deleted since the stat() above. Anything else -- a hold, a
-            # permission error -- is not "already gone" and raises.
-            if not missing_ok:
-                raise
-
-    def rmdir(self):
-        if not self.stat().is_dir():
-            raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
-        if not self.key:
-            raise PermissionError(
-                _errno.EACCES, "removing a bucket is not supported", str(self)
-            )
-        marker = f"{self.key}/"
-        with _translate_errors(self):
-            for blob in self._bucket.list_blobs(
-                prefix=marker, max_results=2, **self._options
-            ):
-                if blob.name != marker:
-                    raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
-        try:
-            with _translate_errors(self):
-                self._bucket.blob(marker).delete(**self._options)
-        except FileNotFoundError:
-            pass
-
-    def rm(
-        self,
-        /,
-        recursive=False,
-        missing_ok=False,
-        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
-        *,
-        follow_symlinks=False,
-        follow_binds=False,
-    ):
-        # An object store holds no symlinks or bindings: the policies are
-        # checked and have nothing to decide.
-        _check_follow("follow_symlinks", follow_symlinks)
-        _check_follow("follow_binds", follow_binds)
-        if not recursive:
-            return super().rm(
-                recursive=recursive,
-                missing_ok=missing_ok,
-                ignore_error=ignore_error,
-                follow_symlinks=follow_symlinks,
-                follow_binds=follow_binds,
-            )
-
-        def on_error(error, path=None):
-            if callable(ignore_error):
-                return ignore_error(error, self if path is None else path)
-            return bool(ignore_error)
-
-        if not self.key:
-            error = PermissionError("recursive bucket delete is not enabled")
-            if not on_error(error):
-                raise error
-            return
-
-        keys = []
-        try:
-            if self._reload(self.key) is not None:
-                keys.append(self.key)
-        except OSError as error:
-            # Not "missing": deleting the prefix tree instead of the object
-            # would remove the wrong thing.
-            if not on_error(error):
-                raise
-            return
-
-        if not keys:
-            marker = f"{self.key}/"
-            try:
-                entries = self._flat_entries(marker)
-            except FileNotFoundError:
-                # A missing bucket holds nothing: the same answer as a missing key.
-                entries = []
-            except Exception as error:
-                if not on_error(error):
-                    raise
-                return
-            keys = [key for key, _size in entries]
-            # What a walk of the directory would not visit is not removed
-            # with it: a move copies by walking and then removes this set.
-            unreachable = _store.unreachable_keys(marker, entries)
-            if unreachable:
-                error = _store.refusal(self, "remove", unreachable)
-                if not on_error(error):
-                    raise error
-                skipped = set(unreachable)
-                keys = [key for key in keys if key not in skipped]
-                if not keys:
-                    return
-
-        if not keys:
-            if missing_ok:
-                return
-            error = FileNotFoundError(self)
-            if not on_error(error):
-                raise error
-            return
-
-        for key in keys:
-            try:
-                with _translate_errors(self._key_path(key)):
-                    self._bucket.blob(key).delete(**self._options)
-            except Exception as error:
-                if not on_error(error, self._key_path(key)):
-                    raise
-
     def _flat_entries(self, prefix: str) -> "list[tuple[str, int]]":
         """`(name, size)` of every object under `prefix`, with no delimiter."""
         with _translate_errors(self):
@@ -563,61 +333,76 @@ class GsPath(UriPath):
                 for blob in self._bucket.list_blobs(prefix=prefix, **self._options)
             ]
 
-    def _unreachable_keys(self) -> "list[str]":
-        """The names under this prefix directory that a walk does not reach,
-        or `[]` for an object or a missing path."""
-        key = self.key
-        if key and self._reload(key) is not None:
-            return []
-        prefix = f"{key}/" if key else ""
-        return _store.unreachable_keys(prefix, self._flat_entries(prefix))
+    def _stat_root(self) -> FileStat:
+        # The bucket root: ask the server, as s3: does with HeadBucket, so a
+        # mistyped bucket does not read as an existing directory. A one-item
+        # listing (NotFound for a missing bucket) needs only the object-list
+        # permission the rest of the path uses.
+        with _translate_errors(self):
+            for _ in self._bucket.list_blobs(max_results=1, **self._options):
+                break
+        return FileStat(is_dir=True)
 
-    def copy(
-        self,
-        target,
-        *,
-        overwrite=False,
-        follow_symlinks=True,
-        preserve_metadata=True,
-        recursive=False,
-        ignore_error=None,
-        progress=None,
-    ):
-        # A prefix is copied by walking it; one that holds keys the walk
-        # cannot reach is refused up front rather than copied incompletely.
-        with _store.checked_copy(self, recursive):
-            return super().copy(
-                target,
-                overwrite=overwrite,
-                follow_symlinks=follow_symlinks,
-                preserve_metadata=preserve_metadata,
-                recursive=recursive,
-                ignore_error=ignore_error,
-                progress=progress,
-            )
+    def _stat_object(self, key: str) -> "FileStat | None":
+        # Only a not-found reply means "no such object": a transient or
+        # permission error read as "missing" let copy() replace an existing
+        # object.
+        blob = self._reload(key)
+        if blob is None:
+            return None
+        return FileStat(
+            st_size=blob.size,
+            st_mtime=int(blob.updated.timestamp()) if blob.updated else 0,
+            is_dir=False,
+        )
 
-    def rename(self, target: "GsPath | Uri | str"):
-        target = self._rename_target(target)
-        dest_key = _object_key(target.path)
-        # pathlib returns the new path.
-        renamed = self.with_path(target.path)
-        if dest_key == self.key:
-            # Copying onto itself and then deleting the source loses the
-            # object; a name that is not there is not renamed.
-            if self._reload(self.key) is None:
-                self._pop_stat_hint()
-                self.stat()
-            return renamed
-        source_blob = self._reload(self.key)
-        if source_blob is None:
-            # No object at the key: a prefix directory (FileNotFoundError
-            # when there is nothing at all). move() falls back to copy + rm
-            # for it.
-            self._stat_prefix()
-            raise NotImplementedError(f"rename() of the prefix directory {self}")
-        if self._holds_keys(dest_key):
-            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
+    def _has_object(self, key: str) -> bool:
+        return self._reload(key) is not None
+
+    def _has_prefix(self, key: str) -> bool:
+        with _translate_errors(self):
+            for _ in self._bucket.list_blobs(
+                prefix=f"{key}/", max_results=1, **self._options
+            ):
+                return True
+        return False
+
+    def _first_keys(self, prefix: str, limit: int) -> "list[str]":
+        with _translate_errors(self):
+            return [
+                blob.name
+                for blob in self._bucket.list_blobs(
+                    prefix=prefix, max_results=limit, **self._options
+                )
+            ]
+
+    def _put_marker(self, key: str) -> None:
+        self._upload(b"", key=key, exclusive=True)
+
+    def _delete_object(self, key: str, *, missing_ok: bool) -> None:
+        blob = self._bucket.blob(key)
+        try:
+            with _translate_errors(self):
+                blob.delete(**self._options)
+        except FileNotFoundError:
+            # Deleted since the caller looked. Anything else -- a hold, a
+            # permission error -- is not "already gone" and raises.
+            if not missing_ok:
+                raise
+
+    def _delete_keys(self, keys: "list[str]", on_error) -> None:
+        for key in keys:
+            try:
+                with _translate_errors(self._key_path(key)):
+                    self._bucket.blob(key).delete(**self._options)
+            except Exception as error:
+                if not on_error(error, self._key_path(key)):
+                    raise
+
+    def _rename_source(self, key: str):
+        return self._reload(key)
+
+    def _rename_copy(self, source_blob, dest, dest_key: str) -> None:
         with _translate_errors(self):
             self._bucket.copy_blob(source_blob, self._bucket, dest_key, **self._options)
             source_blob.delete(**self._options)
-        return renamed

@@ -8,9 +8,7 @@ import threading as _threading
 import typing as _ty
 
 from ... import utils as _utils
-from ...path import _check_follow
 from ...utils.stat import FileStat
-from .. import Uri, UriPath
 from . import _objstore as _store
 from ._extras import import_client as _import_client
 from ._extras import import_or_stub as _import_or_stub
@@ -317,7 +315,7 @@ class _S3WriteStream(_io.BufferedIOBase):
             raise OSError(_errno.EIO, str(error), str(path)) from None
 
 
-class S3Path(UriPath):
+class S3Path(_store.ObjectStorePath):
     """`s3:` scheme (`s3://bucket/key/path`): read/write/list via `boto3`.
     Requires the `s3` extra. S3 has no real directories -- `is_dir()` is
     prefix emulation (any object key under `"<path>/"`), and `mkdir()`
@@ -352,53 +350,6 @@ class S3Path(UriPath):
                 _errno.ENOENT, "an s3: path needs a bucket", str(self)
             )
         return self.backend.client()
-
-    def _key_path(self, key: str) -> "S3Path":
-        """The path of the object `key` in this path's bucket."""
-        return self.with_path(f"/{key}")
-
-    def stat(self, *, follow_symlinks=True):
-        hint = self._pop_stat_hint()
-        if hint is not None:
-            return hint
-        key = self.key
-        client = self._client
-        if key == "":
-            try:
-                client.head_bucket(Bucket=self.bucket)
-            except _S3_ERRORS as error:
-                raise _oserror(error, self) from None
-            return FileStat(is_dir=True)
-        try:
-            head = client.head_object(Bucket=self.bucket, Key=key)
-        except _botoexc.ClientError as error:
-            # A 403 stays PermissionError: S3 answers HEAD of a missing key
-            # with 403 when the caller may not list the bucket.
-            if not _is_not_found(error):
-                raise _oserror(error, self) from None
-        except _TRANSPORT_ERRORS as error:
-            raise _oserror(error, self) from None
-        else:
-            return FileStat(
-                st_size=head["ContentLength"],
-                st_mtime=int(head["LastModified"].timestamp()),
-                is_dir=False,
-            )
-        return self._stat_prefix()
-
-    def _stat_prefix(self) -> FileStat:
-        """`stat()` of a key already known not to be an object -- emulate a
-        directory: any object under the "<key>/" prefix means this is a
-        "directory", and none means there is nothing here."""
-        try:
-            resp = self._client.list_objects_v2(
-                Bucket=self.bucket, Prefix=f"{self.key}/", MaxKeys=1
-            )
-        except _S3_ERRORS as error:
-            raise _oserror(error, self) from None
-        if resp.get("KeyCount", 0) > 0:
-            return FileStat(is_dir=True)
-        raise FileNotFoundError(self)
 
     def _not_a_directory(self):
         return NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
@@ -451,10 +402,6 @@ class S3Path(UriPath):
             if not self.stat().is_dir():
                 raise self._not_a_directory()
 
-    def _listdir(self):
-        for name, _stat in self._scandir():
-            yield name
-
     def _open(self, mode="r", buffering=-1):
         if not self.bucket:
             raise FileNotFoundError(
@@ -491,23 +438,6 @@ class S3Path(UriPath):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
         return _S3WriteStream(self, exclusive=(mode == "x"))
 
-    def _holds_keys(self, key: str) -> bool:
-        """Whether any key lies under the prefix `key/`: a write or rename
-        onto it would hide those keys behind an object. Credentials that may
-        write but not list cannot ask, and are not stopped."""
-        if not key:
-            return False
-        try:
-            resp = self._client.list_objects_v2(
-                Bucket=self.bucket, Prefix=f"{key}/", MaxKeys=1
-            )
-        except _S3_ERRORS as error:
-            translated = _oserror(error, self)
-            if isinstance(translated, PermissionError):
-                return False
-            raise translated from None
-        return resp.get("KeyCount", 0) > 0
-
     def _put_exclusive(self, body, key=None) -> bool:
         """PutObject that creates `key` (default: this path's) only if it
         does not exist. FileExistsError if it does; False if the store does
@@ -527,133 +457,84 @@ class S3Path(UriPath):
             raise _oserror(error, self) from None
         return True
 
-    def _mkdir(self, mode):
-        # stat(), not exists(): a failed probe must not read as "missing".
+    def _stat_root(self) -> FileStat:
         try:
-            self.stat()
-        except FileNotFoundError:
-            pass
-        else:
-            raise FileExistsError(self)
-        marker = f"{self.key}/"
-        if not self._put_exclusive(b"", key=marker):
+            self._client.head_bucket(Bucket=self.bucket)
+        except _S3_ERRORS as error:
+            raise _oserror(error, self) from None
+        return FileStat(is_dir=True)
+
+    def _stat_object(self, key: str) -> "FileStat | None":
+        try:
+            head = self._client.head_object(Bucket=self.bucket, Key=key)
+        except _botoexc.ClientError as error:
+            # A 403 stays PermissionError: S3 answers HEAD of a missing key
+            # with 403 when the caller may not list the bucket.
+            if not _is_not_found(error):
+                raise _oserror(error, self) from None
+            return None
+        except _TRANSPORT_ERRORS as error:
+            raise _oserror(error, self) from None
+        return FileStat(
+            st_size=head["ContentLength"],
+            st_mtime=int(head["LastModified"].timestamp()),
+            is_dir=False,
+        )
+
+    def _has_object(self, key: str) -> bool:
+        try:
+            self._client.head_object(Bucket=self.bucket, Key=key)
+        except _S3_ERRORS as error:
+            if isinstance(error, _botoexc.ClientError) and _is_not_found(error):
+                return False
+            raise _oserror(error, self) from None
+        return True
+
+    def _has_prefix(self, key: str) -> bool:
+        try:
+            resp = self._client.list_objects_v2(
+                Bucket=self.bucket, Prefix=f"{key}/", MaxKeys=1
+            )
+        except _S3_ERRORS as error:
+            raise _oserror(error, self) from None
+        return resp.get("KeyCount", 0) > 0
+
+    def _flat_entries(self, prefix: str) -> "list[tuple[str, int]]":
+        """`(key, size)` of every object under `prefix`, with no delimiter."""
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            return [
+                (obj["Key"], obj.get("Size", 0) or 0)
+                for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix)
+                for obj in page.get("Contents", [])
+            ]
+        except _S3_ERRORS as error:
+            raise _oserror(error, self) from None
+
+    def _first_keys(self, prefix: str, limit: int) -> "list[str]":
+        try:
+            resp = self._client.list_objects_v2(
+                Bucket=self.bucket, Prefix=prefix, MaxKeys=limit
+            )
+        except _S3_ERRORS as error:
+            raise _oserror(error, self) from None
+        return [obj["Key"] for obj in resp.get("Contents", [])]
+
+    def _put_marker(self, key: str) -> None:
+        if not self._put_exclusive(b"", key=key):
             try:
-                self._client.put_object(Bucket=self.bucket, Key=marker, Body=b"")
+                self._client.put_object(Bucket=self.bucket, Key=key, Body=b"")
             except _S3_ERRORS as error:
                 raise _oserror(error, self) from None
 
-    def unlink(self, missing_ok=False):
+    def _delete_object(self, key: str, *, missing_ok: bool) -> None:
+        # S3 never answers a delete with "not found".
         try:
-            st = self.stat()
-        except FileNotFoundError:
-            if missing_ok:
-                return
-            raise
-        if st.is_dir():
-            # A prefix: delete_object() of the bare key would delete nothing
-            # and report success.
-            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
-        try:
-            self._client.delete_object(Bucket=self.bucket, Key=self.key)
+            self._client.delete_object(Bucket=self.bucket, Key=key)
         except _S3_ERRORS as error:
             raise _oserror(error, self) from None
 
-    def rmdir(self):
-        if not self.stat().is_dir():
-            raise self._not_a_directory()
-        if not self.key:
-            raise PermissionError(
-                _errno.EACCES, "removing a bucket is not supported", str(self)
-            )
-        marker = f"{self.key}/"
-        try:
-            resp = self._client.list_objects_v2(
-                Bucket=self.bucket, Prefix=marker, MaxKeys=2
-            )
-            contents = resp.get("Contents", [])
-            if any(obj["Key"] != marker for obj in contents):
-                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
-            self._client.delete_object(Bucket=self.bucket, Key=marker)
-        except _S3_ERRORS as error:
-            raise _oserror(error, self) from None
-
-    def rm(
-        self,
-        /,
-        recursive=False,
-        missing_ok=False,
-        ignore_error: bool | _ty.Callable[[Exception, _ty.Self], bool] = False,
-        *,
-        follow_symlinks=False,
-        follow_binds=False,
-    ):
-        # An object store holds no symlinks or bindings: the policies are
-        # checked and have nothing to decide.
-        _check_follow("follow_symlinks", follow_symlinks)
-        _check_follow("follow_binds", follow_binds)
-        if not recursive:
-            return super().rm(
-                recursive=recursive,
-                missing_ok=missing_ok,
-                ignore_error=ignore_error,
-                follow_symlinks=follow_symlinks,
-                follow_binds=follow_binds,
-            )
-
-        def on_error(error, path=None):
-            if callable(ignore_error):
-                return ignore_error(error, self if path is None else path)
-            return bool(ignore_error)
-
-        if not self.key:
-            error = PermissionError("recursive bucket delete is not enabled")
-            if not on_error(error):
-                raise error
-            return
-
-        keys = []
-        try:
-            self._client.head_object(Bucket=self.bucket, Key=self.key)
-            keys.append(self.key)
-        except _S3_ERRORS as error:
-            if not (isinstance(error, _botoexc.ClientError) and _is_not_found(error)):
-                translated = _oserror(error, self)
-                if not on_error(translated):
-                    raise translated from None
-                return
-        if not keys:
-            marker = f"{self.key}/" if self.key else ""
-            try:
-                entries = list(self._flat_entries(marker))
-            except _S3_ERRORS as error:
-                translated = _oserror(error, self)
-                if not isinstance(translated, FileNotFoundError):
-                    if not on_error(translated):
-                        raise translated from None
-                    return
-                # A missing bucket holds nothing: the same answer as a missing key.
-                entries = []
-            keys = [key for key, _size in entries]
-            # What a walk of the directory would not visit is not removed
-            # with it: a move copies by walking and then removes this set.
-            unreachable = _store.unreachable_keys(marker, entries)
-            if unreachable:
-                error = _store.refusal(self, "remove", unreachable)
-                if not on_error(error):
-                    raise error
-                skipped = set(unreachable)
-                keys = [key for key in keys if key not in skipped]
-                if not keys:
-                    return
-
-        if not keys:
-            if missing_ok:
-                return
-            error = FileNotFoundError(self)
-            if not on_error(error):
-                raise error
-            return
-
+    def _delete_keys(self, keys: "list[str]", on_error) -> None:
         iterator = iter(keys)
         while True:
             batch = list(_itertools.islice(iterator, 1000))
@@ -683,82 +564,16 @@ class S3Path(UriPath):
                 if not on_error(failed, failed_path):
                     raise failed
 
-    def _flat_entries(self, prefix: str):
-        """`(key, size)` of every object under `prefix`, with no delimiter."""
-        paginator = self._client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                yield obj["Key"], obj.get("Size", 0) or 0
-
-    def _unreachable_keys(self) -> "list[str]":
-        """The keys of this prefix directory that a walk does not reach, or
-        `[]` for an object or a missing path."""
-        key = self.key
-        if key:
-            try:
-                self._client.head_object(Bucket=self.bucket, Key=key)
-                return []
-            except _S3_ERRORS as error:
-                if not (
-                    isinstance(error, _botoexc.ClientError) and _is_not_found(error)
-                ):
-                    raise _oserror(error, self) from None
-        prefix = f"{key}/" if key else ""
+    def _rename_source(self, key: str):
         try:
-            entries = list(self._flat_entries(prefix))
+            return self._client.head_object(Bucket=self.bucket, Key=key)
         except _S3_ERRORS as error:
+            if isinstance(error, _botoexc.ClientError) and _is_not_found(error):
+                return None
             raise _oserror(error, self) from None
-        return _store.unreachable_keys(prefix, entries)
 
-    def copy(
-        self,
-        target,
-        *,
-        overwrite=False,
-        follow_symlinks=True,
-        preserve_metadata=True,
-        recursive=False,
-        ignore_error=None,
-        progress=None,
-    ):
-        # A prefix is copied by walking it; one that holds keys the walk
-        # cannot reach is refused up front rather than copied incompletely.
-        with _store.checked_copy(self, recursive):
-            return super().copy(
-                target,
-                overwrite=overwrite,
-                follow_symlinks=follow_symlinks,
-                preserve_metadata=preserve_metadata,
-                recursive=recursive,
-                ignore_error=ignore_error,
-                progress=progress,
-            )
-
-    def rename(self, target: "S3Path | Uri | str"):
-        target = self._rename_target(target)
-        dest_key = _object_key(target.path)
-        # pathlib returns the new path.
-        renamed = self.with_path(target.path)
-        if dest_key == self.key:
-            # Nothing to move, but a name that is not there is not renamed.
-            self._pop_stat_hint()
-            self.stat()
-            return renamed
+    def _rename_copy(self, head, dest, dest_key: str) -> None:
         client = self._client
-        try:
-            head = client.head_object(Bucket=self.bucket, Key=self.key)
-        except _S3_ERRORS as error:
-            if not (isinstance(error, _botoexc.ClientError) and _is_not_found(error)):
-                raise _oserror(error, self) from None
-            head = None
-        if head is None:
-            # No object at the key: a prefix directory (FileNotFoundError
-            # when there is nothing at all). Its keys are not renamed one by
-            # one here; move() falls back to copy + rm.
-            self._stat_prefix()
-            raise NotImplementedError(f"rename() of the prefix directory {self}")
-        if self._holds_keys(dest_key):
-            raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
         extra = {}
         storage_class = head.get("StorageClass")
         if storage_class and storage_class != "STANDARD":
@@ -780,4 +595,3 @@ class S3Path(UriPath):
             client.delete_object(Bucket=self.bucket, Key=self.key)
         except _S3_ERRORS as error:
             raise _oserror(error, self) from None
-        return renamed
