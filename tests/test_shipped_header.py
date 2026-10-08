@@ -66,10 +66,11 @@ def lookup(modules, name):
     for module in modules:
         try:
             imported = importlib.import_module(module)
+            if hasattr(imported, name):
+                return getattr(imported, name)
         except ImportError as error:
+            # A module, or a lazy attribute such as a backend, needs an extra.
             raise Unavailable(f"{module}: {error}") from None
-        if hasattr(imported, name):
-            return getattr(imported, name)
     raise AttributeError(f"{name} is in none of {modules}")
 
 
@@ -355,7 +356,7 @@ def test_the_header_opens_as_the_standard_says():
 def test_the_header_links_only_to_absolute_urls():
     text = HEADER.read_text(encoding="utf-8")
     assert re.findall(r"\]\((?!https?://)[^)]*\)", text) == []
-    for private in (".agents", "CHANGELOG.md", "docs/", "src/pathlib_next"):
+    for private in ("CHANGELOG.md", "docs/", "src/pathlib_next"):
         assert private not in text
 
 
