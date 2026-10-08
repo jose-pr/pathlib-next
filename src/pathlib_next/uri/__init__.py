@@ -22,10 +22,12 @@ from .source import (
     _ERRORS,
     Source,
     _compose_uri,
-    _decode_host,
+    _encode,
     _is_drive,
+    _parse_source,
     _remove_dot_segments,
-    _split_authority,
+    _source_parts,
+    _split_userinfo_text,
 )
 
 UriLike: TypeAlias = "str | Uri | os.PathLike"
@@ -41,9 +43,9 @@ def _authority_key(source: Source) -> tuple:
     scheme, userinfo, host, port = source
     return (
         scheme.lower() if scheme else None,
-        userinfo or None,
+        _split_userinfo_text(userinfo) if userinfo else None,
         str(host).lower() if host else None,
-        port or None,
+        int(port) if port not in (None, "") else None,
     )
 
 
@@ -85,7 +87,7 @@ def _segments_of(path: str) -> list[str]:
 
 
 def _uriencode(text: str, safe=""):
-    return uritools.uriencode(text, safe=safe, errors=_ERRORS).decode()
+    return _encode(text, safe)
 
 
 def _path_reference(posix: str) -> str:
@@ -234,10 +236,7 @@ class Uri(Pathname):
         #   gets no dot-segment removal: "data:,a/./b" is the bytes "a/./b".
         scheme, authority, path, query, fragment = uritools.urisplit(uri)
         scheme = scheme.lower() if scheme is not None else None
-        userinfo, host, port = _split_authority(authority)
-        if userinfo is not None:
-            userinfo = uritools.uridecode(userinfo, errors=_ERRORS)
-        host = _decode_host(host) if host is not None else ""
+        source = _parse_source(scheme, authority)
         if scheme != "data":
             path = _remove_dots(path, scheme)
         decoded = uritools.uridecode(path, errors=_ERRORS)
@@ -249,12 +248,7 @@ class Uri(Pathname):
         path = decoded
         if fragment is not None:
             fragment = uritools.uridecode(fragment, errors=_ERRORS)
-        return (
-            Source(scheme, userinfo, host, port),
-            path,
-            Query(query or ""),
-            fragment or "",
-        )
+        return source, path, Query(query or ""), fragment or ""
 
     @property
     def parts(self):
@@ -315,7 +309,7 @@ class Uri(Pathname):
                 source = _FILE_SOURCE
 
         if (
-            (source.host or source.userinfo or source.port)
+            (source.host or source.userinfo or source.port not in (None, ""))
             and _path
             and not _path.startswith("/")
         ):
@@ -535,12 +529,7 @@ class Uri(Pathname):
         # here always came from a parse or our own normalized join state,
         # never arbitrary untrusted input. See source.py's _compose_uri
         # for the equivalence notes (fuzzed against uricompose as oracle).
-        scheme = source.scheme.lower() if source.scheme else None
-        userinfo = source.userinfo or None
-        if sanitize and userinfo:
-            userinfo = userinfo.split(":", maxsplit=1)[0] or None
-        host = source.host if source.host else None
-        port = source.port or None
+        scheme, userinfo, host, port = _source_parts(source, sanitize)
         return _compose_uri(
             scheme, userinfo, host, port, path, query or None, fragment or None
         )
@@ -733,7 +722,7 @@ class Uri(Pathname):
 
     def _has_authority(self) -> bool:
         source = self.source
-        return bool(source.host or source.userinfo or source.port)
+        return bool(source.host or source.userinfo or source.port not in (None, ""))
 
     def _match_parts(self) -> tuple[bool, list[str]]:
         # An authority with an empty path ("http://h") is that authority's

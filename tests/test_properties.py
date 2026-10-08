@@ -335,13 +335,29 @@ def _uri_string(draw):
     return "".join(parts)
 
 
-# The oracle is uritools' getters, with three deliberate contract changes
-# (wave 5, Design Q1 and the non-UTF-8/data: findings):
+# The oracle is uritools' getters, with these deliberate contract changes:
 # * the query is the RAW, still-encoded component, never decoded at parse;
 # * percent-escapes that are not UTF-8 decode with surrogateescape instead
 #   of raising UnicodeDecodeError;
-# * a data: path skips dot-segment removal (RFC 2397 payloads are opaque).
+# * a data: path skips dot-segment removal (RFC 2397 payloads are opaque);
+# * the authority differs from uritools in two ways, both applied by
+#   `_oracle_authority` and nowhere else:
+#   - a host of ASCII digits alone (no ':' after it) is the host, as
+#     RFC 3986 3.2.2 has it; uritools reads it as a port and returns '';
+#   - a port above 65535 is a ValueError (RFC 3986 3.2.3 leaves the range
+#     open, TCP does not); uritools accepts any number of digits.
 _ERRORS = "surrogateescape"
+
+
+def _oracle_authority(uri: str, host, port):
+    """`(host, port)` of uritools, with the two documented differences."""
+    authority = uritools.urisplit(uri).authority
+    hostinfo = "" if authority is None else authority.rpartition("@")[2]
+    if hostinfo and ":" not in hostinfo and hostinfo.isascii() and hostinfo.isdigit():
+        host = hostinfo
+    if port is not None and port > 65535:
+        raise ValueError("port out of range 0-65535")
+    return host, port
 
 
 def _oracle_parse(uri: str):
@@ -351,11 +367,14 @@ def _oracle_parse(uri: str):
         path = uritools.uridecode(parsed.path, errors=_ERRORS)
     else:
         path = parsed.getpath(errors=_ERRORS)
+    host, port = _oracle_authority(
+        uri, parsed.gethost(errors=_ERRORS) or "", parsed.getport()
+    )
     return (
         scheme,
         parsed.getuserinfo(errors=_ERRORS),
-        parsed.gethost(errors=_ERRORS) or "",
-        parsed.getport(),
+        host,
+        port,
         path,
         parsed.query or "",
         parsed.getfragment(errors=_ERRORS) or "",
@@ -481,9 +500,13 @@ def _oracle_format_parsed_parts(source, path, query, fragment, sanitize=True):
         if sanitize:
             source_["userinfo"] = (source_["userinfo"] or "").split(":", maxsplit=1)[0]
         parts.update(source_)
-    return _with_raw_query(
-        uritools.uricompose(**{k: v for k, v in parts.items() if v}), query or None
-    )
+    # Documented differences from uricompose: a port of 0 is kept (it is a
+    # valid port and part of the endpoint's identity), and a port above
+    # 65535 is a ValueError.
+    if (parts.get("port") or 0) > 65535:
+        raise ValueError("port out of range 0-65535")
+    kept = {k: v for k, v in parts.items() if v or (k == "port" and v == 0)}
+    return _with_raw_query(uritools.uricompose(**kept), query or None)
 
 
 @given(
@@ -545,6 +568,8 @@ def test_compose_uri_matches_uricompose_direct(
     except Exception as e:
         fast = ("EXC", type(e).__name__)
     try:
+        if (port or 0) > 65535:  # the documented difference, see above
+            raise ValueError("port out of range 0-65535")
         oracle = _with_raw_query(
             uritools.uricompose(
                 scheme=scheme,

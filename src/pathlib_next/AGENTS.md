@@ -454,7 +454,16 @@ not by a checker.
     (`Source.is_local()`), `as_posix()` (`user@host:path` when a host is
     present).
   - `str()`/`repr()` drop the password (`sftp://u:pw@h/p` → `sftp://u@h/p`);
-    `as_uri(sanitize=False)` keeps it. Non-ASCII hosts render as IDNA.
+    `as_uri(sanitize=False)` keeps it. Non-ASCII hosts render as IDNA. A
+    query or fragment is printed as it is: a token carried there shows in
+    `str()`/`repr()`.
+  - Authority: the first unescaped `:` of the userinfo separates user from
+    password (`us%3Aer:pw` is the user `us:er`); a host of digits only
+    (`s3://20240101/key`) is the host; a port is 0-65535 (`ValueError`
+    otherwise, as for a `:` followed by anything but digits); an IPv6 zone is
+    written `[fe80::1%25eth0]` (a bare `%` is read too). A name that holds a
+    lone surrogate (a Windows file name can) renders as its UTF-8 bytes, so
+    `str()`, `hash()` and `==` work on it.
   - `==`/`hash` use the URI text; equal to another `Uri` or a URI string,
     never to a non-URI `Pathname`.
   - `__fspath__()` — the path for a `file:` URI on this machine (a named host
@@ -514,10 +523,15 @@ not by a checker.
     connection. A one-letter scheme is a Windows drive, so `C:/Temp/x` is a
     path.
 - **`Source(scheme, userinfo, host, port)`** (`uri.source`) — `NamedTuple`,
-  falsy when all fields are empty. `as_str(sanitize=True)`; `str()`/`repr()`
-  redact the password (the fields keep it). `Source.from_str(source,
-  strict=True)` (`ValueError` for a path/query/fragment when strict),
-  `parsed_userinfo() -> (user, password)` (`""` when absent),
+  falsy when all fields are empty; indexes by position, slice or field name.
+  `as_str(sanitize=True)` is the composer `Uri.as_uri()` uses (`file:` for an
+  empty host; an invalid scheme or port is a `ValueError`); `str()`/`repr()`
+  redact the password, and the whole userinfo for `github:`/`gitlab:`/`git:`
+  (the fields keep it). `Source.from_str(source, strict=True)` reads the
+  authority as `Uri` does (`ValueError` for a path/query/fragment when
+  strict, naming the component and never the input),
+  `parsed_userinfo() -> (user, password)` (`""` when absent; `userinfo`
+  stays the decoded `user:password` text),
   `get_scheme_cls(schemesmap=None) -> type[UriPath]`, `is_local()` —
   `localhost`/empty host or an address of this machine (IP literal, or any
   A/AAAA answer via `netimps`); cached per `Source` (`lru_cache(256)`), does

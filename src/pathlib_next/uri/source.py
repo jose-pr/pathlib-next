@@ -22,43 +22,96 @@ _DIGITS = "0123456789"
 _ERRORS = "surrogateescape"
 
 
+class _Userinfo(str):
+    """A decoded userinfo that remembers which colon separated the user name
+    from the password. It equals, hashes and prints as the plain
+    `user:password` text, so code that treats `Source.userinfo` as a `str`
+    is unaffected; only the composer and `Source.parsed_userinfo()` read
+    the split. Without it a user name holding an escaped colon (`us%3Aer`)
+    could not be told from a password separator once decoded."""
+
+    __slots__ = ("user", "password")
+
+    def __new__(cls, user: str, password: "str | None" = None):
+        obj = str.__new__(cls, user if password is None else f"{user}:{password}")
+        obj.user = user
+        obj.password = password
+        return obj
+
+    def __reduce__(self):
+        return _Userinfo, (self.user, self.password)
+
+
+def _split_userinfo_text(userinfo: str) -> "tuple[str, str | None]":
+    """`(user, password)` of a userinfo: the split `_Userinfo` recorded, else
+    at the first colon. `password` is None when there is no colon."""
+    if isinstance(userinfo, _Userinfo):
+        return userinfo.user, userinfo.password
+    user, colon, password = userinfo.partition(":")
+    return user, (password if colon else None)
+
+
+def _decode_userinfo(raw: str) -> _Userinfo:
+    """Decode a raw userinfo: split at the first literal colon FIRST, then
+    decode each half, so an escaped `%3A` stays part of the name."""
+    user, colon, password = raw.partition(":")
+    return _Userinfo(
+        _uritools.uridecode(user, errors=_ERRORS),
+        _uritools.uridecode(password, errors=_ERRORS) if colon else None,
+    )
+
+
+def _parse_port(text: str) -> "int | None":
+    """The port a run of ASCII digits names (None for no digits), which must
+    be 0-65535 (RFC 3986 3.2.3 leaves it open; TCP and UDP do not). The
+    message names no part of the input: it may sit beside a password."""
+    if not text:
+        return None
+    digits = text.lstrip("0") or "0"
+    if len(digits) > 5 or int(digits) > 65535:
+        raise ValueError("port out of range 0-65535")
+    return int(digits)
+
+
 def _split_authority(
     authority: "str | None",
 ) -> "tuple[str | None, str | None, int | None]":
     """One-pass split of a raw URI authority into (userinfo, host, port) --
-    RAW/undecoded strings, port as int-or-None. Ported directly from
+    RAW/undecoded strings, port as int-or-None. Ported from
     `uritools.SplitResult`'s `.userinfo`/`.host`/`.port` properties (each
-    independently re-`rpartition`s `authority` today, ~3-4x redundant work
-    per `Uri()` construction across the getter calls this replaces) rather
-    than reinventing the logic -- verified equivalent by fuzzing 20000+
-    generated URIs against uritools as the oracle (tests/test_properties.py).
+    independently re-`rpartition`s `authority`, ~3-4x redundant work per
+    `Uri()` construction) -- verified equivalent by fuzzing against uritools
+    as the oracle (tests/test_properties.py), with the differences listed
+    there:
 
-    Faithfully reproduces one uritools quirk, not a bug we get to "fix"
-    here: `.host` does NOT check whether ':' was actually present in the
-    userinfo-stripped remainder -- for a colon-less, all-digit remainder
-    (e.g. authority `"0"`), `str.rpartition`'s not-found fallback shape
-    (`('', '', s)`) puts the whole string in the *port* slot, and since an
-    all-digit string passes the "looks like a port" check, uritools'
-    `.host` returns `''` instead of the real host. `.port` (used for the
-    `port` result here) doesn't share this quirk -- it explicitly checks
-    whether ':' was found via the middle `rpartition` element instead of
-    inferring it from digit-ness, so it's correct: no port, not empty."""
+    * a host is followed by a port only when a ':' was found, so a host of
+      digits alone (`s3://20240101/key`) stays the host; uritools reads it
+      as a port and returns an empty host;
+    * the port is 0-65535; a ':' followed by anything else that is not a
+      bracketed address is an invalid port (`ValueError`), not part of the
+      host name."""
     if authority is None:
         return None, None, None
     userinfo, at_sep, hostinfo = authority.rpartition("@")
     if not at_sep:
         userinfo = None
-    host_part, _, port_part = hostinfo.rpartition(":")
-    if port_part.lstrip(_DIGITS):
-        host = hostinfo
-    else:
-        host = host_part
-    _, port_sep, port_str = authority.rpartition(":")
-    if port_sep and not port_str.lstrip(_DIGITS):
-        port = int(port_str) if port_str else None
-    else:
-        port = None
-    return userinfo, host, port
+    host, colon, tail = hostinfo.rpartition(":")
+    if colon and not tail.lstrip(_DIGITS):
+        return userinfo, host, _parse_port(tail)
+    if colon and not hostinfo.startswith("["):
+        raise ValueError("invalid port: it must be digits")
+    return userinfo, hostinfo, None
+
+
+def _ipv6_from_literal(literal: str) -> _ip.IPv6Address:
+    """The address a bracketed IPv6 literal names. A zone is introduced by
+    `%25` (RFC 6874: the `%` of `address%zone` is escaped inside a URI) and
+    is percent-decoded; a bare `%` is read as the delimiter as well, as
+    `ipaddress` does."""
+    address, sep, zone = literal.partition("%25")
+    if sep:
+        literal = f"{address}%{_uritools.uridecode(zone, errors=_ERRORS)}"
+    return _ip.IPv6Address(literal)
 
 
 def _decode_host(host: str) -> "str | _IPAddress":
@@ -68,18 +121,30 @@ def _decode_host(host: str) -> "str | _IPAddress":
     IP-literal-version rejection match uritools' actual behavior exactly
     (including its case-sensitive-only `v` check, despite RFC 3986
     describing it as case-insensitive -- verified by fuzzing, don't
-    "correct" this without checking uritools itself doesn't diverge)."""
+    "correct" this without checking uritools itself doesn't diverge).
+    An IPv6 zone is read as RFC 6874 says (`_ipv6_from_literal`)."""
     if host.startswith("[") and host.endswith("]"):
         literal = host[1:-1]
         if literal.startswith("v"):
             raise ValueError("address mechanism not supported")
-        return _ip.IPv6Address(literal)
+        return _ipv6_from_literal(literal)
     if host.startswith("[") or host.endswith("]"):
         raise ValueError(f"Invalid host {host!r}: mismatched brackets")
     try:
         return _ip.IPv4Address(host)
     except ValueError:
         return _uritools.uridecode(host, errors=_ERRORS).lower()
+
+
+def _parse_source(scheme: "str | None", authority: "str | None") -> "Source":
+    """The `Source` of an already split URI: `scheme` is lower-cased by the
+    caller, `authority` is the raw text. Used by `Uri` and `Source.from_str`
+    so both read an authority the same way."""
+    userinfo, host, port = _split_authority(authority)
+    if userinfo is not None:
+        userinfo = _decode_userinfo(userinfo)
+    host = _decode_host(host) if host is not None else ""
+    return Source(scheme, userinfo, host, port)
 
 
 def _is_drive(segment: str) -> bool:
@@ -144,6 +209,7 @@ def _remove_dot_segments(path: str, *, drive: bool = False) -> str:
 # (scheme, userinfo, host, port, path, query, fragment) combinations.
 
 _SUB_DELIMS = "!$&'()*+,;="
+_SAFE_USER = _SUB_DELIMS
 _SAFE_USERINFO = _SUB_DELIMS + ":"
 _SAFE_HOST = _SUB_DELIMS
 _SAFE_PATH = _SUB_DELIMS + ":@/"
@@ -152,6 +218,42 @@ _SAFE_FRAGMENT = _SAFE_QUERY
 
 
 _PERCENT_ESCAPE = _re.compile("(%[0-9A-Fa-f]{2})")
+_SCHEME_RE = _re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*")
+
+
+def _lenient_utf8(text: str) -> bytes:
+    """`text` as UTF-8 where a surrogate that `surrogateescape` cannot carry
+    (a lone U+D800-U+DBFF or U+DC00-U+DC7F, which an NTFS name may hold) is
+    written the way `surrogatepass` writes it, and an escaped byte
+    (U+DC80-U+DCFF) is that byte again."""
+    out = bytearray()
+    for char in text:
+        code = ord(char)
+        if 0xDC80 <= code <= 0xDCFF:
+            out.append(code - 0xDC00)
+        else:
+            out += char.encode("utf-8", "surrogatepass")
+    return bytes(out)
+
+
+def _encode(text: str, safe: str) -> str:
+    """`text` percent-encoded as UTF-8, keeping the characters of `safe`.
+    A decoded path may hold escaped bytes (`_ERRORS`) and, from a Windows
+    listing, a lone surrogate; neither may make the composer raise."""
+    try:
+        return _uritools.uriencode(text, safe, errors=_ERRORS).decode()
+    except UnicodeEncodeError:
+        return _uritools.uriencode(_lenient_utf8(text), safe).decode()
+
+
+def _encode_userinfo(userinfo: str) -> str:
+    """A userinfo for composition: the user name escapes its colons, the
+    password keeps them (RFC 3986 3.2.1)."""
+    user, password = _split_userinfo_text(userinfo)
+    text = _encode(user, _SAFE_USER)
+    if password is not None:
+        text += ":" + _encode(password, _SAFE_USERINFO)
+    return text
 
 
 def _encode_raw_query(query: str) -> str:
@@ -167,10 +269,17 @@ def _encode_raw_query(query: str) -> str:
     pieces = _PERCENT_ESCAPE.split(query)
     for index in range(0, len(pieces), 2):
         if pieces[index]:
-            pieces[index] = _uritools.uriencode(
-                pieces[index], _SAFE_QUERY, errors=_ERRORS
-            ).decode()
+            pieces[index] = _encode(pieces[index], _SAFE_QUERY)
     return "".join(pieces)
+
+
+def _compose_ipv6(address: _ip.IPv6Address) -> str:
+    """A bracketed IPv6 literal; a zone is written after `%25` and
+    percent-encoded (RFC 6874)."""
+    text, sep, zone = address.compressed.partition("%")
+    if sep:
+        text = f"{text}%25{_encode(zone, '')}"
+    return f"[{text}]"
 
 
 def _compose_host(host: "str | _IPAddress") -> str:
@@ -179,15 +288,19 @@ def _compose_host(host: "str | _IPAddress") -> str:
     bare (non-bracketed) string that happens to parse as IPv6 gets
     auto-bracketed (matches `uricompose`'s own behavior for a manually
     -constructed `Source(..., host="::1", ...)`, not just an
-    already-bracketed literal)."""
+    already-bracketed literal). Deliberately NOT replaced by netimps'
+    `join_host`/`FQDN`: those implement the RFC reading, this function the
+    uritools one this module's output must round-trip through (and `FQDN`
+    would reject names this composes), except where noted: an IPv6 zone is
+    written as RFC 6874 says."""
     if isinstance(host, _ip.IPv6Address):
-        return f"[{host.compressed}]"
+        return _compose_ipv6(host)
     if isinstance(host, _ip.IPv4Address):
         return host.compressed
     if host.startswith("[") and host.endswith("]"):
-        return f"[{_ip.IPv6Address(host[1:-1]).compressed}]"
+        return _compose_ipv6(_ipv6_from_literal(host[1:-1]))
     try:
-        return f"[{_ip.IPv6Address(host).compressed}]"
+        return _compose_ipv6(_ip.IPv6Address(host))
     except ValueError:
         pass
     host = host.lower()
@@ -202,7 +315,7 @@ def _compose_host(host: "str | _IPAddress") -> str:
             return _idna_encode(host)
         except UnicodeError:
             pass
-    return _uritools.uriencode(host, _SAFE_HOST, errors=_ERRORS).decode()
+    return _encode(host, _SAFE_HOST)
 
 
 def _idna_encode(host: str) -> str:
@@ -217,35 +330,48 @@ def _idna_encode(host: str) -> str:
     return _idna.encode(host, uts46=True).decode("ascii")
 
 
+def _port_text(port: "int | str") -> str:
+    """The digits of a port that is 0-65535 (an int, or a `str` of digits);
+    anything else is a `ValueError`, so a field that did not come from a
+    parse cannot add a path or a second authority to the result."""
+    if isinstance(port, str):
+        if not port.isascii() or not port.isdigit():
+            raise ValueError("invalid port: it must be digits")
+        return str(_parse_port(port))
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ValueError("invalid port: it must be an integer")
+    if not 0 <= port <= 65535:
+        raise ValueError("port out of range 0-65535")
+    return str(port)
+
+
 def _compose_uri(
     scheme: "str | None",
     userinfo: "str | None",
     host: "str | _IPAddress | None",
-    port: "int | None",
+    port: "int | str | None",
     path: str,
     query: "str | None",
     fragment: "str | None",
 ) -> str:
     parts = []
     if scheme is not None:
+        if not _SCHEME_RE.fullmatch(scheme):
+            raise ValueError("invalid scheme")
         parts.append(scheme)
         parts.append(":")
     has_authority = userinfo is not None or host is not None or port is not None
     if has_authority:
         parts.append("//")
         if userinfo is not None:
-            parts.append(
-                _uritools.uriencode(userinfo, _SAFE_USERINFO, errors=_ERRORS).decode()
-            )
+            parts.append(_encode_userinfo(userinfo))
             parts.append("@")
         if host is not None:
             parts.append(_compose_host(host))
         if port is not None:
             parts.append(":")
-            parts.append(str(port))
-    path_enc = (
-        _uritools.uriencode(path, _SAFE_PATH, errors=_ERRORS).decode() if path else ""
-    )
+            parts.append(_port_text(port))
+    path_enc = _encode(path, _SAFE_PATH) if path else ""
     if has_authority and path_enc and not path_enc.startswith("/"):
         raise ValueError("Invalid path with authority component")
     if not has_authority and path_enc.startswith("//"):
@@ -259,10 +385,37 @@ def _compose_uri(
         parts.append(_encode_raw_query(query))
     if fragment is not None:
         parts.append("#")
-        parts.append(
-            _uritools.uriencode(fragment, _SAFE_FRAGMENT, errors=_ERRORS).decode()
-        )
+        parts.append(_encode(fragment, _SAFE_FRAGMENT))
     return "".join(parts)
+
+
+#: Schemes whose userinfo is an access token, not a user name: `str()` and
+#: `repr()` show none of it (the classes drop it from their own text too).
+_TOKEN_SCHEMES = frozenset({"github", "gitlab", "git", "git+github", "git+gitlab"})
+
+
+def _redact_userinfo(userinfo: str, scheme: "str | None") -> "_Userinfo | None":
+    """`userinfo` without its password; nothing at all for a token scheme,
+    where the user name is the secret. An empty user name leaves no
+    userinfo."""
+    if scheme in _TOKEN_SCHEMES:
+        return None
+    user = _split_userinfo_text(userinfo)[0]
+    return _Userinfo(user) if user else None
+
+
+def _source_parts(source: "Source", sanitize: bool) -> tuple:
+    """`(scheme, userinfo, host, port)` as `_compose_uri` takes them for
+    `source`: falsy fields are left out and `sanitize` drops the password.
+    A `Source` and a `Uri` both render through this, so they cannot
+    disagree."""
+    scheme = source.scheme.lower() if source.scheme else None
+    userinfo = source.userinfo or None
+    if sanitize and userinfo:
+        userinfo = _redact_userinfo(userinfo, scheme)
+    host = source.host if source.host else None
+    port = source.port if source.port not in (None, "") else None
+    return scheme, userinfo, host, port
 
 
 class Source(_ty.NamedTuple):
@@ -282,26 +435,24 @@ class Source(_ty.NamedTuple):
             or (self[3] != "" and self[3] is not None)
         )
 
-    def _redacted_userinfo(self) -> "str | None":
+    def _redacted_userinfo(self) -> "_Userinfo | None":
         if not self.userinfo:
             return self.userinfo
-        return self.userinfo.split(":", maxsplit=1)[0] or None
+        scheme = self.scheme.lower() if self.scheme else None
+        return _redact_userinfo(self.userinfo, scheme)
 
     def as_str(self, /, sanitize=True) -> str:
         """Compose this `Source` back into an authority string
-        (`scheme://userinfo@host:port`). `sanitize=True` (the default,
-        matching `__str__`) drops the password from `userinfo`; pass
-        `sanitize=False` for the full, credentialed round trip -- the
-        same escape hatch `Uri.as_uri(sanitize=False)` provides one layer
-        up. Mirrors `Uri.as_uri()`'s name/kwarg exactly so both classes
-        are used the same way.
+        (`scheme://userinfo@host:port`; `file:` for an empty host). It is the
+        composer `Uri.as_uri()` uses, so a non-ASCII host renders as IDNA
+        here too, and a scheme or port that is not valid raises
+        `ValueError`. `sanitize=True` (the default, matching `__str__`)
+        drops the password from `userinfo`; pass `sanitize=False` for the
+        full, credentialed round trip -- the same escape hatch
+        `Uri.as_uri(sanitize=False)` provides one layer up.
         """
-        return _uritools.uricompose(
-            scheme=self.scheme,
-            userinfo=self._redacted_userinfo() if sanitize else self.userinfo,
-            host=self.host,
-            port=self.port,
-        )
+        scheme, userinfo, host, port = _source_parts(self, sanitize)
+        return _compose_uri(scheme, userinfo, host, port, "", None, None)
 
     def __str__(self) -> str:
         """Deliberately sanitized (password dropped from `userinfo`), same
@@ -317,39 +468,51 @@ class Source(_ty.NamedTuple):
         # verbatim (password and all) -- a traceback frame renders repr(),
         # so an unredacted Source anywhere on a failing call stack leaks
         # the credential into logs. Redact the same way __str__ does.
+        redacted = self._redacted_userinfo()
+        if redacted is not None:
+            redacted = str(redacted)
         return (
             f"{type(self).__name__}(scheme={self.scheme!r}, "
-            f"userinfo={self._redacted_userinfo()!r}, host={self.host!r}, "
+            f"userinfo={redacted!r}, host={self.host!r}, "
             f"port={self.port!r})"
         )
 
     @classmethod
     def from_str(cls, source: str, strict=True):
+        """The `Source` a URI string names. With `strict` (the default) a
+        path, query or fragment is a `ValueError` that names the component
+        and not the input, which may carry a password. A port outside
+        0-65535, or a ':' followed by anything but digits in a name that is
+        not a bracketed address, is a `ValueError` as well."""
         uri = _uritools.urisplit(source)
-        if strict and (uri.path or uri.fragment or uri.query):
-            raise ValueError(source)
+        if strict:
+            extra = [
+                name for name in ("path", "query", "fragment") if getattr(uri, name)
+            ]
+            if extra:
+                raise ValueError(
+                    "expected scheme and authority only, found a "
+                    + " and a ".join(extra)
+                )
         scheme = uri.scheme.lower() if uri.scheme is not None else None
-        userinfo, host, port = _split_authority(uri.authority)
-        if userinfo is not None:
-            userinfo = _uritools.uridecode(userinfo, errors=_ERRORS)
-        if host is not None:
-            host = _decode_host(host)
-        return cls(scheme, userinfo, host, port)
+        return _parse_source(scheme, uri.authority)
 
     def keys(self):
         return self._asdict().keys()
 
-    def __getitem__(self, key: int | str):
-        if not isinstance(key, str):
-            key = self._fields[key]
-        return getattr(self, key)
+    def __getitem__(self, key: int | slice | str):
+        if isinstance(key, str):
+            return getattr(self, key)
+        return tuple.__getitem__(self, key)
 
-    def parsed_userinfo(self):
-        parts = []
-        if self.userinfo:
-            parts = self.userinfo.split(":", maxsplit=1)
-        parts = parts + ["", ""]
-        return parts[0], parts[1]
+    def parsed_userinfo(self) -> "tuple[str, str]":
+        """`(user, password)`, `""` for a part that is absent. The split is
+        the first colon of the userinfo as it was written (an escaped colon
+        in the user name stays in the name)."""
+        if not self.userinfo:
+            return "", ""
+        user, password = _split_userinfo_text(self.userinfo)
+        return user, password or ""
 
     def get_scheme_cls(self, schemesmap: _ty.Mapping[str, type["UriPath"]] = None):
         """The `UriPath` subclass registered for this scheme, or `UriPath`

@@ -250,6 +250,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   chain once, so such a link is skipped with the `UserWarning` every other
   unresolvable link gets, the other members are extracted, and a chain of any
   length ending at a file is followed.
+- **A host made only of digits is a host.** `UriPath("s3://20240101/key")`
+  had host `""` and rendered `s3:/key`, so a bucket, container or account named
+  with digits addressed nothing (`gs://123456/k`, `az://1234567/c/k`,
+  `http://12345/x` and `sftp://u@007/x` likewise). The host is now `20240101`
+  and the URI renders as written. `http://12345:80/x` was already right.
+- **The first unescaped `:` of a userinfo separates user from password.**
+  `sftp://us%3Aer:S3CRET@h/p` was read as user `us` with password `er:S3CRET`
+  and rendered `sftp://us:er:S3CRET@h/p`, a different credential from the one
+  written. The user is `us:er` and the URI renders `us%3Aer:S3CRET`.
+  `Source.userinfo` is still the decoded `user:password` text (a `str`);
+  `parsed_userinfo()` and the composer read the split it recorded, and two
+  endpoints that differ only in that split no longer share a backend.
+- **A port is 0-65535, and a `:` must be followed by digits.** `http://h:99999/`
+  parsed, `http://h:0/x` parsed and rendered without `:0` (and counted as the
+  same endpoint as no port), a 5000-digit port was an error on 3.14 and a
+  5000-digit integer on 3.9, and `http://h:abc/` or `http://h:-1/` made the
+  whole `h:abc` the host name. A port above 65535 and a `:` followed by
+  anything but digits (after a name that is not a bracketed address) are now a
+  `ValueError` that does not echo the input; an empty port (`http://h:/`) is
+  still no port, and port `0` is kept. A `Source` built by hand with a scheme
+  that is not an RFC 3986 scheme or a port that is not 0-65535 raises
+  `ValueError` when it is rendered, where `Source("http", None, "h", "80/evil")`
+  used to add a path to the URI.
+- **An IPv6 zone follows `%25`.** `http://[fe80::1%25eth0]/x` had zone
+  `25eth0` and an unescaped `http://[fe80::1%eth0]/x` was written back with a
+  bare `%`. The zone is `eth0`, and the URI is written `[fe80::1%25eth0]`
+  whichever spelling it was read from. A zone that was spelled `%25` followed
+  by nothing is now an error.
+- **`Source.as_str()` and `str(Source)` compose like `Uri.as_uri()`.** They went
+  through a second composer: a non-ASCII host came out percent-encoded
+  (`http://b%C3%BCcher.example`, now `xn--bcher-kva`), an empty host gave
+  `file://` and `x://` (now `file:` and `x:`), and a scheme or port that was
+  not valid raised from one composer and not from the other.
+- **`Source.from_str()` does not echo its input.** A path, query or fragment
+  after the authority raised `ValueError` with the whole string, password
+  included; the message now names the component (`found a path`). A port out of
+  range does the same. `repr()` and `str()` of a `Source` also hide the whole
+  userinfo of a `github:`, `gitlab:` or `git:` source, where the token is the
+  user name and was printed.
+- **A file name holding a lone surrogate can be printed, hashed and sorted.** An
+  NTFS directory may hold `a\ud800b.txt`; `iterdir()` yielded the child, but
+  `str()`, `repr()`, `hash()`, `==` and `sorted()` of it raised
+  `UnicodeEncodeError`. Such a name renders as its UTF-8 bytes
+  (`%ED%A0%80`); an escaped non-UTF-8 byte renders as that byte, as before.
 
 ## [0.9.12] - 2026-10-08
 
