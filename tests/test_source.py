@@ -81,6 +81,7 @@ def test_is_local_bare_ipv6_string_host():
 
 
 @pytest.mark.allow_network  # real resolution of this machine's own name
+@pytest.mark.allow_program("nslookup")  # the resolver's last resort on POSIX
 def test_is_local_own_hostname():
     # Exercises the real hostname->address resolution path end to end
     # (netimps.resolve()'s default backend chain), not just IP literals.

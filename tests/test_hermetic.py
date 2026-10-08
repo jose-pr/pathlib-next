@@ -8,6 +8,7 @@ connection to anything.
 """
 
 import asyncio
+import importlib.util
 import os
 import pathlib
 import socket
@@ -117,10 +118,14 @@ def test_a_name_lookup_for_a_remote_host_is_refused_before_it_is_made(
     assert len(recorders[name].calls) == 1
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="the proactor event loop is Windows-only"
+)
 def test_an_overlapped_connect_to_a_remote_host_is_refused(monkeypatch):
     # The Windows default event loop connects without touching the socket
     # methods, so its proactor is guarded as well.
-    windows_events = pytest.importorskip("asyncio.windows_events")
+    import asyncio.windows_events as windows_events
+
     recorders, blocked = _guard_over(
         monkeypatch, windows_events.IocpProactor, ["connect", "sendto"]
     )
@@ -320,7 +325,9 @@ def test_a_session_started_from_a_shell_with_proxies_and_aws_settings_is_isolate
 ):
     result = _probe("probe_session_environment.py", tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "3 passed" in result.stdout, result.stdout
+    # The third probe needs `requests`, which a bare install does not have.
+    expected = "3 passed" if importlib.util.find_spec("requests") else "2 passed"
+    assert expected in result.stdout, result.stdout
 
 
 def test_a_test_that_leaves_the_environment_changed_fails_at_teardown(tmp_path):

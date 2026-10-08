@@ -44,10 +44,16 @@ def test_the_census_sees_a_socket_a_loop_a_process_and_a_thread_until_they_end()
 def test_a_listening_socket_is_named_as_one():
     listener = socket.create_server(("127.0.0.1", 0))
     try:
+        try:
+            listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            expected = "listening socket"
+        except OSError:
+            # A platform that will not say (macOS): it is still counted.
+            expected = "socket"
         kinds = [item.kind for item in census.take_census().items]
     finally:
         listener.close()
-    assert "listening socket" in kinds
+    assert expected in kinds
 
 
 def _run(*args):
