@@ -974,3 +974,19 @@ def test_renaming_a_missing_path_onto_its_own_name_is_file_not_found():
     assert there.rename("there.txt") == there
     assert _gs("gs://bucket/d", backend).rename("d").key == "d"
     assert bucket.objects == {"there.txt": b"x", "d/f": b"x"}
+
+
+def test_renaming_a_prefix_directory_reloads_the_key_once(monkeypatch):
+    reloads = []
+    original = _FakeBlob.reload
+
+    def counted(self, **kwargs):
+        reloads.append(self.name)
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(_FakeBlob, "reload", counted)
+    backend, bucket = _bucket_with(**{"dir/f": b"x"})
+    with pytest.raises(NotImplementedError):
+        _gs("gs://bucket/dir", backend).rename("other")
+    assert reloads == ["dir"]
+    assert bucket.list_calls == ["dir/"]

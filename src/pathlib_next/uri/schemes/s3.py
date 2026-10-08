@@ -384,11 +384,15 @@ class S3Path(UriPath):
                 st_mtime=int(head["LastModified"].timestamp()),
                 is_dir=False,
             )
-        # Not an object at this exact key -- emulate a directory: any
-        # object under the "<key>/" prefix means this is a "directory".
+        return self._stat_prefix()
+
+    def _stat_prefix(self) -> FileStat:
+        """`stat()` of a key already known not to be an object -- emulate a
+        directory: any object under the "<key>/" prefix means this is a
+        "directory", and none means there is nothing here."""
         try:
-            resp = client.list_objects_v2(
-                Bucket=self.bucket, Prefix=f"{key}/", MaxKeys=1
+            resp = self._client.list_objects_v2(
+                Bucket=self.bucket, Prefix=f"{self.key}/", MaxKeys=1
             )
         except _S3_ERRORS as error:
             raise _oserror(error, self) from None
@@ -748,11 +752,10 @@ class S3Path(UriPath):
                 raise _oserror(error, self) from None
             head = None
         if head is None:
-            # No object at the key: a prefix directory (stat() raises
-            # FileNotFoundError when there is nothing at all). Its keys are
-            # not renamed one by one here; move() falls back to copy + rm.
-            self._pop_stat_hint()
-            self.stat()
+            # No object at the key: a prefix directory (FileNotFoundError
+            # when there is nothing at all). Its keys are not renamed one by
+            # one here; move() falls back to copy + rm.
+            self._stat_prefix()
             raise NotImplementedError(f"rename() of the prefix directory {self}")
         if self._holds_keys(dest_key):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))

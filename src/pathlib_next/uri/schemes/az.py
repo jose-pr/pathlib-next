@@ -5,6 +5,7 @@ import errno as _errno
 import io as _io
 import sys as _sys
 import threading as _thread
+import time as _time
 import typing as _ty
 
 from ... import utils as _utils
@@ -231,6 +232,23 @@ class _AzWriteStream(_io.BytesIO):
             super().close()
 
 
+COPY_POLL_TIMEOUT = 300.0
+"""Seconds `AzPath.rename()` waits for the server-side copy to finish. A copy
+inside one account is normally done when it is started; past this the copy is
+aborted (the destination may still appear if the abort fails) and `rename()`
+raises `TimeoutError`, the source untouched."""
+
+_COPY_POLL_INTERVAL = 0.1
+
+
+def _copy_id(props) -> "str | None":
+    try:
+        return props["copy_id"]
+    except (KeyError, TypeError):
+        pass
+    return getattr(getattr(props, "copy", None), "id", None)
+
+
 def _copy_status(props) -> "str | None":
     # `start_copy_from_url()` returns a dict with "copy_status";
     # `get_blob_properties()` returns BlobProperties, whose status lives at
@@ -348,11 +366,17 @@ class AzPath(UriPath):
                 ),
                 is_dir=False,
             )
-        # Not a blob at this exact key -- emulate a directory: any blob
-        # under the "<key>/" prefix means this is a "directory".
-        prefix = f"{key}/"
+        return self._stat_prefix()
+
+    def _stat_prefix(self) -> FileStat:
+        """`stat()` of a key already known not to be a blob -- emulate a
+        directory: any blob under the "<key>/" prefix means this is a
+        "directory", and none means there is nothing here."""
         with _translate_errors(self):
-            for _ in self._container.list_blobs(name_starts_with=prefix):
+            # One item answers; the default page would carry up to 5000.
+            for _ in self._container.list_blobs(
+                name_starts_with=f"{self.key}/", results_per_page=1
+            ):
                 return FileStat(is_dir=True)
         raise FileNotFoundError(self)
 
@@ -456,7 +480,9 @@ class AzPath(UriPath):
             return False
         try:
             with _translate_errors(self):
-                for _ in self._container.list_blobs(name_starts_with=f"{key}/"):
+                for _ in self._container.list_blobs(
+                    name_starts_with=f"{key}/", results_per_page=1
+                ):
                     return True
         except PermissionError:
             pass
@@ -508,7 +534,9 @@ class AzPath(UriPath):
         marker = f"{self.key}/"
         count = 0
         with _translate_errors(self):
-            for blob in self._container.list_blobs(name_starts_with=marker):
+            for blob in self._container.list_blobs(
+                name_starts_with=marker, results_per_page=2
+            ):
                 if blob.name != marker:
                     raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
                 count += 1
@@ -680,6 +708,15 @@ class AzPath(UriPath):
         other_container = next((s for s in other.path.split("/") if s), "")
         return other_container == self.container
 
+    @staticmethod
+    def _abort_copy(blob_client, copy_id) -> None:
+        """Stop a copy that is still pending; best effort."""
+        if copy_id is not None:
+            try:
+                blob_client.abort_copy(copy_id)
+            except Exception:
+                pass
+
     def rename(self, target: "AzPath | Uri | str"):
         target = self._rename_target(target)
         # `with_path`, not `with_segments(target)`: the latter joined the Uri
@@ -695,11 +732,10 @@ class AzPath(UriPath):
                 self.stat()
             return dest
         if self._properties(self.key) is None:
-            # No blob at the key: a prefix directory (stat() raises
-            # FileNotFoundError when there is nothing at all). move() falls
-            # back to copy + rm for it.
-            self._pop_stat_hint()
-            self.stat()
+            # No blob at the key: a prefix directory (FileNotFoundError
+            # when there is nothing at all). move() falls back to copy + rm
+            # for it.
+            self._stat_prefix()
             raise NotImplementedError(f"rename() of the prefix directory {self}")
         if self._holds_keys(dest_key):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
@@ -709,11 +745,18 @@ class AzPath(UriPath):
         with _translate_errors(self):
             # start_copy_from_url is async, poll for completion
             copy_props = dest_blob_client.start_copy_from_url(source_url)
+            copy_id = _copy_id(copy_props)
             # Poll until copy is complete
+            deadline = _time.monotonic() + COPY_POLL_TIMEOUT
             while _copy_status(copy_props) == "pending":
-                import time
-
-                time.sleep(0.1)
+                if _time.monotonic() >= deadline:
+                    self._abort_copy(dest_blob_client, copy_id)
+                    raise TimeoutError(
+                        _errno.ETIMEDOUT,
+                        f"the copy did not finish within {COPY_POLL_TIMEOUT:g} s",
+                        str(self),
+                    )
+                _time.sleep(_COPY_POLL_INTERVAL)
                 dest_blob_client = self._container.get_blob_client(dest_key)
                 copy_props = dest_blob_client.get_blob_properties()
             if _copy_status(copy_props) != "success":

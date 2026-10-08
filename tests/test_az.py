@@ -167,3 +167,37 @@ def test_az_nothing_listening_is_a_connection_error_with_the_sas_token_unseen():
     assert info.value.__cause__ is None
     assert "SECRETSIGNATUREVALUE" not in str(info.value)
     assert path.exists() is False
+
+
+@pytest.fixture
+def listing_requests(monkeypatch):
+    """The request lines the loopback server receives."""
+    import http.server
+
+    seen = []
+    original = http.server.BaseHTTPRequestHandler.parse_request
+
+    def parse_request(self):
+        ok = original(self)
+        if ok:
+            seen.append(f"{self.command} {self.path}")
+        return ok
+
+    monkeypatch.setattr(
+        http.server.BaseHTTPRequestHandler, "parse_request", parse_request
+    )
+    return seen
+
+
+def test_az_probes_for_a_directory_ask_the_service_for_one_item(
+    az_server, listing_requests
+):
+    path, _ = az_server
+    assert (path / "sub").is_dir()
+    assert not (path / "missing").exists()
+    probes = [line for line in listing_requests if "comp=list" in line]
+    assert len(probes) == 2
+    assert all(
+        "prefix=sub%2F" in line or "prefix=missing%2F" in line for line in probes
+    )
+    assert all("maxresults=1" in line for line in probes)

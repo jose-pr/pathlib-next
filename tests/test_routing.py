@@ -206,7 +206,7 @@ class _AzContainer:
     def get_blob_client(self, name):
         return _AzBlob(self, name)
 
-    def list_blobs(self, name_starts_with=""):
+    def list_blobs(self, name_starts_with="", **_kwargs):
         return iter(
             [name for name in sorted(self.objects) if name.startswith(name_starts_with)]
         )

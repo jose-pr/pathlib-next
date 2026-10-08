@@ -939,8 +939,10 @@ chained (their text can carry credentials).
   them in; timeouts and retries are the SDK's own `retry_*`, `connection_timeout=`
   and `read_timeout=` client options); `az://account` is a directory whose
   children are the containers; a path with no account and no `backend=`
-  does not exist; `rmdir()` of the container root → `PermissionError`; `rename()` within
-  one container; `"x"` sends
+  does not exist; `rmdir()` of the container root → `PermissionError`;
+  `rename()` within one container waits for the server-side copy for at most
+  `schemes.az.COPY_POLL_TIMEOUT` (300 s), then aborts it and raises
+  `TimeoutError` with the source untouched; `"x"` sends
   `If-None-Match: *`; `"a"` unsupported; `st_mtime` from `last_modified`.
 - **`GitHubPath`** (`github://[TOKEN@]host/owner/repo/path?ref=REF`; `http`
   extra; `schemes.github`) — read-only; `open()` other than `"r"` and every

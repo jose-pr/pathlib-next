@@ -420,3 +420,26 @@ def test_renaming_a_missing_path_onto_its_own_name_is_file_not_found(moto_s3):
     assert there.rename("there.txt") == there
     assert S3Path("s3://bkt/dir", backend=backend).rename("dir").key == "dir"
     assert _keys(moto_s3) == ["dir/f", "there.txt"]
+
+
+# --- what a move of a prefix asks the store ------------------------------------------
+
+
+def test_renaming_a_prefix_directory_asks_for_the_key_once_and_then_for_its_keys(
+    moto_s3,
+):
+    moto_s3.put_object(Bucket="bkt", Key="dir/f", Body=b"x")
+    path, client = _path(moto_s3, "s3://bkt/dir")
+    with pytest.raises(NotImplementedError):
+        path.rename("other")
+    assert client.calls == ["head_object", "list_objects_v2"]
+    assert _keys(moto_s3) == ["dir/f"]
+
+
+def test_renaming_a_missing_path_is_file_not_found_after_one_head_and_one_listing(
+    moto_s3,
+):
+    path, client = _path(moto_s3, "s3://bkt/nope")
+    with pytest.raises(FileNotFoundError):
+        path.rename("other")
+    assert client.calls == ["head_object", "list_objects_v2"]

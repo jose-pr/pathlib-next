@@ -1,3 +1,4 @@
+import time
 import datetime
 
 import pytest
@@ -1067,3 +1068,86 @@ def test_renaming_a_missing_path_onto_its_own_name_is_file_not_found():
     assert there.rename("there.txt") == there
     assert _az("az://account/container/d", backend).rename("d").key == "d"
     assert container.objects == {"there.txt": b"x", "d/f": b"x"}
+
+
+def test_renaming_a_prefix_directory_asks_for_the_properties_once(monkeypatch):
+    asked = []
+    original = _FakeBlobClient.get_blob_properties
+
+    def counted(self):
+        asked.append(self.name)
+        return original(self)
+
+    monkeypatch.setattr(_FakeBlobClient, "get_blob_properties", counted)
+    backend, container = _container_with(**{"dir/f": b"x"})
+    with pytest.raises(NotImplementedError):
+        _az("az://account/container/dir", backend).rename("other")
+    assert asked == ["dir"]
+    assert container.list_calls == ["dir/"]
+
+
+def _record_listings(monkeypatch):
+    """Every `list_blobs()` call of the fake container, with its page size."""
+    pages = []
+    original = _FakeContainer.list_blobs
+
+    def recorded(self, name_starts_with="", **kwargs):
+        pages.append((name_starts_with, kwargs.get("results_per_page")))
+        return original(self, name_starts_with)
+
+    monkeypatch.setattr(_FakeContainer, "list_blobs", recorded)
+    return pages
+
+
+def test_the_existence_probes_ask_for_one_item_not_a_page(monkeypatch):
+    pages = _record_listings(monkeypatch)
+    backend, container = _container_with(**{"dir/f": b"x"})
+    root = _az("az://account/container/", backend)
+    assert (root / "dir").is_dir()
+    assert not (root / "missing").exists()
+    (root / "new").write_bytes(b"x")
+    (root / "made").mkdir()
+    with pytest.raises(IsADirectoryError):
+        (root / "dir").write_bytes(b"x")
+    assert pages
+    assert {page for _prefix, page in pages} == {1}
+    assert {prefix for prefix, _page in pages} >= {"dir/", "missing/", "new/", "made/"}
+
+
+def test_the_emptiness_check_of_rmdir_asks_for_two_items(monkeypatch):
+    pages = _record_listings(monkeypatch)
+    backend, container = _container_with(**{"empty/": b""})
+    _az("az://account/container/empty", backend).rmdir()
+    assert container.objects == {}
+    assert pages == [("empty/", 1), ("empty/", 2)]
+
+
+def test_a_copy_that_stays_pending_is_aborted_and_rename_times_out(monkeypatch):
+    from pathlib_next.uri.schemes import az
+
+    aborted = []
+    monkeypatch.setattr(az, "COPY_POLL_TIMEOUT", 0.2)
+    monkeypatch.setattr(az, "_COPY_POLL_INTERVAL", 0.01)
+
+    def start(self, url):
+        return {"copy_status": "pending", "copy_id": "copy-1"}
+
+    def pending(self):
+        return {"size": 1, "last_modified": None, "copy_status": "pending"}
+
+    monkeypatch.setattr(_FakeBlobClient, "start_copy_from_url", start)
+    monkeypatch.setattr(
+        _FakeBlobClient,
+        "abort_copy",
+        lambda self, copy_id: aborted.append(copy_id),
+        raising=False,
+    )
+    backend, container = _container_with(**{"a.txt": b"x"})
+    monkeypatch.setattr(_FakeBlobClient, "get_blob_properties", pending)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as info:
+        _az("az://account/container/a.txt", backend).rename("b.txt")
+    assert time.monotonic() - started < 5
+    assert info.value.filename == "az://account/container/a.txt"
+    assert aborted == ["copy-1"]
+    assert container.objects == {"a.txt": b"x"}

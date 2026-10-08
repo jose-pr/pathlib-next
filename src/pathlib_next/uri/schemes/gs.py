@@ -301,12 +301,15 @@ class GsPath(UriPath):
                 st_mtime=int(blob.updated.timestamp()) if blob.updated else 0,
                 is_dir=False,
             )
-        # Not an object at this exact key -- emulate a directory: any
-        # object under the "<key>/" prefix means this is a "directory".
-        prefix = f"{key}/"
+        return self._stat_prefix()
+
+    def _stat_prefix(self) -> FileStat:
+        """`stat()` of a key already known not to be an object -- emulate a
+        directory: any object under the "<key>/" prefix means this is a
+        "directory", and none means there is nothing here."""
         with _translate_errors(self):
             for _ in self._bucket.list_blobs(
-                prefix=prefix, max_results=1, **self._options
+                prefix=f"{self.key}/", max_results=1, **self._options
             ):
                 return FileStat(is_dir=True)
         raise FileNotFoundError(self)
@@ -607,11 +610,10 @@ class GsPath(UriPath):
             return renamed
         source_blob = self._reload(self.key)
         if source_blob is None:
-            # No object at the key: a prefix directory (stat() raises
-            # FileNotFoundError when there is nothing at all). move() falls
-            # back to copy + rm for it.
-            self._pop_stat_hint()
-            self.stat()
+            # No object at the key: a prefix directory (FileNotFoundError
+            # when there is nothing at all). move() falls back to copy + rm
+            # for it.
+            self._stat_prefix()
             raise NotImplementedError(f"rename() of the prefix directory {self}")
         if self._holds_keys(dest_key):
             raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(target))
