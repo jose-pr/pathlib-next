@@ -130,8 +130,14 @@ class _RelativeLocalPath(str):
 
 _FILE_SOURCE = Source("file", None, "", None)
 
-#: scheme -> the `importlib.metadata.entry_points` that found no plugin for it.
-_ENTRY_POINT_MISSES: "dict[str, object]" = {}
+#: `(entry_points function, {scheme: entry point})` for the
+#: `pathlib_next.schemes` group, read once per lookup function; a scheme no
+#: plugin declares is a dictionary miss and adds nothing to it.
+_ENTRY_POINTS: "tuple[object, dict[str, object]] | None" = None
+
+#: Schemes whose entry point loaded without registering them: loading it
+#: again cannot help.
+_ENTRY_POINTS_LOADED: "set[str]" = set()
 
 
 def _remove_dots(path: str, scheme: "str | None") -> str:
@@ -152,6 +158,23 @@ def _segment_text(item) -> str:
     if isinstance(path, bytes):
         path = path.decode()
     return _pathlib.PurePath(path).as_posix()
+
+
+def _forget_entry_points() -> None:
+    global _ENTRY_POINTS
+    _ENTRY_POINTS = None
+    _ENTRY_POINTS_LOADED.clear()
+
+
+def _slot_names(cls: type) -> "tuple[str, ...]":
+    """Every slot a `cls` instance has, base classes included, each once."""
+    names: "dict[str, None]" = {}
+    for klass in cls.__mro__:
+        slots = klass.__dict__.get("__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if slot not in ("__dict__", "__weakref__"):
+                names[slot] = None
+    return tuple(names)
 
 
 def _has_dot_segment(path: str) -> bool:
@@ -187,12 +210,18 @@ class Uri(Pathname):
     #: Unset (`False`) means `.path` has no such meaning (`http:`, `s3:`, ...).
     _host_filesystem_path = False
 
+    #: Every slot of the class, set by `__init_subclass__`; `__new__` starts
+    #: each one at None so `__init__` can tell an initialized instance.
+    _slot_names: "tuple[str, ...]" = ()
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._slot_names = _slot_names(cls)
+
     def __new__(cls, *uris, **options):
         inst = object.__new__(cls)
-        for cls in cls.__mro__:
-            for slot in getattr(cls, "__slots__", ()):
-                if not hasattr(inst, slot):
-                    setattr(inst, slot, None)
+        for slot in cls._slot_names:
+            setattr(inst, slot, None)
         return inst
 
     def __init__(self, *uris: UriLike, **options):
@@ -965,6 +994,9 @@ def _rebuild_path(cls, uri, options, backend, schemesmap):
     return cls(uri, **options)
 
 
+Uri._slot_names = _slot_names(Uri)
+
+
 def _looks_like_uri(value: str, schemesmap=None) -> bool:
     """Whether a destination string is URI syntax rather than a path.
 
@@ -1028,7 +1060,7 @@ class UriPath(Uri, Path):
         for base in cls.__mro__:
             if isinstance(base, type) and issubclass(base, UriPath):
                 setattr(base, f"_{base.__name__}__SCHEMESMAP", None)
-        _ENTRY_POINT_MISSES.clear()
+        _forget_entry_points()
 
     @classmethod
     def _schemesmap(cls, reload=False) -> _ty.Mapping[str, type["Self"]]:
@@ -1040,8 +1072,6 @@ class UriPath(Uri, Path):
                     return schemesmap
             except AttributeError:
                 pass
-        else:
-            _ENTRY_POINT_MISSES.clear()
         schemesmap = cls._get_schemesmap()
         setattr(cls, _propname, schemesmap)
         return schemesmap
@@ -1067,27 +1097,31 @@ class UriPath(Uri, Path):
         Looks for entry points in the 'pathlib_next.schemes' group where
         the name matches the requested scheme.
         """
+        global _ENTRY_POINTS
         import importlib.metadata as _metadata
 
-        # A miss is remembered: scanning every installed distribution cost
+        # The group is read once: scanning every installed distribution cost
         # 13-29 ms on each construction with an unregistered scheme
         # (including "C:/x" on Windows, read as scheme "c"). Keyed on the
-        # lookup function as well, so a replaced `entry_points` is asked
-        # afresh; `_schemesmap(reload=True)` and a new subclass clear it.
-        if _ENTRY_POINT_MISSES.get(scheme) is _metadata.entry_points:
+        # lookup function, so a replaced `entry_points` is asked afresh; a new
+        # subclass drops it (`_forget_entry_points`).
+        cached = _ENTRY_POINTS
+        if cached is None or cached[0] is not _metadata.entry_points:
+            try:
+                eps = _metadata.entry_points(group="pathlib_next.schemes")
+            except TypeError:
+                # Python 3.9 fallback
+                eps = _metadata.entry_points().get("pathlib_next.schemes", ())
+            declared: "dict[str, object]" = {}
+            for ep in eps:
+                declared.setdefault(ep.name, ep)
+            cached = _ENTRY_POINTS = (_metadata.entry_points, declared)
+        ep = cached[1].get(scheme)
+        if ep is None or scheme in _ENTRY_POINTS_LOADED:
             return False
-        try:
-            eps = _metadata.entry_points(group="pathlib_next.schemes")
-        except TypeError:
-            # Python 3.9 fallback
-            eps = _metadata.entry_points().get("pathlib_next.schemes", ())
-
-        for ep in eps:
-            if ep.name == scheme:
-                ep.load()
-                return True
-        _ENTRY_POINT_MISSES[scheme] = _metadata.entry_points
-        return False
+        ep.load()
+        _ENTRY_POINTS_LOADED.add(scheme)
+        return True
 
     @classmethod
     def _load_builtin_scheme(cls, scheme: str) -> bool:
