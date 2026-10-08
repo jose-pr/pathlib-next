@@ -963,7 +963,10 @@ chained (their text can carry credentials).
 - **Archives** (`schemes.archive`): `ZipUri` (`zip:`), `TarUri` (`tar:`),
   `ArchiveUri` (`archive:`, detects the format from the outer name
   `.zip`/`.jar` vs `.tar`/`.tgz`/`.tar.*`, else a `PK` magic sniff),
-  `ArchiveZipUri` (`archive+zip:`), `ArchiveTarUri` (`archive+tar:`).
+  `ArchiveZipUri` (`archive+zip:`), `ArchiveTarUri` (`archive+tar:`). The last
+  two are second scheme names of `ZipUri` and `TarUri`, and the class names
+  are aliases of those (`ArchiveZipUri is ZipUri`); a path prints and pickles
+  with the scheme it was written with.
   - `archive:` settles the format on first use, not when the path is built:
     constructing, printing, joining, copying and pickling a path read nothing,
     a non-local outer that had to be read to decide is not fetched a second
@@ -981,8 +984,27 @@ chained (their text can carry credentials).
     `%XX` (`caf%E9.txt`), so such a path prints, hashes, compares and parses
     back to the same member.
   - One shared handle per archive (keyed by the real local path, or the outer
-    URI), released when no path references it. A non-local outer is read into
-    memory.
+    URI), released when no path references it. A local zip or tar is read from
+    its file as needed (a compressed tar is decompressed from its start for
+    each member it reaches) and no OS handle is held between calls; a
+    non-local outer is read whole into memory, once, and kept while any path
+    to it lives. `ArchiveUri.refresh()` forgets what is held of the outer, so
+    the next use reads it again (every path to the same archive shares it);
+    it is how a change at a remote source is seen, and a local archive needs
+    none (it is checked against the file on every use).
+  - Cost. The members, the directories and each entry's stat data are derived
+    once per open handle, so a listing, a `walk()` or a `stat()` costs one
+    validation of the file and work in the size of the directory, not of the
+    archive. A member read is copied out of the shared handle: in memory up to
+    `schemes.archive._base.MEMBER_SPOOL_BYTES` (16 MiB) and past that into an
+    unnamed temporary file, so memory stays small however large the member is,
+    and the disk used is the member's size as the archive declares it (an
+    archive can declare more than it holds). `open("r+")` and a write buffer
+    hold the whole member in memory. A zip mutation copies the entries it does
+    not change as they lie in the archive, without decompressing them, so it
+    costs the archive's stored size; an encrypted member, or one stored with a
+    compression method `zipfile` lacks, does not stop a change to another
+    member.
   - **Member names are normalized POSIX relative paths**, whatever the
     writer emitted and whichever format: a leading `./` (`tar -C dir .`,
     `shutil.make_archive`), empty segments (`a//b`) and interior `.`/`..`

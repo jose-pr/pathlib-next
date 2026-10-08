@@ -138,27 +138,25 @@ def test_a_damaged_compressed_tar_is_a_read_error_for_every_lookup(tmp_path, whi
 # --- a member that vanishes between the lookup and its stat ------------------------------
 
 
-def test_a_member_dropped_between_the_lookup_and_its_stat_is_not_found(
+def test_a_stat_reads_one_view_of_the_archive_even_if_it_is_replaced_meanwhile(
     tmp_path, monkeypatch
 ):
     archive = _make_zip(tmp_path / "a.zip", {"keep": b"k", "flip": b"f"})
     flip = UriPath(_zip_uri(archive, "flip"))
-    assert flip.exists()
-    real = _ZipBackend.member_stat
+    real = _ZipBackend._entries
     rewritten = []
 
-    def stat_after_another_writer_dropped_it(self, path):
+    def entries_then_another_writer_drops_flip(self):
+        found = real(self)
         if not rewritten:
             rewritten.append(1)
             _make_zip(archive, {"keep": b"k", "pad": b"p" * 100})
-        return real(self, path)
+        return found
 
-    monkeypatch.setattr(
-        _ZipBackend, "member_stat", stat_after_another_writer_dropped_it
-    )
-    assert rewritten == []
-    assert not flip.exists()
+    monkeypatch.setattr(_ZipBackend, "_entries", entries_then_another_writer_drops_flip)
+    assert flip.exists()  # the view the lookup read
     assert rewritten == [1]
+    assert not flip.exists()  # the next call sees the replaced archive
     with pytest.raises(FileNotFoundError):
         flip.stat()
 

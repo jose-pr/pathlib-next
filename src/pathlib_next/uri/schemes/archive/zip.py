@@ -14,7 +14,7 @@ from contextlib import contextmanager as _contextmanager
 
 from ....utils.stat import FileStat
 from ..file import FileUri
-from ._base import ArchiveUri, _ArchiveBackend
+from ._base import ArchiveUri, _ArchiveBackend, _LazyReadFile, _spool
 
 _ZIP64_EXTRA_ID = 0x0001
 
@@ -67,47 +67,74 @@ def _member_mode(info: _zipfile.ZipInfo) -> "int | None":
     return kind | _stat.S_IMODE(mode)
 
 
-class _LazyReadFile:
-    """A read-only, seekable view of a local file that holds an OS handle
-    only while an operation runs: `release()` closes it, and the next
-    read/seek reopens it at the same position. A shared `ZipFile` over one
-    therefore never keeps the archive open between operations (on Windows
-    an open handle blocks deleting or replacing the file)."""
+_COPY_CHUNK = 1024 * 1024
+_LOCAL_HEADER = _struct.Struct("<4s2B4HL2L2H")
 
-    def __init__(self, path: str):
-        self.name = path
-        self._pos = 0
-        # Opened eagerly: a missing file raises FileNotFoundError here,
-        # which `zipfile` would otherwise turn into BadZipFile.
-        self._fp = open(path, "rb")
 
-    def _file(self):
-        if self._fp is None:
-            self._fp = open(self.name, "rb")
-            self._fp.seek(self._pos)
-        return self._fp
+def _copy_range(source, target, length: int) -> None:
+    """Copy `length` bytes from `source` to `target` in chunks."""
+    while length > 0:
+        chunk = source.read(min(length, _COPY_CHUNK))
+        if not chunk:
+            raise _zipfile.BadZipFile("archive ended inside an entry")
+        target.write(chunk)
+        length -= len(chunk)
 
-    def read(self, size=-1):
-        data = self._file().read(size)
-        self._pos = self._fp.tell()
-        return data
 
-    def seek(self, offset, whence=0):
-        self._pos = self._file().seek(offset, whence)
-        return self._pos
-
-    def tell(self):
-        return self._pos
-
-    def seekable(self):
-        return True
-
-    def release(self):
-        fp, self._fp = self._fp, None
-        if fp is not None:
-            fp.close()
-
-    close = release
+def _copy_entry(original, dst, info, new_name: str, end: "int | None") -> bool:
+    """Append the entry `info` to the archive being written by `dst` under
+    `new_name`, copying its compressed bytes as they are: the local header, the
+    data and any data descriptor lie between `info.header_offset` and `end`
+    (where the next record starts). Only a renamed entry, or one whose name
+    the central directory would write in another encoding than the local
+    header, gets a new local header. False, with nothing written, when the
+    record is not laid out as its directory says; the caller then recompresses
+    it."""
+    start = info.header_offset
+    if end is None or start < 0 or end <= start:
+        return False
+    original.seek(start)
+    header = original.read(_LOCAL_HEADER.size)
+    if len(header) < _LOCAL_HEADER.size:
+        return False
+    fields = _LOCAL_HEADER.unpack(header)
+    header_size = _LOCAL_HEADER.size + fields[10] + fields[11]
+    if fields[0] != b"PK\x03\x04" or start + header_size + info.compress_size > end:
+        return False
+    verbatim = new_name == info.filename and (
+        info.filename.isascii() or info.flag_bits & 0x800
+    )
+    if not verbatim and (
+        info.flag_bits & 0x08
+        and max(info.file_size, info.compress_size) > _zipfile.ZIP64_LIMIT
+    ):
+        return False
+    copied = _copy_zipinfo(info, new_name)
+    for name in (
+        "create_version",
+        "extract_version",
+        "reserved",
+        "flag_bits",
+        "volume",
+        "CRC",
+        "compress_size",
+        "file_size",
+    ):
+        setattr(copied, name, getattr(info, name))
+    out = dst.fp
+    out.seek(dst.start_dir)
+    copied.header_offset = out.tell()
+    if verbatim:
+        original.seek(start)
+        _copy_range(original, out, end - start)
+    else:
+        out.write(copied.FileHeader())
+        original.seek(start + header_size)
+        _copy_range(original, out, end - start - header_size)
+    dst.start_dir = out.tell()
+    dst.filelist.append(copied)
+    dst.NameToInfo[copied.filename] = copied
+    return True
 
 
 class _ZipBackend(_ArchiveBackend):
@@ -174,17 +201,32 @@ class _ZipBackend(_ArchiveBackend):
                 if isinstance(handle.fp, _LazyReadFile):
                     handle.fp.release()
 
-    def names(self):
-        with self._reading() as handle:
-            return handle.namelist()
+    def _entries(self):
+        return [(info.filename, info) for info in self._handle.infolist()]
+
+    @staticmethod
+    def _is_directory(info):
+        return info.filename.endswith("/")
+
+    @staticmethod
+    def _stat_of(info, snapshot):
+        mtime = int(_time.mktime((*info.date_time, 0, 0, -1))) if info.date_time else 0
+        return FileStat(
+            st_mode=_member_mode(info),
+            st_size=info.file_size,
+            st_mtime=mtime,
+            is_dir=info.filename.endswith("/"),
+        )
 
     def read_member(self, path):
         with self._reading() as handle:
-            # Read fully into memory rather than returning the live
-            # ZipExtFile: callers may hold the returned stream open across
-            # further mutations (unlink/rename/write) on this same shared
-            # backend, and those close+reopen the underlying handle.
-            return _io.BytesIO(handle.read(path))  # raises KeyError if missing
+            # Copied out rather than returned as the live ZipExtFile: callers
+            # may hold the returned stream open across further mutations
+            # (unlink/rename/write) on this same shared backend, and those
+            # close+reopen the underlying handle. A large member goes to a
+            # temporary file, not to memory.
+            with handle.open(path) as source:  # raises KeyError if missing
+                return _spool(source)
 
     def write_member(self, path: str, data: bytes):
         with self._lock:
@@ -198,7 +240,7 @@ class _ZipBackend(_ArchiveBackend):
                 ) as archive:
                     archive.writestr(path, data)
                 return
-            if path in self.names():
+            if path in self.snapshot().infos:
                 # zipfile has no in-place entry update -- writestr()-ing an
                 # existing name just appends a duplicate. Overwriting an
                 # existing entry needs a full-archive rewrite.
@@ -308,7 +350,10 @@ class _ZipBackend(_ArchiveBackend):
         name (POSIX rename); otherwise duplicate names collapse to the last
         one, which is the entry `zipfile` itself reads.
 
-        Every kept entry keeps its metadata (`_copy_zipinfo`), and the
+        An entry that is only kept or renamed is copied as it lies in the
+        archive (`_copy_entry`): nothing is decompressed, so the cost is the
+        stored size, and an encrypted entry or one with a compression method
+        `zipfile` lacks survives. Every kept entry keeps its metadata, and the
         archive keeps its comment, any bytes before the first member (a
         zipapp shebang, a self-extractor stub) and its file mode. Written
         through `_replace_outer`, so a crash mid-rewrite can't leave a
@@ -331,63 +376,58 @@ class _ZipBackend(_ArchiveBackend):
         outer_path = _os.path.realpath(str(self.outer.filepath))
 
         def fill(tmp):
-            with _zipfile.ZipFile(outer_path, "r") as src:
-                infos = src.infolist()
-                plan = []
-                winner = {}
-                for info in infos:
-                    new_name, renamed = _remap(info.filename)
-                    if new_name is None:
-                        continue
-                    previous = winner.get(new_name)
-                    if previous is None or renamed or not plan[previous][2]:
-                        winner[new_name] = len(plan)
-                    plan.append((new_name, info, renamed))
-
-                prefix_end = min(
-                    [info.header_offset for info in infos] + [src.start_dir]
-                )
-                with open(outer_path, "rb") as original:
-                    tmp.write(original.read(prefix_end))
-
-                with _zipfile.ZipFile(tmp, "w", _zipfile.ZIP_DEFLATED) as dst:
-                    dst.comment = src.comment
-                    written = set()
-                    for index, (new_name, info, _renamed) in enumerate(plan):
-                        if winner[new_name] != index:
-                            continue
-                        zinfo = _copy_zipinfo(info, new_name)
-                        data = overwrite.pop(new_name, None)
-                        if data is None:
-                            data = overwrite.pop(info.filename, None)
-                        if data is None:
-                            data = src.read(info)
-                        else:
-                            zinfo.date_time = _time.localtime()[:6]
-                        dst.writestr(zinfo, data)
-                        written.add(new_name)
-                    for name, data in overwrite.items():
-                        if name not in written:
-                            dst.writestr(name, data)
+            with open(outer_path, "rb") as original:
+                with _zipfile.ZipFile(original, "r") as src:
+                    self._fill(tmp, original, src, _remap, overwrite)
 
         self._replace_outer(fill)
 
-    def member_stat(self, path):
-        with self._reading() as handle:
-            info = handle.getinfo(path)
-            mtime = (
-                int(_time.mktime((*info.date_time, 0, 0, -1))) if info.date_time else 0
-            )
-            return FileStat(
-                st_mode=_member_mode(info),
-                st_size=info.file_size,
-                st_mtime=mtime,
-                is_dir=path.endswith("/"),
-            )
+    @staticmethod
+    def _fill(tmp, original, src, remap, overwrite):
+        infos = src.infolist()
+        plan = []
+        winner = {}
+        for info in infos:
+            new_name, renamed = remap(info.filename)
+            if new_name is None:
+                continue
+            previous = winner.get(new_name)
+            if previous is None or renamed or not plan[previous][2]:
+                winner[new_name] = len(plan)
+            plan.append((new_name, info, renamed))
+
+        # Where each entry's record ends: where the next one starts, or the
+        # central directory.
+        starts = sorted({info.header_offset for info in infos} | {src.start_dir})
+        ends = dict(zip(starts, starts[1:]))
+        original.seek(0)
+        _copy_range(original, tmp, starts[0])
+
+        with _zipfile.ZipFile(tmp, "w", _zipfile.ZIP_DEFLATED) as dst:
+            dst.comment = src.comment
+            written = set()
+            for index, (new_name, info, _renamed) in enumerate(plan):
+                if winner[new_name] != index:
+                    continue
+                data = overwrite.pop(new_name, None)
+                if data is None:
+                    data = overwrite.pop(info.filename, None)
+                if data is not None:
+                    zinfo = _copy_zipinfo(info, new_name)
+                    zinfo.date_time = _time.localtime()[:6]
+                    dst.writestr(zinfo, data)
+                elif not _copy_entry(
+                    original, dst, info, new_name, ends.get(info.header_offset)
+                ):
+                    dst.writestr(_copy_zipinfo(info, new_name), src.read(info))
+                written.add(new_name)
+            for name, data in overwrite.items():
+                if name not in written:
+                    dst.writestr(name, data)
 
 
 class ZipUri(ArchiveUri):
-    """`zip:` scheme. Read/write: write support (new entries, overwriting
+    """`zip:` scheme (`archive+zip:` is a second name for it). Read/write: write support (new entries, overwriting
     existing entries, `unlink`/`rmdir`/`rename`) works when the outer
     archive is a local `file:` URI; every other outer scheme is read-only
     (fetched fully into memory first). Every mutation replaces the archive
@@ -402,6 +442,6 @@ class ZipUri(ArchiveUri):
     `ArchiveUri` base -- they're generic, gated on `self.backend.writable`,
     which only this backend ever reports `True`."""
 
-    __SCHEMES = ("zip",)
+    __SCHEMES = ("zip", "archive+zip")
     __slots__ = ()
     _backend_cls = _ZipBackend

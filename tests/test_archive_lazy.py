@@ -191,3 +191,39 @@ def test_a_tar_path_and_a_nested_archive_path_share_their_handles_after_a_pickle
         assert again == path
         assert again.backend is path.backend
     assert pickle.loads(pickle.dumps(nested)).read_bytes() == b"X"
+
+
+# --- a held remote archive is read again on request -------------------------------------
+
+
+def test_refresh_makes_a_remote_archive_that_changed_readable(site):
+    path = UriPath(f"zip:{site.url}/a.zip!/m")
+    other = UriPath(f"zip:{site.url}/a.zip!/")
+    assert path.read_bytes() == b"M"
+    site.files["/a.zip"] = _zip_bytes({"m": b"CHANGED", "new": b"N"})
+    # The bytes of a remote outer are kept while any path to it lives.
+    assert path.read_bytes() == b"M" and not (other / "new").exists()
+    path.refresh()
+    assert site.log == ["GET /a.zip"]  # forgetting costs nothing by itself
+    assert path.read_bytes() == b"CHANGED"
+    assert (other / "new").read_bytes() == b"N"  # every path to it shares the refresh
+    assert site.log == ["GET /a.zip", "GET /a.zip"]
+
+
+def test_refresh_of_an_undecided_archive_nothing_read_yet_sends_nothing(site):
+    path = UriPath(f"archive:{site.url}/noext!/m")
+    path.refresh()
+    assert site.log == []
+    assert path.read_bytes() == b"M"
+    site.files["/noext"] = _zip_bytes({"m": b"CHANGED"})
+    path.refresh()
+    assert path.read_bytes() == b"CHANGED"
+
+
+def test_refresh_of_a_local_archive_changes_nothing(tmp_path):
+    archive = tmp_path / "a.zip"
+    archive.write_bytes(_zip_bytes({"m": b"M"}))
+    path = UriPath(f"zip:{archive.as_uri()}!/m")
+    assert path.read_bytes() == b"M"
+    path.refresh()
+    assert path.read_bytes() == b"M"

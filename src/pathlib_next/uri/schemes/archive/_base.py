@@ -5,12 +5,15 @@ import errno as _errno
 import io as _io
 import os as _os
 import re as _re
+import shutil as _shutil
+import tempfile as _tempfile
 import threading as _threading
 import typing as _ty
 import weakref as _weakref
 
 from ....path import _check_follow
 from ....utils import as_error_handler, is_safe_child_name
+from ....utils._commit import _CommitOnClose
 from ....utils.stat import FileStat
 from ... import Uri, UriPath
 from ...source import _SAFE_PATH, Source, _encode
@@ -190,6 +193,197 @@ def _get_backend(
         return backend
 
 
+MEMBER_SPOOL_BYTES = 16 * 1024 * 1024
+"""A member read through an archive path is held in memory up to this many
+bytes and spooled to an unnamed temporary file beyond that, so a member
+larger than memory can be read."""
+
+_CHUNK = 64 * 1024
+
+
+def _spool(source) -> "_io.IOBase":
+    """A seekable copy of the stream `source`, in memory up to
+    `MEMBER_SPOOL_BYTES` and in a temporary file past it. The copy is what a
+    caller keeps, so the archive's shared handle is not tied up by a reader
+    that keeps its stream open across later changes to the archive."""
+    memory = _io.BytesIO()
+    while True:
+        chunk = source.read(_CHUNK)
+        if not chunk:
+            memory.seek(0)
+            return memory
+        memory.write(chunk)
+        if memory.tell() > MEMBER_SPOOL_BYTES:
+            break
+    disk = _tempfile.TemporaryFile()
+    try:
+        with memory.getbuffer() as written:
+            disk.write(written)
+        memory.close()
+        _shutil.copyfileobj(source, disk, _CHUNK)
+        disk.seek(0)
+    except BaseException:
+        disk.close()
+        raise
+    return disk
+
+
+class _LazyReadFile:
+    """A read-only, seekable view of a local file that holds an OS handle
+    only while an operation runs: `release()` closes it, and the next
+    read/seek reopens it at the same position. A shared `ZipFile` or
+    `TarFile` over one therefore never keeps the archive open between
+    operations (on Windows an open handle blocks deleting or replacing the
+    file)."""
+
+    def __init__(self, path: str):
+        self.name = path
+        self._pos = 0
+        # Opened eagerly: a missing file raises FileNotFoundError here,
+        # which `zipfile` would otherwise turn into BadZipFile.
+        self._fp = open(path, "rb")
+
+    def _file(self):
+        if self._fp is None:
+            self._fp = open(self.name, "rb")
+            self._fp.seek(self._pos)
+        return self._fp
+
+    def read(self, size=-1):
+        data = self._file().read(size)
+        self._pos = self._fp.tell()
+        return data
+
+    def seek(self, offset, whence=0):
+        self._pos = self._file().seek(offset, whence)
+        return self._pos
+
+    def tell(self):
+        return self._pos
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def release(self):
+        fp, self._fp = self._fp, None
+        if fp is not None:
+            fp.close()
+
+    close = release
+
+
+class _Snapshot:
+    """What one open handle holds, derived once from its entries and kept
+    until the handle is dropped: the normalized-name index, every raw
+    spelling of a name, the directories (implicit ones included) with their
+    children, and the stat data of each entry. Nothing here touches the
+    handle again, so a lookup or a listing sees one consistent archive
+    however the file changes meanwhile.
+
+    A member whose name escapes the root is left out entirely, so it can be
+    neither listed nor looked up. When two spellings normalize to one name
+    the later entry wins, as `zipfile`/`tarfile` resolve duplicates;
+    `spellings` lists all of them."""
+
+    __slots__ = (
+        "index",
+        "spellings",
+        "infos",
+        "files",
+        "implicit",
+        "children",
+        "_format",
+    )
+
+    def __init__(self, format: "type[_ArchiveBackend]", entries):
+        # The backend class, not the backend: a snapshot that held its backend
+        # would keep it alive in a reference cycle.
+        self._format = format
+        index: "dict[str, str]" = {}
+        spellings: "dict[str, list[str]]" = {}
+        infos: "dict[str, object]" = {}
+        for raw, info in entries:
+            infos[raw] = info
+            normalized = _normalize_member_name(raw)
+            if not normalized:
+                continue
+            previous = index.get(normalized)
+            if previous is not None and previous != raw:
+                others = spellings.setdefault(normalized, [previous])
+                if raw not in others:
+                    others.append(raw)
+            index[normalized] = raw
+        self.index = index
+        self.spellings = spellings
+        self.infos = infos
+        # Members that are files: nothing lies below one.
+        self.files = {
+            name
+            for name, raw in index.items()
+            if not name.endswith("/") and not format._is_directory(infos[raw])
+        }
+        # Every proper prefix of a name is a directory, and `children` holds
+        # the first component below each directory, in archive order.
+        implicit: "set[str]" = set()
+        children: "dict[str, dict[str, None]]" = {"": {}}
+        for name, raw in index.items():
+            parts = name.rstrip("/").split("/")
+            directory = ""
+            for position, part in enumerate(parts):
+                children.setdefault(directory, {})[part] = None
+                path = f"{directory}/{part}" if directory else part
+                if position < len(parts) - 1:
+                    implicit.add(path)
+                directory = path
+            if name.endswith("/") or format._is_directory(infos[raw]):
+                children.setdefault(directory, {})
+        self.implicit = implicit
+        self.children = children
+
+    def hidden(self, member: str) -> bool:
+        """Whether a file member sits above `member`. A file has no children:
+        `y/z` next to a file `y` does not exist, as for a name that escapes
+        the root, so a lookup agrees with the listing that cannot show it."""
+        files = self.files
+        start = member.find("/")
+        while start > 0:
+            if member[:start] in files:
+                return True
+            start = member.find("/", start + 1)
+        return False
+
+    def stat(self, member: str) -> "FileStat | None":
+        """The stat of the member `member` (normalized, no trailing slash
+        unless it names a directory entry), or None when there is none. The
+        root is a directory; a directory that exists only through its members
+        is one too."""
+        if member == "":
+            return FileStat(is_dir=True)
+        if self.hidden(member):
+            return None
+        raw = self.index.get(member)
+        if raw is None:
+            raw = self.index.get(f"{member}/")
+        if raw is not None:
+            return self._format._stat_of(self.infos[raw], self)
+        if member in self.implicit:
+            return FileStat(is_dir=True)
+        return None
+
+    def raw_names(self, normalized: str) -> "tuple[str, ...]":
+        """Every key the archive holds the member `normalized` under, in
+        archive order (empty when there is none): an archive can spell one
+        member `norm` and `./norm`, and removing or renaming it has to act on
+        all of them or the shadowed one comes back."""
+        raw = self.index.get(normalized)
+        if raw is None:
+            return ()
+        return tuple(self.spellings.get(normalized) or (raw,))
+
+
 class _ArchiveBackend:
     """Lazily opens+caches the archive handle for one outer archive URI.
     Shared by every `ArchiveUri` instance derived from the same one, both
@@ -209,8 +403,7 @@ class _ArchiveBackend:
         "_handle",
         "_signature",
         "_lock",
-        "_index",
-        "_spellings",
+        "_snapshot",
         "_prefetched",
         "__weakref__",
     )
@@ -222,16 +415,14 @@ class _ArchiveBackend:
         self.outer = outer
         self._handle = None
         self._signature = None
-        self._index = None
-        self._spellings = None
+        self._snapshot = None
         self._prefetched = None
         self._lock = _threading.RLock()
 
     @property
     def lock(self):
-        """Held across a lookup and the use of its result: another thread's
-        rewrite reopens the handle, and a name found before that may be gone
-        after it."""
+        """Held across a read of the shared handle and the use of its
+        result: another thread's rewrite reopens the handle."""
         return self._lock
 
     def _offer(self, data: bytes) -> None:
@@ -277,15 +468,21 @@ class _ArchiveBackend:
     def _close_handle(self):
         # Drop the cached handle so the next operation (through any
         # instance sharing this backend) reopens and sees the change. The
-        # member index is derived from that handle's names, so it goes too:
+        # snapshot is derived from that handle's entries, so it goes too:
         # every mutation replaces the archive through `_replace_outer`,
         # which closes the handle, and a changed file on disk reopens it.
         handle = self._handle
         self._handle = None
-        self._index = None
-        self._spellings = None
+        self._snapshot = None
         if handle is not None:
             handle.close()
+
+    def refresh(self) -> None:
+        """Forget the handle and any bytes kept from the outer archive; the
+        next use reads the outer again."""
+        with self._lock:
+            self._prefetched = None
+            self._close_handle()
 
     def _outer_signature(self):
         local = _local_outer_path(self.outer)
@@ -312,58 +509,39 @@ class _ArchiveBackend:
     def writable(self) -> bool:
         return False
 
-    def member_index(self) -> "dict[str, str]":
-        """Normalized member name -> the key this backend knows it by.
-
-        Cached per open handle: it is consulted by every listing, stat,
-        read and write, and rebuilding it from `names()` each time made an
-        operation on a 20k-member archive scan all 20k names (measured at
-        10x-224x slower than 0.9.4 before this cache). Invalidated by
-        `_close_handle()`, which every mutation and every reopen goes
-        through.
-
-        A member whose name escapes the root is left out entirely, so it can
-        be neither listed nor looked up. When two spellings normalize to one
-        name the later entry wins, as `zipfile`/`tarfile` resolve duplicates;
-        `raw_names()` lists all of them.
-        """
+    def snapshot(self) -> _Snapshot:
+        """The members of the open handle, derived once and cached with it
+        (see `_Snapshot`). Revalidates the handle once; a reopen drops the
+        cached one. Every listing, stat, read and write starts here, and
+        rebuilding it from the entries each time made an operation on a
+        20k-member archive scan all of them."""
         with self._lock:
-            self.handle  # revalidates, and clears the cache if it reopened
-            if self._index is None:
-                index: "dict[str, str]" = {}
-                spellings: "dict[str, list[str]]" = {}
-                for raw in self.names():
-                    normalized = _normalize_member_name(raw)
-                    if not normalized:
-                        continue
-                    previous = index.get(normalized)
-                    if previous is not None and previous != raw:
-                        others = spellings.setdefault(normalized, [previous])
-                        if raw not in others:
-                            others.append(raw)
-                    index[normalized] = raw
-                self._index = index
-                self._spellings = spellings
-            return self._index
+            self.handle  # revalidates, and clears the snapshot if it reopened
+            if self._snapshot is None:
+                self._snapshot = _Snapshot(type(self), self._entries())
+            return self._snapshot
+
+    def member_index(self) -> "dict[str, str]":
+        """Normalized member name -> the key this backend knows it by."""
+        return self.snapshot().index
 
     def raw_names(self, normalized: str) -> "tuple[str, ...]":
-        """Every key this backend holds the member `normalized` under, in
-        archive order (empty when there is none): an archive can spell one
-        member `norm` and `./norm`, and removing or renaming it has to act on
-        all of them or the shadowed one comes back."""
-        with self._lock:
-            raw = self.member_index().get(normalized)
-            if raw is None:
-                return ()
-            return tuple(self._spellings.get(normalized) or (raw,))
+        return self.snapshot().raw_names(normalized)
 
-    def names(self) -> "list[str]":
+    def _entries(self) -> "list[tuple[str, object]]":
+        """`(key, info)` for every entry of the open handle, in archive
+        order; reads nothing from the archive."""
+        raise NotImplementedError
+
+    @staticmethod
+    def _is_directory(info) -> bool:
+        raise NotImplementedError
+
+    @staticmethod
+    def _stat_of(info, snapshot: _Snapshot) -> FileStat:
         raise NotImplementedError
 
     def read_member(self, path: str):
-        raise NotImplementedError
-
-    def member_stat(self, path: str) -> FileStat:
         raise NotImplementedError
 
 
@@ -423,45 +601,6 @@ class _UndecidedBackend:
                         resolved._offer(data)
                     self._resolved = resolved
         return resolved
-
-
-class _ArchiveWriteStream(_io.BytesIO):
-    """Buffers a new entry's content in memory; on close(), writes it via
-    the backend's `write_member()` (only `_ZipBackend` implements it --
-    `ArchiveUri._require_writable()` gates construction of this stream to
-    writable backends only). With `initial` (`open("r+")`) the buffer
-    starts with the member's content at position 0 and is written back
-    only if it was modified."""
-
-    def __init__(
-        self, backend: "_ArchiveBackend", path: str, initial: "bytes | None" = None
-    ):
-        super().__init__(b"" if initial is None else initial)
-        self._backend = backend
-        self._path = path
-        self._dirty = initial is None
-
-    def write(self, data):
-        self._dirty = True
-        return super().write(data)
-
-    def writelines(self, lines):
-        self._dirty = True
-        return super().writelines(lines)
-
-    def truncate(self, size=None):
-        self._dirty = True
-        return super().truncate(size)
-
-    def close(self):
-        if not self.closed:
-            try:
-                if self._dirty:
-                    self._backend.write_member(self._path, self.getvalue())
-            finally:
-                # Closed even when the write fails, so `__del__` does not
-                # retry it (and raise again) at garbage collection.
-                super().close()
 
 
 class ArchiveUri(UriPath):
@@ -556,6 +695,19 @@ class ArchiveUri(UriPath):
         """The archive's own path. Never decides the format."""
         return super().backend.outer
 
+    def refresh(self) -> None:
+        """Forgets what is held of the archive's outer file, so the next use
+        reads it again. A non-local archive is read once and kept while any
+        path to it lives, so this is how a later change at its source is
+        seen; a local one is checked against the file on every use. Every
+        path to the same archive shares the refresh."""
+        backend = super().backend
+        if isinstance(backend, _UndecidedBackend):
+            backend = backend._resolved
+            if backend is None:
+                return  # nothing has been read yet
+        backend.refresh()
+
     def as_uri(self, /, sanitize=False):
         if not self.source:
             # A derived relative path (`relative_to`): no archive to name.
@@ -579,13 +731,14 @@ class ArchiveUri(UriPath):
         )
         return f"{self.source.scheme}:{outer_uri}{_SEP}{inner}{tail}"
 
-    def _member_index(self):
-        """Normalized member name -> the key the backend knows it by; see
-        `_ArchiveBackend.member_index()`, which caches it per open handle."""
-        return self.backend.member_index()
+    def _snapshot(self) -> _Snapshot:
+        """The archive's members as of one validation of its handle; see
+        `_Snapshot`."""
+        return self.backend.snapshot()
 
-    def _names(self):
-        return list(self._member_index())
+    def _member_index(self):
+        """Normalized member name -> the key the backend knows it by."""
+        return self._snapshot().index
 
     def _raw_name(self, name: str) -> str:
         """The backend's own key for a normalized name (the name itself when
@@ -599,6 +752,14 @@ class ArchiveUri(UriPath):
         except OSError:
             return name
 
+    def _write_stream(self, name: str, initial: "bytes | None" = None):
+        """A write buffer whose content becomes the member `name` (a key of
+        the backend) when it is closed."""
+        backend = self.backend
+        return _CommitOnClose(
+            lambda buffer: backend.write_member(name, buffer.getvalue()), initial
+        )
+
     @property
     def _member(self) -> "str | None":
         """This path as a normalized member name, or None if it escapes."""
@@ -610,49 +771,32 @@ class ArchiveUri(UriPath):
             raise ValueError(f"member name escapes the archive root: {self.path!r}")
         return member
 
-    def _listdir(self):
+    def _directory_children(self) -> "tuple[_Snapshot, str, list[str]]":
         member = self._member
         if member is None:
             raise FileNotFoundError(self)
-        if member and not self.stat().is_dir():
+        snapshot = self._snapshot()
+        found = snapshot.stat(member)
+        if found is None:
+            raise FileNotFoundError(self)
+        if not found.is_dir():
             raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
-        prefix = f"{member}/" if member else ""
-        seen = set()
-        for name in self._names():
-            if not name.startswith(prefix):
-                continue
-            rest = name[len(prefix) :]
-            if not rest:
-                continue
-            child = rest.split("/", 1)[0]
-            if child and child not in seen:
-                seen.add(child)
-                yield child
+        return snapshot, member, list(snapshot.children.get(member, ()))
 
-    def _is_hidden(
-        self,
-        member: str,
-        index: "dict[str, str]",
-        files: "dict[str, bool] | None" = None,
-    ) -> bool:
-        """Whether a file member sits above `member`. A file has no children:
-        `y/z` next to a file `y` does not exist, as for a name that escapes
-        the root, so a lookup agrees with the listing that cannot show it.
-        `files` memoizes the answer per ancestor across calls."""
-        start = member.find("/")
-        while start > 0:
-            ancestor = member[:start]
-            if ancestor in index:
-                if files is None:
-                    files = {}
-                is_file = files.get(ancestor)
-                if is_file is None:
-                    stat = self._member_stat(index[ancestor])
-                    is_file = files[ancestor] = not stat.is_dir()
-                if is_file:
-                    return True
-            start = member.find("/", start + 1)
-        return False
+    def _listdir(self):
+        yield from self._directory_children()[2]
+
+    def _scandir(self):
+        # The stat data is in the snapshot already: a listing costs one
+        # validation of the handle, however many entries it has.
+        snapshot, member, names = self._directory_children()
+        prefix = f"{member}/" if member else ""
+        for name in names:
+            if not is_safe_child_name(name):
+                continue
+            found = snapshot.stat(prefix + name)
+            if found is not None:
+                yield name, found
 
     @staticmethod
     def _emptied_parent(
@@ -674,37 +818,19 @@ class ArchiveUri(UriPath):
                 return None
         return marker
 
-    def _member_stat(self, raw: str) -> FileStat:
-        """The backend's stat of the entry it knows as `raw`; one that has
-        gone since the name was looked up is not found."""
-        try:
-            return self.backend.member_stat(raw)
-        except KeyError as error:
-            raise FileNotFoundError(self) from error
-
     def stat(self, *, follow_symlinks=True):
-        path = self._member
-        if path is None:
+        hint = self._pop_stat_hint()
+        if hint is not None:
+            return hint
+        member = self._member
+        if member is None:
             raise FileNotFoundError(self)
-        backend = self.backend
-        # The lookup and the stat of what it found run under one hold of the
-        # lock: another thread's rewrite reopens the handle in between.
-        with backend.lock:
-            # The root too: a missing or unreadable archive is not a
-            # directory that exists, and a listing of it fails the same way.
-            index = self._member_index()
-            if path == "":
-                return FileStat(is_dir=True)
-            if self._is_hidden(path, index):
-                raise FileNotFoundError(self)
-            if path in index:
-                return self._member_stat(index[path])
-            dirmarker = f"{path}/"
-            if dirmarker in index:
-                return self._member_stat(index[dirmarker])
-            if any(n.startswith(dirmarker) for n in index):
-                return FileStat(is_dir=True)
+        # The root too: a missing or unreadable archive is not a directory
+        # that exists, and a listing of it fails the same way.
+        found = self._snapshot().stat(member)
+        if found is None:
             raise FileNotFoundError(self)
+        return found
 
     def _is_dir_member(self) -> bool:
         try:
@@ -748,7 +874,8 @@ class ArchiveUri(UriPath):
         if member is None:
             raise FileNotFoundError(self)
         try:
-            if self._is_hidden(member, self._member_index()):
+            snapshot = self._snapshot()
+            if snapshot.hidden(member):
                 raise KeyError(member)
             return self.backend.read_member(self._raw_name(member))
         except KeyError as error:
@@ -765,8 +892,8 @@ class ArchiveUri(UriPath):
         if "r" in mode:
             # Read-modify-write: what is written reaches the archive on close.
             data = self._read_member().read()
-            return _ArchiveWriteStream(
-                self.backend, self._raw_name(self._member_for_write()), initial=data
+            return self._write_stream(
+                self._raw_name(self._member_for_write()), initial=data
             )
         if mode not in ("w", "x"):
             raise NotImplementedError(f"open(mode={mode!r})")
@@ -779,9 +906,7 @@ class ArchiveUri(UriPath):
         # rewrites THAT entry instead of appending a second one that
         # shadows it (and that `unlink()` would then delete, resurrecting
         # the original).
-        return _ArchiveWriteStream(
-            self.backend, self._raw_name(self._member_for_write())
-        )
+        return self._write_stream(self._raw_name(self._member_for_write()))
 
     def _mkdir(self, mode):
         self._require_writable()
@@ -799,29 +924,31 @@ class ArchiveUri(UriPath):
     def unlink(self, missing_ok=False):
         self._require_writable()
         path = self._member_for_write()
-        index = self._member_index()
-        if path not in index or self._is_hidden(path, index):
+        snapshot = self._snapshot()
+        index = snapshot.index
+        if path not in index or snapshot.hidden(path):
             if self._is_dir_member():
                 raise IsADirectoryError(_errno.EISDIR, "Is a directory", str(self))
             if missing_ok:
                 return
             raise FileNotFoundError(self)
         self.backend.delete_members(
-            self.backend.raw_names(path),
+            snapshot.raw_names(path),
             keep_dir=self._emptied_parent(path, index, {path}),
         )
 
     def rmdir(self):
         self._require_writable()
         path = self._member_for_write()
-        index = self._member_index()
+        snapshot = self._snapshot()
+        index = snapshot.index
         if not path:
             # The archive root cannot be removed: an empty one is a no-op.
             if index:
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
             return
         marker = f"{path}/"
-        if self._is_hidden(path, index):
+        if snapshot.hidden(path):
             raise FileNotFoundError(self)
         if any(n != marker and n.startswith(marker) for n in index):
             raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(self))
@@ -830,7 +957,7 @@ class ArchiveUri(UriPath):
                 raise NotADirectoryError(_errno.ENOTDIR, "Not a directory", str(self))
             raise FileNotFoundError(self)
         self.backend.delete_members(
-            self.backend.raw_names(marker),
+            snapshot.raw_names(marker),
             keep_dir=self._emptied_parent(marker, index, {marker}),
         )
 
@@ -865,9 +992,11 @@ class ArchiveUri(UriPath):
         if member is None or not getattr(self.backend, "writable", False):
             return False
         try:
-            if not self.stat().is_dir():
+            snapshot = self._snapshot()
+            found = snapshot.stat(member)
+            if found is None or not found.is_dir():
                 return False
-            index = self._member_index()
+            index = snapshot.index
         except Exception:
             return False
         marker = f"{member}/" if member else ""
@@ -876,8 +1005,7 @@ class ArchiveUri(UriPath):
             # A member under a file is not listed, so a removal that walked
             # the listing would leave it behind and the directory would
             # come back.
-            files: "dict[str, bool]" = {}
-            hidden = [name for name in under if self._is_hidden(name, index, files)]
+            hidden = [name for name in under if snapshot.hidden(name)]
             if hidden:
                 raise OSError(
                     _errno.ENOTEMPTY,
@@ -886,7 +1014,7 @@ class ArchiveUri(UriPath):
                 )
             if under:
                 self.backend.delete_members(
-                    [raw for name in under for raw in self.backend.raw_names(name)],
+                    [raw for name in under for raw in snapshot.raw_names(name)],
                     keep_dir=(
                         self._emptied_parent(member, index, set(under))
                         if member
@@ -928,18 +1056,16 @@ class ArchiveUri(UriPath):
         new_path = _normalize_member_name(target.path.lstrip("/"))
         if not new_path:
             raise ValueError(f"member name escapes the archive root: {target.path!r}")
-        index = self._member_index()
+        snapshot = self._snapshot()
+        index = snapshot.index
         names = list(index)
         marker = f"{old_path}/"
         new_marker = f"{new_path}/"
         renamed = self._from_parsed_parts(self.source, new_path, "", "")
         backend = self.backend
-        is_file = old_path in index and not self._is_hidden(old_path, index)
-        is_dir = (
-            not is_file
-            and not self._is_hidden(old_path, index)
-            and any(n.startswith(marker) for n in names)
-        )
+        hidden = snapshot.hidden(old_path)
+        is_file = old_path in index and not hidden
+        is_dir = not is_file and not hidden and any(n.startswith(marker) for n in names)
         if not (is_file or is_dir):
             raise FileNotFoundError(self)
         if is_dir and new_path.startswith(marker):
@@ -958,8 +1084,8 @@ class ArchiveUri(UriPath):
             backend.rename_member(
                 index[old_path],
                 new_path,
-                members={raw: new_path for raw in backend.raw_names(old_path)},
-                replace=backend.raw_names(new_path),
+                members={raw: new_path for raw in snapshot.raw_names(old_path)},
+                replace=snapshot.raw_names(new_path),
                 keep_dir=self._emptied_parent(old_path, index, {old_path}, new_path),
             )
         else:
@@ -978,13 +1104,13 @@ class ArchiveUri(UriPath):
             members = {
                 raw: new_marker + name[len(marker) :]
                 for name in moving
-                for raw in backend.raw_names(name)
+                for raw in snapshot.raw_names(name)
             }
             backend.rename_member(
                 index.get(marker, marker),
                 new_marker,
                 members=members,
-                replace=backend.raw_names(new_marker),
+                replace=snapshot.raw_names(new_marker),
                 keep_dir=self._emptied_parent(old_path, index, set(moving), new_path),
             )
         return renamed
