@@ -163,7 +163,9 @@ def test_iterdir_on_a_non_html_file_raises_without_reading_it(serve_http, monkey
             list(UriPath(f"{base}/big.bin").iterdir())
     assert excinfo.value.errno == errno.ENOTDIR
     assert excinfo.value.filename == f"{base}/big.bin"
-    assert streamed == [True]
+    # The slash form is asked for first (a 404 here), then the path as given:
+    # neither body is downloaded.
+    assert streamed == [True, True]
 
 
 @needs_http
