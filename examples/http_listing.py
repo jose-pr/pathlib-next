@@ -1,12 +1,15 @@
 """List and read files over HTTP against a real directory index. Requires
 the `http` extra (`pip install pathlib_next[http]`) and network access --
 guarded under `if __name__ == "__main__"` so importing this module is
-always safe, and skippable (prints a message and exits 0) if the target
-isn't reachable.
+always safe, and skipped (prints setup instructions, exit 0, no request) unless
+HTTP_LISTING_URL is set.
+
+The server must render a plain HTML index in the Apache mod_autoindex or
+nginx `<table>` style, which the listing parser understands; many modern
+mirrors render a JavaScript-templated page instead.
 
 Run directly:
 
-    python examples/http_listing.py
     HTTP_LISTING_URL=http://example.com/some/dir/ python examples/http_listing.py
 """
 
@@ -14,13 +17,6 @@ import os
 import sys
 
 from pathlib_next.uri import UriPath
-
-# A stable, classic Apache mod_autoindex directory listing --
-# _DirectoryListingParser understands this format (and nginx's <table>
-# style). Not every server does (e.g. many modern mirrors render a
-# JS-templated index page instead of a plain HTML listing) -- point
-# HTTP_LISTING_URL at your own server if in doubt.
-DEFAULT_URL = "http://ftp.gnu.org/gnu/"
 
 
 def list_and_stat(root: UriPath):
@@ -33,7 +29,16 @@ def list_and_stat(root: UriPath):
 
 
 if __name__ == "__main__":
-    root = UriPath(os.environ.get("HTTP_LISTING_URL", DEFAULT_URL))
+    url = os.environ.get("HTTP_LISTING_URL")
+    if not url:
+        print(
+            "HTTP_LISTING_URL is not set -- skipping. See this file's "
+            "module docstring for how to run it.",
+            file=sys.stderr,
+        )
+        raise SystemExit(0)
+
+    root = UriPath(url)
     try:
         list_and_stat(root)
     except Exception as error:
