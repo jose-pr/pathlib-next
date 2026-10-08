@@ -114,9 +114,33 @@ jobs:
       - name: Run tests
         run: python -m pytest -q -rs
 
+  # The two typing checks of tests/test_public_surface.py (mypy and pyright on
+  # a consumer script) skip unless a checker is importable, and no other job
+  # installs one: they run here. The step fails if either was skipped.
+  typing:
+    name: Typing checks (py${{ matrix.python-version }}, ubuntu)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the package, pytest and the two checkers
+        # basedpyright, not the PyPI `pyright`: that one downloads node at
+        # run time. The test accepts either.
+        run: python -m pip install -e ".[uri]" pytest mypy basedpyright
+      - name: Run the typing checks
+        run: |
+          python -m pytest -q -rs tests/test_public_surface.py -k "mypy_accepts or pyright_accepts" | tee typing.log
+          grep -q "2 passed" typing.log
+
   build:
     name: Build distribution
-    needs: [test, test-cloud-sdks, test-no-extras, floors]
+    needs: [test, test-cloud-sdks, test-no-extras, floors, typing]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
