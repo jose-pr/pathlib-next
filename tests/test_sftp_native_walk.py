@@ -521,8 +521,12 @@ def test_failures_behind_the_raised_one_are_not_left_unretrieved(
         time.sleep(0.3)
         gc.collect()
 
+    # Only the walk's own tasks: asyncssh's read-ahead tasks for a read that
+    # was cancelled are its own to retrieve, and it logs the same message.
     assert [
-        r.getMessage() for r in caplog.records if "never retrieved" in r.getMessage()
+        message
+        for message in (record.getMessage() for record in caplog.records)
+        if "never retrieved" in message and "_concurrent_" in message
     ] == []
 
 
