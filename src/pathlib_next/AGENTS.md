@@ -866,7 +866,14 @@ chained (their text can carry credentials).
   `key` (one trailing `/` dropped: `s3://b/dir/` is `dir`).
   `S3Backend(**client_kwargs)` → one lazily built, thread-shared
   `boto3.client("s3", **client_kwargs)` (default: boto3's own credential and
-  endpoint configuration); `BaseS3Backend.client()` is the override point.
+  endpoint configuration; threads racing for the first request build one);
+  `BaseS3Backend.client()` is the override point. `S3Backend`, `GsBackend`
+  and `AzBackend` pickle and copy (`copy.copy`, `deepcopy`) without the client
+  they built and keep their options (`client_kwargs`, credentials included):
+  the copy builds its own client on first use. A pickled path never carries
+  them: it holds the URI, and the receiving process uses the default backend
+  unless the program supplies one (a backend class that sets `picklable =
+  True` is pickled with its path, secrets and all).
   - Directories are key prefixes: `mkdir()` writes a zero-byte `key/` marker,
     `rmdir()` needs an empty prefix, a key that is both an object and a prefix
     is the object (in `stat()` and listings). No hierarchy enforcement (writes

@@ -4,6 +4,7 @@ import errno as _errno
 import io as _io
 import itertools as _itertools
 import tempfile as _tempfile
+import threading as _threading
 import typing as _ty
 
 from ... import utils as _utils
@@ -38,17 +39,27 @@ class S3Backend(BaseS3Backend):
     `ftp.py`'s per-thread connection pools, a single `boto3` client is
     reused across threads -- it's documented as thread-safe."""
 
-    __slots__ = ("client_kwargs", "_client")
+    __slots__ = ("client_kwargs", "_client", "_client_lock")
 
     def __init__(self, **client_kwargs):
         self.client_kwargs = client_kwargs
         self._client = None
+        self._client_lock = _threading.Lock()
 
     def client(self):
-        if self._client is None:
-            boto3 = _import_client("boto3", "s3")
-            self._client = boto3.client("s3", **self.client_kwargs)
-        return self._client
+        return _store.lazy_client(self, self._build_client)
+
+    def _build_client(self):
+        boto3 = _import_client("boto3", "s3")
+        return boto3.client("s3", **self.client_kwargs)
+
+    # A pickled or copied backend keeps `client_kwargs` and builds its own
+    # client on first use; the client itself cannot be pickled or copied.
+    def __getstate__(self):
+        return _store.backend_state(self)
+
+    def __setstate__(self, state):
+        _store.restore_backend(self, state)
 
 
 _PUT_OBJECT_LIMIT = 5 * 1024**3

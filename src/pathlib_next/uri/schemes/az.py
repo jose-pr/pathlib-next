@@ -56,34 +56,37 @@ class AzBackend(BaseAzBackend):
     by azure-identity's `DefaultAzureCredential` unless `credential` is
     passed -- the backend an `AzPath` built without `backend=` uses."""
 
-    __slots__ = ("client_kwargs", "account", "_client")
+    __slots__ = ("client_kwargs", "account", "_client", "_client_lock")
 
     def __init__(self, account: "str | None" = None, **client_kwargs):
         self.client_kwargs = client_kwargs
         self.account = account
         self._client = None
+        self._client_lock = _thread.Lock()
 
     def client(self):
-        if self._client is None:
-            BlobServiceClient = _import_client(
-                "azure.storage.blob", "az"
-            ).BlobServiceClient
+        return _store.lazy_client(self, self._build_client)
 
-            kwargs = dict(self.client_kwargs)
-            if "connection_string" in kwargs:
-                connection_string = kwargs.pop("connection_string")
-                self._client = BlobServiceClient.from_connection_string(
-                    connection_string, **kwargs
-                )
-            else:
-                if "account_url" not in kwargs and self.account:
-                    kwargs["account_url"] = (
-                        f"https://{self.account}.blob.core.windows.net"
-                    )
-                    if "credential" not in kwargs:
-                        kwargs["credential"] = _default_credential()
-                self._client = BlobServiceClient(**kwargs)
-        return self._client
+    def _build_client(self):
+        BlobServiceClient = _import_client("azure.storage.blob", "az").BlobServiceClient
+
+        kwargs = dict(self.client_kwargs)
+        if "connection_string" in kwargs:
+            connection_string = kwargs.pop("connection_string")
+            return BlobServiceClient.from_connection_string(connection_string, **kwargs)
+        if "account_url" not in kwargs and self.account:
+            kwargs["account_url"] = f"https://{self.account}.blob.core.windows.net"
+            if "credential" not in kwargs:
+                kwargs["credential"] = _default_credential()
+        return BlobServiceClient(**kwargs)
+
+    # A pickled or copied backend keeps its options and builds its own
+    # client (and credential) on first use.
+    def __getstate__(self):
+        return _store.backend_state(self)
+
+    def __setstate__(self, state):
+        _store.restore_backend(self, state)
 
 
 _DEFAULT_BACKENDS: "dict[str, AzBackend]" = {}

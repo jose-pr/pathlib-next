@@ -85,6 +85,48 @@ def mentions_timeout(error: BaseException) -> bool:
     return False
 
 
+#: Backend attributes that are the live client and what guards it: left out
+#: of a pickled or copied backend, which builds its own on first use.
+_LIVE = frozenset({"_client", "_client_lock", "__dict__", "__weakref__"})
+
+
+def lazy_client(backend, build):
+    """`backend._client`, made by `build()` the first time under
+    `backend._client_lock` so that threads racing for it build one."""
+    client = backend._client
+    if client is None:
+        with backend._client_lock:
+            client = backend._client
+            if client is None:
+                client = backend._client = build()
+    return client
+
+
+def backend_state(backend) -> dict:
+    """What a pickled or copied backend keeps: its slots and `__dict__`,
+    without the client it built and the lock that guarded the build."""
+    state = {}
+    for cls in type(backend).__mro__:
+        slots = getattr(cls, "__slots__", ())
+        for name in (slots,) if isinstance(slots, str) else slots:
+            if name not in _LIVE and hasattr(backend, name):
+                state[name] = getattr(backend, name)
+    state.update(
+        (name, value)
+        for name, value in getattr(backend, "__dict__", {}).items()
+        if name not in _LIVE
+    )
+    return state
+
+
+def restore_backend(backend, state: dict) -> None:
+    """The inverse of `backend_state()`: a backend with no client yet."""
+    for name, value in state.items():
+        setattr(backend, name, value)
+    backend._client = None
+    backend._client_lock = _threading.Lock()
+
+
 def unreachable_keys(
     prefix: str, entries: "_ty.Iterable[tuple[str, int]]"
 ) -> "list[str]":

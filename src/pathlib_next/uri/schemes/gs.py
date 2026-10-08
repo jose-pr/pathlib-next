@@ -4,6 +4,7 @@ import contextlib as _contextlib
 import errno as _errno
 import io as _io
 import sys as _sys
+import threading as _threading
 import typing as _ty
 
 from ... import utils as _utils
@@ -50,11 +51,12 @@ class GsBackend(BaseGsBackend):
     call a path makes; left out, the SDK's own defaults apply, which keep an
     unreachable endpoint waiting for about two minutes."""
 
-    __slots__ = ("client_kwargs", "_client", "_options")
+    __slots__ = ("client_kwargs", "_client", "_client_lock", "_options")
 
     def __init__(self, *, timeout=_UNSET, retry=_UNSET, **client_kwargs):
         self.client_kwargs = client_kwargs
         self._client = None
+        self._client_lock = _threading.Lock()
         self._options = {
             name: value
             for name, value in (("timeout", timeout), ("retry", retry))
@@ -65,17 +67,22 @@ class GsBackend(BaseGsBackend):
         return dict(self._options)
 
     def client(self):
-        if self._client is None:
-            storage = _import_client("google.cloud.storage", "gs")
+        return _store.lazy_client(self, self._build_client)
 
-            # Passed through as given. This used to turn a dict
-            # `api_endpoint` into a process-wide, never-restored
-            # `os.environ["STORAGE_EMULATOR_HOST"]` and drop the other
-            # client options: every later client in the process (and any
-            # subprocess) was redirected to that endpoint with anonymous
-            # credentials.
-            self._client = storage.Client(**self.client_kwargs)
-        return self._client
+    def _build_client(self):
+        storage = _import_client("google.cloud.storage", "gs")
+        # Passed through as given: turning a dict `api_endpoint` into a
+        # process-wide `os.environ["STORAGE_EMULATOR_HOST"]` would redirect
+        # every later client in the process, and any subprocess, to it.
+        return storage.Client(**self.client_kwargs)
+
+    # A pickled or copied backend keeps its options and builds its own
+    # client on first use; the SDK's client refuses to be pickled.
+    def __getstate__(self):
+        return _store.backend_state(self)
+
+    def __setstate__(self, state):
+        _store.restore_backend(self, state)
 
 
 def _object_key(path: str) -> str:
