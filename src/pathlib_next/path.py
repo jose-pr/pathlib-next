@@ -950,6 +950,14 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
         re-`stat()`s each entry so a symlink is still resolved.
 
         A listed name that is not one path component (`""`, `.`, `..`, or one
+        Without `follow_symlinks` a symlink to a directory is listed in
+        `filenames` and not entered, and so is a Windows junction
+        (`is_junction()`): like a symlink it is a second NAME for another
+        tree, which `pathlib.Path.walk()` does not enter either (a junction
+        that points at its own parent would otherwise be walked until the
+        path is too long). Nothing protects a walk with `follow_symlinks=True`
+        from a loop.
+
         containing `/` or NUL; see `utils.is_safe_child_name()`) is left out
         of `dirnames` and `filenames`. `on_error`, when given, is called with
         a `ValueError` for it, `error.filename` naming the directory.
@@ -995,6 +1003,8 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                         )
                     is_dir = stat.is_dir() if stat is not None else False
                 except OSError:
+                    if is_dir and not follow_symlinks:
+                        is_dir = not _is_junction(_glob._child(path, name))
                     # Carried over from os.path.isdir().
                     is_dir = False
 
@@ -1821,6 +1831,14 @@ def _follow_policy(policy, path: "Path") -> str:
     keep one mount and follow another.
 
     Returns the internal name: "rm", "follow" or "ignore". An answer that is
+def _is_junction(path: "Path") -> bool:
+    """`path.is_junction()`, where a class that cannot answer says no."""
+    try:
+        return bool(path.is_junction())
+    except (NotImplementedError, OSError, ValueError):
+        return False
+
+
     none of the three raises `_InvalidPolicy`, which `rm()` never hands to
     its `ignore_error`.
     """

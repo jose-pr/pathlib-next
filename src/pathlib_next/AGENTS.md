@@ -176,8 +176,11 @@ not by a checker.
   - `rglob(pattern, **same_kwargs)` — `glob(f"**/{pattern}", recursive=True)`.
     `pattern=None` is `glob(None)`.
   - `walk(top_down=True, on_error=None, follow_symlinks=False)` — drives
-    `_scandir()`; its stats are trusted only with `follow_symlinks=False`. No
-    symlink-cycle protection when following (only `LocalPath` has pathlib's).
+    `_scandir()`; its stats are trusted only with `follow_symlinks=False`.
+    Without `follow_symlinks` a symlink to a directory and a Windows junction
+    (`is_junction()`) are listed in `filenames` and not entered, as
+    `pathlib.Path.walk()` does; with it they are entered, and nothing protects
+    the walk from a loop (`LocalPath` included: its walk is this one).
     A listed name that is not one path component (`utils.is_safe_child_name()`)
     is left out of `dirnames`/`filenames`; `on_error`, when given, is called
     with a `ValueError` for it (`error.filename` is the directory).

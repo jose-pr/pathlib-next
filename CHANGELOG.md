@@ -79,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`with_stem("")` raises on 3.13 and later when the name has a suffix**, as
   `pathlib` does there (`MemPath("/a/c.txt").with_stem("")` was `/a/.txt`).
   Before 3.13 it is unchanged.
+- **`walk()` lists a Windows junction in `filenames` and does not enter it**
+  unless `follow_symlinks=True`, as it already did for a symlink to a directory
+  and as `pathlib.Path.walk()` does on 3.14. It listed the junction in
+  `dirnames` and descended: a junction to its own parent was walked 64 levels
+  deep, until the path was too long. A caller that wants the target's files
+  passes `follow_symlinks=True`. The header and `docs/divergences.md` no longer
+  say that `LocalPath` protects a following walk from a loop; neither does
+  `pathlib`.
 - **The scheme extras now declare version ranges.** `uritools`, `requests`,
   `paramiko`, `boto3`, `google-cloud-storage`, `azure-storage-blob`,
   `azure-identity` and `asyncssh` had no lower bound (`asyncssh` had only the
