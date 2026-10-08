@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ._base import ArchiveUri as ArchiveUri
 from ._base import _split_archive_path as _split_archive_path
 from .tar import TarUri as TarUri

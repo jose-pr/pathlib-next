@@ -314,3 +314,13 @@ def test_pyright_accepts_the_constructors(tmp_path):
         cwd=directory,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_every_module_postpones_the_evaluation_of_annotations():
+    # A bare `X | Y` in an annotation must not be evaluated on Python 3.9.
+    without = sorted(
+        str(path.relative_to(PACKAGE))
+        for path in PACKAGE.rglob("*.py")
+        if "from __future__ import annotations" not in path.read_text(encoding="utf-8")
+    )
+    assert without == []
