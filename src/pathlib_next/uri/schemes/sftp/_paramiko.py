@@ -46,8 +46,23 @@ class _SSHConfig(_paramiko.SSHConfig):
     }
 
 
+def _file_stamps(config_paths: "tuple[str, ...]") -> tuple:
+    """`(path, modification time, size)` of each config file that exists, so
+    a parsed config is not reused after the file changed."""
+    stamps = []
+    for path in config_paths:
+        try:
+            info = _pathlib.Path(path).expanduser().stat()
+        except OSError:
+            continue
+        stamps.append((path, info.st_mtime_ns, info.st_size))
+    return tuple(stamps)
+
+
 @_utils.LRU
-def _load_ssh_config(config_paths: "tuple[str, ...]") -> "_SSHConfig | None":
+def _load_ssh_config(
+    config_paths: "tuple[str, ...]", stamps: tuple = ()
+) -> "_SSHConfig | None":
     config = _SSHConfig()
     loaded = False
     for path in config_paths:
@@ -67,7 +82,7 @@ def _lookup_ssh_config(
     config_paths = _normalize_config_paths(ssh_config)
     if not config_paths:
         return {}
-    config = _load_ssh_config(config_paths)
+    config = _load_ssh_config(config_paths, _file_stamps(config_paths))
     if config is None:
         return {}
     return config.lookup(host)
@@ -351,6 +366,15 @@ _CACHED_CLIENTS = _utils.LRU(
 )
 
 
+def _close_clients_of_ended_threads() -> None:
+    """Close the cached clients of threads that have ended: nothing uses
+    them again, and the LRU would only close one when it evicts it."""
+    running = {thread.ident for thread in _thread.enumerate()}
+    for key in list(_CACHED_CLIENTS.cache):
+        if key[2] not in running:
+            _CACHED_CLIENTS.discard(*key)
+
+
 class SftpBackend(_checkfile.CheckFileSftpBackend):
     """Connects via `paramiko.SSHClient` using `connect_opts` merged with
     the `Source`'s host/port/userinfo. `client()` caches per
@@ -511,6 +535,8 @@ class SftpBackend(_checkfile.CheckFileSftpBackend):
 
     def client(self, source: Source):
         thread_id = _thread.get_ident()
+        if (self, source, thread_id) not in _CACHED_CLIENTS.cache:
+            _close_clients_of_ended_threads()
         client = _CACHED_CLIENTS(self, source, thread_id)
         if not _client_is_alive(client):
             client = _CACHED_CLIENTS.invalidate(self, source, thread_id)

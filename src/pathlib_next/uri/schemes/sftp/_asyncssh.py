@@ -603,14 +603,12 @@ class _SyncSftpClient:
         self._run(self._aclient.chmod(path, mode, follow_symlinks=follow_symlinks))
 
     @_reraise_sftp_errors
-    def chown(
-        self, path: str, uid: int, gid: int, *, follow_symlinks: bool = True
-    ) -> None:
+    def chown(self, path: str, uid: int, gid: int) -> None:
         # asyncssh takes uid/gid as keywords on setstat and sends them as
         # SFTPv3's paired UIDGID attribute -- both values always go on the
         # wire together, which is why SftpPath._chown() reads the current
         # owner for whichever field the caller left as "unchanged".
-        self._run(self._aclient.chown(path, uid, gid, follow_symlinks=follow_symlinks))
+        self._run(self._aclient.chown(path, uid, gid))
 
     @_reraise_sftp_errors
     def remove(self, path: str) -> None:
@@ -640,8 +638,7 @@ class _SyncSftpClient:
 
     @_reraise_sftp_errors
     def readlink(self, path: str) -> str:
-        target = self._run(self._aclient.readlink(path))
-        return target.decode() if isinstance(target, bytes) else target
+        return self._run(self._aclient.readlink(path))
 
     @_reraise_sftp_errors
     def link(self, source: str, dest: str) -> None:
@@ -889,6 +886,8 @@ class AsyncsshSftpBackend(_checkfile.CheckFileSftpBackend):
 
     #: asyncssh's chmod() takes follow_symlinks natively.
     supports_lchmod = True
+    #: Recursive `copy()` and `rm()` have a concurrent implementation here.
+    supports_tree = True
     #: asyncssh's SFTPClient.link() exists (SFTPv3 has no core hard-link
     #: op, but this works via the hardlink@openssh.com extension against
     #: real-world OpenSSH v3 servers, or the standard opcode against v5/v6).
@@ -960,6 +959,44 @@ class AsyncsshSftpBackend(_checkfile.CheckFileSftpBackend):
     def default(cls, ssh_config=_DEFAULT_SSH_CONFIG) -> "AsyncsshSftpBackend":
         return cls(ssh_config=ssh_config)
 
+    # The connection is resolved on the calling thread: looking it up on the
+    # bridge loop would open it through a blocking `_run()` on that loop.
+    def tree_rm(self, path, *, missing_ok, on_error):
+        return _run(
+            _concurrent_rm(
+                path,
+                max_concurrency=self.max_concurrency,
+                missing_ok=missing_ok,
+                on_error=on_error,
+                aclient=path._sftpclient._aclient,
+            ),
+            None,
+        )
+
+    def tree_copy(
+        self,
+        path,
+        target,
+        *,
+        overwrite,
+        follow_symlinks,
+        preserve_metadata,
+        ignore_error,
+    ):
+        return _run(
+            _concurrent_copy(
+                path,
+                target,
+                overwrite=overwrite,
+                follow_symlinks=follow_symlinks,
+                preserve_metadata=preserve_metadata,
+                max_concurrency=self.max_concurrency,
+                ignore_error=ignore_error,
+                aclient=path._sftpclient._aclient,
+            ),
+            None,
+        )
+
 
 class _TaskOwner:
     """Owns every task one recursive walk creates, so that none outlives it:
@@ -1015,6 +1052,53 @@ async def _in_thread(function, *args):
         raise
 
 
+async def _sftp_call(semaphore, make_awaitable, filename=None):
+    """Run one asyncssh request inside `semaphore`, raising what the sync
+    client raises for a failure of it."""
+    async with semaphore:
+        try:
+            return await make_awaitable()
+        except _asyncssh.Error as error:
+            raise _library_error(error, filename) from None
+
+
+async def _read_children(aclient, semaphore, current):
+    """`[(child path, listed FileStat or None)]` for the entries of the
+    directory `current`, in the server's order. The listing's own attributes
+    come with it (they describe the entry, never what a link points at); None
+    when the server did not say what kind of entry it is."""
+    names = await _sftp_call(
+        semaphore, lambda: aclient.readdir(current.path), current.path
+    )
+    children = []
+    for entry in names:
+        # The server chooses these names: one that is not a single component
+        # inside `current` must never become a child path (see
+        # `SftpPath._scandir`). The walkers bypass `_scandir`, so they filter.
+        if not _utils.is_safe_child_name(entry.filename):
+            continue
+        attrs = getattr(entry, "attrs", None)
+        listed = None
+        if attrs is not None:
+            listed = FileStat.from_stat(_StatAdapter(attrs))
+            if not _stat.S_IFMT(listed.st_mode):
+                listed = None
+        children.append((current / entry.filename, listed))
+    return children
+
+
+async def _wait_fail_fast(tasks):
+    """Wait for `tasks`, raising the first failure as soon as it happens. The
+    other tasks are left to the `_TaskOwner`, which cancels them."""
+    pending = set(tasks)
+    while pending:
+        done, pending = await _asyncio.wait(
+            pending, return_when=_asyncio.FIRST_EXCEPTION
+        )
+        for task in done:
+            task.result()
+
+
 async def _concurrent_copy(
     path,
     target,
@@ -1052,12 +1136,8 @@ async def _concurrent_copy(
     if aclient is None:
         aclient = path._sftpclient._aclient
 
-    async def sftp_call(make_awaitable, filename=None):
-        async with semaphore:
-            try:
-                return await make_awaitable()
-            except _asyncssh.Error as error:
-                raise _library_error(error, filename) from None
+    def sftp_call(make_awaitable, filename=None):
+        return _sftp_call(semaphore, make_awaitable, filename)
 
     async def stat_path(current):
         stat_coro = aclient.stat if follow_symlinks else aclient.lstat
@@ -1069,22 +1149,6 @@ async def _concurrent_copy(
             return await stat_path(current)
         except FileNotFoundError:
             return None
-
-    async def read_dir(current):
-        names = await sftp_call(lambda: aclient.readdir(current.path), current.path)
-        children = []
-        for entry in names:
-            name = entry.filename
-            if isinstance(name, bytes):
-                name = name.decode(errors="surrogateescape")
-            # The server chooses these names: one that is not a single
-            # component inside `current` must never become a child path
-            # (see `SftpPath._scandir`). This walker bypasses `_scandir`,
-            # so it filters for itself.
-            if not _utils.is_safe_child_name(name):
-                continue
-            children.append(current / name)
-        return children
 
     async def mkdir(current):
         # The mode `Path.mkdir()` sends; the source's is applied afterwards.
@@ -1188,8 +1252,13 @@ async def _concurrent_copy(
                 )
             )
 
-    async def copy_node(src, dst):
-        src_stat = await stat_path(src)
+    async def copy_node(src, dst, listed=None):
+        # A listed entry that is not a link says what it is; a link is
+        # followed (or not) by the request that stats it.
+        if listed is not None and not (follow_symlinks and listed.is_symlink()):
+            src_stat = listed
+        else:
+            src_stat = await stat_path(src)
         if src_stat.is_symlink():
             await copy_with_sync_fallback(src, dst)
             return
@@ -1206,8 +1275,10 @@ async def _concurrent_copy(
 
             await settle(
                 [
-                    owner.spawn(copy_node(child, dst / child.name))
-                    for child in await read_dir(src)
+                    owner.spawn(copy_node(child, dst / child.name, child_stat))
+                    for child, child_stat in await _read_children(
+                        aclient, semaphore, src
+                    )
                 ]
             )
         elif src_stat.is_file():
@@ -1235,20 +1306,15 @@ async def _concurrent_copy(
                         # Path methods (which _run() back onto this loop).
                         await _in_thread(ignore_error, error)
             return
-
-        pending = set(tasks)
-        while pending:
-            done, pending = await _asyncio.wait(
-                pending, return_when=_asyncio.FIRST_EXCEPTION
-            )
-            for task in done:
-                task.result()
-
-    async def copy_child(child):
-        await copy_node(child, target / child.name)
+        await _wait_fail_fast(tasks)
 
     try:
-        await settle([owner.spawn(copy_child(child)) for child in await read_dir(path)])
+        await settle(
+            [
+                owner.spawn(copy_node(child, target / child.name, child_stat))
+                for child, child_stat in await _read_children(aclient, semaphore, path)
+            ]
+        )
         # The root last, after what is in it, like every other directory.
         await apply_mode(target, await stat_path(path))
     finally:
@@ -1267,7 +1333,9 @@ async def _concurrent_rm(
 
     `aclient` must be resolved on the calling thread (`SftpPath.rm` does):
     see `_concurrent_copy`, which also explains the `_TaskOwner`. `on_error`
-    runs in a worker thread, so it may call sync `Path` methods.
+    runs in a worker thread, so it may call sync `Path` methods. Only the
+    root is stat-ed: every entry below it is a file or a directory by what
+    its parent's listing said.
     """
     semaphore = _asyncio.Semaphore(max(1, max_concurrency))
     owner = _TaskOwner()
@@ -1277,6 +1345,9 @@ async def _concurrent_rm(
     if aclient is None:
         aclient = path._sftpclient._aclient
 
+    def sftp_call(make_awaitable, filename=None):
+        return _sftp_call(semaphore, make_awaitable, filename)
+
     async def handled(error, current) -> bool:
         if on_error is None or any(error is seen for seen in declined):
             return False
@@ -1285,32 +1356,9 @@ async def _concurrent_rm(
         declined.append(error)
         return False
 
-    async def sftp_call(make_awaitable, filename=None):
-        async with semaphore:
-            try:
-                return await make_awaitable()
-            except _asyncssh.Error as error:
-                raise _library_error(error, filename) from None
-
     async def stat_path(current):
         attrs = await sftp_call(lambda: aclient.lstat(current.path), current.path)
         return FileStat.from_stat(_StatAdapter(attrs))
-
-    async def read_dir(current):
-        names = await sftp_call(lambda: aclient.readdir(current.path), current.path)
-        children = []
-        for entry in names:
-            name = entry.filename
-            if isinstance(name, bytes):
-                name = name.decode(errors="surrogateescape")
-            # The server chooses these names: one that is not a single
-            # component inside `current` must never become a child path
-            # (see `SftpPath._scandir`). This walker bypasses `_scandir`,
-            # so it filters for itself.
-            if not _utils.is_safe_child_name(name):
-                continue
-            children.append(current / name)
-        return children
 
     async def remove_file(current):
         await sftp_call(lambda: aclient.remove(current.path), current.path)
@@ -1318,20 +1366,10 @@ async def _concurrent_rm(
     async def remove_dir(current):
         await sftp_call(lambda: aclient.rmdir(current.path), current.path)
 
-    async def wait_fail_fast(tasks):
-        # A failure that is raised leaves the other tasks to the owner.
-        pending = set(tasks)
-        while pending:
-            done, pending = await _asyncio.wait(
-                pending, return_when=_asyncio.FIRST_EXCEPTION
-            )
-            for task in done:
-                task.result()
-
-    async def rm_one(current, *, root: bool = False):
+    async def rm_one(current, listed=None, *, root: bool = False):
         try:
             try:
-                stat = await stat_path(current)
+                stat = listed if listed is not None else await stat_path(current)
             except FileNotFoundError:
                 # `missing_ok` is about the path rm() was called on, not about
                 # an entry that vanished below it.
@@ -1340,10 +1378,13 @@ async def _concurrent_rm(
                 raise
             if stat.is_dir():
                 tasks = [
-                    owner.spawn(rm_one(child)) for child in await read_dir(current)
+                    owner.spawn(rm_one(child, child_stat))
+                    for child, child_stat in await _read_children(
+                        aclient, semaphore, current
+                    )
                 ]
                 if tasks:
-                    await wait_fail_fast(tasks)
+                    await _wait_fail_fast(tasks)
                 await remove_dir(current)
             else:
                 await remove_file(current)

@@ -112,6 +112,31 @@ class BaseSftpBackend(object):
     #: has no core hard-link operation at all.
     supports_hardlink = False
 
+    #: Whether this backend has its own concurrent recursive `copy()` and
+    #: `rm()` (`tree_copy()`, `tree_rm()`), which `SftpPath` then uses for a
+    #: directory on one host; the generic walks serve every other case.
+    supports_tree = False
+
+    def tree_copy(
+        self,
+        path: "SftpPath",
+        target: "SftpPath",
+        *,
+        overwrite: bool,
+        follow_symlinks: bool,
+        preserve_metadata: bool,
+        ignore_error,
+    ) -> None:
+        """Copy the directory `path` into the existing `target` directory,
+        on the host both are on. Only called when `supports_tree`."""
+        raise NotImplementedError("tree_copy()")
+
+    def tree_rm(self, path: "SftpPath", *, missing_ok: bool, on_error) -> None:
+        """Remove `path` and everything below it, never following a link.
+        `on_error(error, path)` decides whether a failure is skipped. Only
+        called when `supports_tree`."""
+        raise NotImplementedError("tree_rm()")
+
     def supported_checksums(self, path: "SftpPath") -> "_ty.FrozenSet[str]":
         """Advisory set of algorithm names `checksum()` can currently
         produce against `path`'s server connection (see
@@ -452,8 +477,6 @@ class SftpPath(UriPath):
             raise translated from error
         for attr in attrs:
             name = attr.filename
-            if isinstance(name, bytes):
-                name = name.decode(errors="surrogateescape")
             if not _utils.is_safe_child_name(name):
                 # A listing is untrusted input: the server chooses these
                 # names. One that is not a single component inside this
@@ -522,10 +545,10 @@ class SftpPath(UriPath):
 
     def stat(self, *, follow_symlinks=True):
         hint = self._pop_stat_hint()
-        if hint is not None and not follow_symlinks:
+        if hint is not None and not (follow_symlinks and hint.is_symlink()):
             # The hint comes from listdir_attr(), which never resolves
-            # symlinks -- only safe to reuse for a follow_symlinks=False
-            # (lstat-equivalent) request.
+            # symlinks: it is the answer to an lstat, and for anything that is
+            # not a link that is the answer to a stat too.
             return hint
         if follow_symlinks:
             return self._sftpclient.stat(self.path)
@@ -790,19 +813,13 @@ class SftpPath(UriPath):
     ):
         _check_follow("follow_symlinks", follow_symlinks)
         _check_follow("follow_binds", follow_binds)
-        try:
-            from ._asyncssh import AsyncsshSftpBackend, _concurrent_rm, _run
-        except ImportError:
-            AsyncsshSftpBackend = None
-
         # The native walker unlinks a symlink and never follows one, which is
         # the default policy; any other `follow_symlinks` takes the generic
         # walk. A server has no bindings, so `follow_binds` decides nothing.
         if (
-            AsyncsshSftpBackend is None
-            or not isinstance(self.backend, AsyncsshSftpBackend)
-            or not recursive
+            not recursive
             or follow_symlinks is not False
+            or not self.backend.supports_tree
         ):
             return super().rm(
                 recursive=recursive,
@@ -820,20 +837,7 @@ class SftpPath(UriPath):
                 else lambda _err, _path: bool(ignore_error)
             )
 
-        # Connect on THIS thread: the coroutine runs on the bridge loop,
-        # where opening the connection would block the loop it needs.
-        aclient = self._sftpclient._aclient
-        # A whole-tree operation: no wall-clock bound (single requests are).
-        return _run(
-            _concurrent_rm(
-                self,
-                max_concurrency=self.backend.max_concurrency,
-                missing_ok=missing_ok,
-                on_error=on_error,
-                aclient=aclient,
-            ),
-            None,
-        )
+        return self.backend.tree_rm(self, missing_ok=missing_ok, on_error=on_error)
 
     def copy(
         self,
@@ -857,16 +861,9 @@ class SftpPath(UriPath):
         the concurrent native fan-out itself -- see `docs/divergences.md`'s
         "Deliberate extensions" section for the documented limitation.
         """
-        try:
-            from ._asyncssh import AsyncsshSftpBackend, _concurrent_copy, _run
-        except ImportError:
-            # paramiko-only install ('sftp' extra): generic copy.
-            AsyncsshSftpBackend = None
-
         if (
-            AsyncsshSftpBackend is None
-            or not isinstance(self.backend, AsyncsshSftpBackend)
-            or not recursive
+            not recursive
+            or not self.backend.supports_tree
             # The fan-out writes every destination file over THIS path's
             # connection: only a target on the same host, and the same tree
             # (two distinct supplied backends may reach different servers),
@@ -907,15 +904,12 @@ class SftpPath(UriPath):
         else:
             target.mkdir()
 
-        coro = _concurrent_copy(
+        # A whole-tree operation: no wall-clock bound (single requests are).
+        return self.backend.tree_copy(
             self,
             target,
             overwrite=overwrite,
             follow_symlinks=follow_symlinks,
             preserve_metadata=preserve_metadata,
-            max_concurrency=self.backend.max_concurrency,
             ignore_error=ignore_error,
-            # Resolved on this thread, never on the bridge loop (see rm()).
-            aclient=self._sftpclient._aclient,
         )
-        return _run(coro, None)

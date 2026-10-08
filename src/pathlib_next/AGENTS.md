@@ -817,7 +817,16 @@ chained (their text can carry credentials).
     usable); `default(ssh_config=...)` classmethod.
     `BaseSftpBackend.client(source)` is the override point
     (`supports_lchmod`, `supports_hardlink`, `checksum()`,
-    `supported_checksums()`).
+    `supported_checksums()`). `supports_tree` (False; asyncssh True) says the
+    backend has its own concurrent recursive `copy()` and `rm()`
+    (`tree_copy(path, target, *, overwrite, follow_symlinks, preserve_metadata,
+    ignore_error)`, `tree_rm(path, *, missing_ok, on_error)`), which `SftpPath`
+    then uses for a directory on one host; otherwise (and for every backend
+    that does not set it) the generic walks run, and no SSH library is
+    imported by `copy()` or `rm()`. Listing a directory and testing each child
+    (`is_dir()`, `is_file()`, `exists()`) asks the server once: a listed
+    entry that is not a link is not stat-ed again, and the native `rm()` looks
+    only at the root before it lists.
   - `readlink() -> SftpPath` (verbatim target) and `symlink_to()` on both
     backends; `hardlink_to(target)` and `chmod(follow_symlinks=False)` on
     asyncssh only (paramiko → `NotImplementedError`); `chown()` with numeric

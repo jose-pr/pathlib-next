@@ -56,6 +56,8 @@ class _Wire:
         self.before = {}
         #: name -> hook(result, *args) -> result: reshapes the answer.
         self.after = {}
+        #: hook(directory, entry) -> entry: reshapes each entry of a listing.
+        self.listed = None
 
     def record(self, name):
         with self._lock:
@@ -93,7 +95,7 @@ def _counting_server_class(wire):
     async def scandir(self, path):
         wire.record("scandir")
         async for entry in base_scandir(self, path):
-            yield entry
+            yield entry if wire.listed is None else wire.listed(path, entry)
 
     _Server.scandir = scandir
     return _Server
@@ -911,7 +913,17 @@ def _mode_tree(root, wire):
             result.permissions = _REPORTED[path]
         return result
 
+    def reshape_entry(directory, entry):
+        # What the walks read: the listing says the same as stat and lstat.
+        name = entry.filename
+        name = name if isinstance(name, bytes) else name.encode()
+        full = directory.rstrip(b"/") + b"/" + name
+        if full in _REPORTED and entry.attrs is not None:
+            entry.attrs.permissions = _REPORTED[full]
+        return entry
+
     wire.after["stat"] = wire.after["lstat"] = reshape
+    wire.listed = reshape_entry
     sent = []
 
     def record(server_, path, attrs, *args):
