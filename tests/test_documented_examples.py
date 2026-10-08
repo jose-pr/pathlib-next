@@ -11,6 +11,7 @@ either run or marked, so a new example cannot be left out by accident.
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
@@ -24,9 +25,9 @@ SKIP = re.compile(r"^<!--\s*example:\s*skip:\s*(?P<reason>\S.*?)\s*-->$")
 FENCE = re.compile(r"^```(?P<info>\S*)")
 
 
-def python_blocks(text):
-    """`[(line number, source, skip reason or None)]` for every ```python
-    fence of `text`."""
+def python_blocks(text, language="python"):
+    """`[(line number, source, skip reason or None)]` for every fence of
+    `text` opened as ```<language>."""
     lines = text.splitlines()
     blocks = []
     index = 0
@@ -38,7 +39,7 @@ def python_blocks(text):
         end = index + 1
         while end < len(lines) and not lines[end].startswith("```"):
             end += 1
-        if fence.group("info") == "python":
+        if fence.group("info") == language:
             marker = SKIP.match(lines[index - 1].strip()) if index else None
             blocks.append(
                 (
@@ -111,3 +112,49 @@ def test_a_marker_needs_a_reason_and_sits_directly_above_its_fence():
         (18, None),
     ]
     assert blocks[0][1] == "x = 1\n"
+
+
+# --- the commands of the README run as written ---
+
+
+def _command_line_blocks():
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    section = text.split("\n## Command line\n", 1)[1].split("\n## ", 1)[0]
+    return python_blocks(section, "bash")
+
+
+def test_the_command_line_section_has_commands_to_run_and_marks_the_rest():
+    blocks = _command_line_blocks()
+    assert [reason is None for _line, _source, reason in blocks] == [True, False]
+
+
+@pytest.mark.parametrize(
+    "source", [source for _l, source, reason in _command_line_blocks() if not reason]
+)
+def test_the_command_line_examples_run(source, tmp_path):
+    """Each line is `mkdir NAME` or a `uripath` command, run in an empty
+    directory with the interpreter that runs the tests."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO / "src"), env.get("PYTHONPATH")])
+    )
+    for line in source.splitlines():
+        words = shlex.split(line)
+        if not words or words[0].startswith("#"):
+            continue
+        if words[0] == "mkdir":
+            (tmp_path / words[1]).mkdir()
+            continue
+        assert words[0] == "uripath", line
+        result = subprocess.run(
+            [sys.executable, "-W", "error", "-m", "pathlib_next.tools.uripath"]
+            + words[1:],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, f"{line}\n{result.stdout}{result.stderr}"
+        assert b"Traceback" not in result.stderr
+    assert (tmp_path / "site-copy" / "index.html").exists() is False
+    assert (tmp_path / "site" / "copy.html").read_bytes() == b"<h1>hi</h1>"

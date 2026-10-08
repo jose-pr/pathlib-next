@@ -1,4 +1,4 @@
-# pathlib_next
+# pathlib-next
 
 [![Version](https://img.shields.io/pypi/v/pathlib-next.svg)](https://pypi.org/project/pathlib-next/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pathlib-next.svg)](https://pypi.org/project/pathlib-next/)
@@ -35,8 +35,9 @@ differences from `pathlib` are listed in
 | `az:` (`AzPath`) | Yes | Yes (no append) | Yes (prefixes) | Yes | Yes (marker blob) | Yes | Yes (same container) | `az` |
 | `github:` / `gitlab:` / `git:` | Yes | No | Yes | Yes | No | No | No | `http` |
 
-Every scheme shares the same `glob()`, `walk()`, `copy()`/`move()`, `rm()` and
-`PathSyncer` implementations. The per-scheme notes (timeouts, host-key and
+Every scheme gets `glob()`, `walk()`, `copy()`/`move()`, `rm()` and `PathSyncer`
+from the base classes; `LocalPath` and a few schemes replace some of them where
+the backend has a faster way. The per-scheme notes (timeouts, host-key and
 certificate verification, authentication, limits) are in
 [Schemes](https://jose-pr.github.io/pathlib-next/guides/schemes/).
 
@@ -148,26 +149,34 @@ PathSyncer(remove_missing=True).sync(source, Path("site-copy"))
 print(sorted(p.name for p in Path("site-copy").iterdir()))
 ```
 
-**Command line**:
+## Command line
 
+`uripath` reads, writes, copies, removes and syncs local paths and URIs, with
+`-` for stdin or stdout. It works on local paths with no extra installed; these
+commands run as written in an empty directory:
+
+```bash
+mkdir site
+uripath write site/index.html "<h1>hi</h1>"
+uripath read site/index.html
+uripath cp site/index.html site/copy.html
+uripath sync --dry-run --remove-missing site site-copy
+uripath sync site site-copy
+uripath rm --recursive site-copy
+```
+
+Either side can be a URI instead, with the extra for its scheme installed:
+
+<!-- example: skip: needs an SFTP host and an S3 bucket -->
 ```bash
 uripath cp report.txt sftp://host/tmp/report.txt
 uripath sync --dry-run --remove-missing site/ s3://bucket/site/
 ```
 
-## Extending
-
-Two first-class ways to add a path-addressable resource, covered with worked
-examples in [Extending](https://jose-pr.github.io/pathlib-next/guides/extending/):
-
-- Subclass `Path` directly for a non-URI resource (`MemPath` is the reference).
-- Subclass `UriPath` and declare `__SCHEMES` for a new URI scheme; it is
-  dispatched as soon as its module is imported, or through a
-  `pathlib_next.schemes` entry point.
-
-`pathlib_next.testing` provides the pytest contracts (`PurePathContract`,
-`ReadPathContract`, `PathContract`) and `populate_fixture_tree()` used to
-verify every built-in scheme.
+The exit status is 0 on success, 1 when the operation failed, 2 for a wrong
+invocation, 130 on Ctrl-C and 141 when the reader of stdout went away. Every
+flag is described in the
+[CLI guide](https://jose-pr.github.io/pathlib-next/guides/cli/).
 
 ## API overview
 
@@ -186,6 +195,20 @@ verify every built-in scheme.
 The full reference is on the [documentation site](https://jose-pr.github.io/pathlib-next/);
 an agent-oriented API summary ships inside the package as
 `pathlib_next/AGENTS.md`.
+
+## Extending
+
+Two first-class ways to add a path-addressable resource, covered with worked
+examples in [Extending](https://jose-pr.github.io/pathlib-next/guides/extending/):
+
+- Subclass `Path` directly for a non-URI resource (`MemPath` is the reference).
+- Subclass `UriPath` and declare `__SCHEMES` for a new URI scheme; it is
+  dispatched as soon as its module is imported, or through a
+  `pathlib_next.schemes` entry point.
+
+`pathlib_next.testing` provides the pytest contracts (`PurePathContract`,
+`ReadPathContract`, `PathContract`) and `populate_fixture_tree()` used to
+verify every built-in scheme.
 
 ## Supported Python versions
 
@@ -210,6 +233,18 @@ the documentation: `pip install -e ".[docs]"` then `mkdocs serve`.
 
 Changes are recorded in the
 [changelog](https://github.com/jose-pr/pathlib-next/blob/main/CHANGELOG.md).
+
+### Releasing
+
+1. Move the `[Unreleased]` entries of `CHANGELOG.md` under a new
+   `## [x.y.z] - <date>` heading and add its link definition at the bottom.
+2. Bump `version` in `pyproject.toml` in the same commit.
+3. Before 1.0 the minor version changes only when the documented API breaks;
+   new methods, new optional arguments and fixes are patch releases.
+4. Run the full suite on the oldest and the newest supported Python,
+   `mkdocs build --strict` and `python -m build`.
+5. Push `main`, then the `v*` tag: the release workflow tests, builds and
+   publishes to PyPI and creates the GitHub release.
 
 ## License
 

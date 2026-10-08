@@ -24,7 +24,7 @@ pip install pathlib-next
 | `sftp-async` | `asyncssh` | `sftp:` with the asyncssh backend |
 | `s3` | `boto3` | `s3:` |
 | `gs` | `google-cloud-storage` | `gs:` |
-| `az` | `azure-storage-blob` | `az:` |
+| `az` | `azure-storage-blob`, `azure-identity` | `az:` |
 
 Every scheme extra also installs `uri`. With **no extras**,
 `pathlib_next.Path`/`LocalPath`, `pathlib_next.mempath.MemPath`, the utilities,
