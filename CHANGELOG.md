@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a payload of about 290 KiB holding every byte value and runs of CR/LF, written
   whole and in pieces and read back whole and in parts; names holding a space,
   `#`, `%`, `+`, `&`, `=` and mixed case, stored, listed, renamed and removed as
-  written; `stat()` of a longer file (`test_stat` now checks it) and of a
+  written; `stat()` of a longer file and of a
   directory, and a numeric `st_mtime`; `_scandir()` agreeing with `stat()` for every child; nothing
   existing below a file; partial `read(n)`; and `rename()` onto a non-empty
   directory raising. The switches, each documented in the module and in the
