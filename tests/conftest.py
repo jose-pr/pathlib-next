@@ -83,7 +83,10 @@ def _serve_http(handler):
     """Run a `ThreadingHTTPServer` for `handler` on an OS-assigned loopback
     port; yields its base URL (no trailing slash) and stops it on exit."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # A short poll interval: `shutdown()` waits up to one for the loop to see it.
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"

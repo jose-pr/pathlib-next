@@ -56,7 +56,9 @@ def _start():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
     server.log, server.redirect_to = [], None
     server.base = f"127.0.0.1:{server.server_port}"
-    server.thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server.thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     server.thread.start()
     return server
 
