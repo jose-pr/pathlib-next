@@ -673,6 +673,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gave every file the time of the copy on 3.9; 3.14 already kept it. A sync
   quick check that compares `(size, mtime)` across a copied tree now sees the
   same answer on every version.
+- **A sync that changes nothing stats each root once and lists each directory
+  once.** `PathSyncer` stat'd every source entry (with the default
+  `follow_symlinks=True`, although the listing already carried the stat) and
+  every target entry one by one, and with `remove_missing=True` listed each
+  target directory and stat'd its entries a second time: 205 entries in 6
+  directories cost 206 source and 206 to 411 target `stat()` calls. The
+  listing's stat now answers for every entry that is not a link; a link, an
+  entry whose listing stat is `None` (unknown) and a target name the listing
+  did not report are stat'd, one call each. On a remote scheme each of those
+  calls was a request. A backend that does not override `_scandir()` (the
+  default stats every entry itself) now stats the entries of each target
+  directory it syncs into once, instead of each source entry. With
+  `follow_symlinks=True` and `remove_missing=True` the target link that is
+  removed is reported to `hook` and `ignore_error` by its own stat, not by the
+  stat of what it points at, as it already was with `follow_symlinks=False`.
+- **The default `PathSyncer` checksum asks for a native digest only when both
+  sides can give one.** For a source with a server-side digest and a target
+  without (`LocalPath`, `MemPath`), every compared file computed one digest
+  that was thrown away before both sides were streamed. Whether a side can
+  answer is now checked first, and the second side is asked only when the first
+  answered.
 
 ## [0.9.11] - 2026-09-21
 

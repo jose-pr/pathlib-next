@@ -926,7 +926,7 @@ class TestMyPath(PathContract):
     (`source` and `target` are `PathAndStat`), offered once per error; a
     tolerated error is logged at WARNING on logger
     `pathlib_next.sync` and reported to `hook` as `SyncEvent.Error`.
-    `.log(msg, *args)` (INFO on the same logger) is overridable.
+    `.log(msg, *args)` (INFO on the same logger) is overridable by a subclass.
   - Safety, all through `ignore_error`: a missing root `source` →
     `FileNotFoundError`; overlapping `source`/`target` (one inside the other,
     or two names of one file: decided like `copy()`/`move()` decide "same
@@ -946,6 +946,13 @@ class TestMyPath(PathContract):
     error for that entry (`FileNotFoundError` or the stat's `OSError`, event
     `SyncStart`) and the same-named target entry is left alone, whatever
     `remove_missing` is; only a name the listing no longer holds is removed.
+  - Cost: each root is stat'd once and each directory of each side is listed
+    once; the listing's stat answers for every entry that is not a link, so a
+    sync that changes nothing makes no other `stat()` call on a backend whose
+    `_scandir()` returns stats. A link, an entry whose listing stat is `None`
+    and a target name the listing did not report are stat'd, one call each. A
+    backend with no `_scandir()` of its own pays the default's `stat()` per
+    entry of every directory it lists.
   - `remove_missing=True` deletes target entries absent from the source. With
     `False`, a non-empty target directory whose source became a file or link
     is kept (`IsADirectoryError`, event `TypeMismatch`).

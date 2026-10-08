@@ -12,7 +12,7 @@ import typing as _ty
 import uuid as _uuid
 
 from .. import utils as _utils
-from ..path import Path, _relation
+from ..path import Path, _listing, _relation
 from ..utils.stat import FileStat
 from . import checksum as _checksum
 from . import glob as _glob
@@ -28,13 +28,9 @@ _DEFAULT_ALGORITHM = "md5"
 
 
 def _default_checksum(entry: "PathAndStat") -> str:
-    # Kept for backward compatibility: `PathSyncer().checksum` must still
-    # be a plain `Callable[[PathAndStat], Any]`, e.g. for callers that read
-    # `.checksum` directly rather than going through `sync()`. `sync()`
-    # itself never calls this for the default policy -- it calls
-    # `_default_checksums_match()` instead, which can coordinate the
-    # native-vs-streaming decision across BOTH sides at once (a single-path
-    # function like this one structurally cannot).
+    # The sentinel that marks the default policy: `sync()` recognizes it and
+    # calls `_default_checksums_match()` instead. It is also the plain
+    # `Callable[[PathAndStat], Any]` that `PathSyncer().checksum` reads as.
     native = _checksum.native(entry.path, _DEFAULT_ALGORITHM)
     if native is not None:
         return native
@@ -87,11 +83,18 @@ def _default_checksums_match(source: "PathAndStat", target: "PathAndStat") -> bo
     all, since a `NativeChecksum` implementation is never required to
     override it.
     """
-    algorithm = _shared_native_algorithm(source.path, target.path) or _DEFAULT_ALGORITHM
-    source_native = _checksum.native(source.path, algorithm)
-    target_native = _checksum.native(target.path, algorithm)
-    if source_native is not None and target_native is not None:
-        return source_native == target_native
+    # Whether each side can answer at all is known without I/O: ask for a
+    # digest only when both can, and ask the second only if the first did,
+    # so a digest that would be thrown away is never computed.
+    if all(getattr(entry.path, "checksum", None) for entry in (source, target)):
+        algorithm = (
+            _shared_native_algorithm(source.path, target.path) or _DEFAULT_ALGORITHM
+        )
+        source_native = _checksum.native(source.path, algorithm)
+        if source_native is not None:
+            target_native = _checksum.native(target.path, algorithm)
+            if target_native is not None:
+                return source_native == target_native
     return _checksum.stream(source.path, _DEFAULT_ALGORITHM) == _checksum.stream(
         target.path, _DEFAULT_ALGORITHM
     )
@@ -625,10 +628,11 @@ class PathSyncer(object):
         self.quick_check = quick_check
 
     def log(self, msg: str, *args: object):
-        # Overridable hook: subclasses/instances may reassign `log` (or
-        # subclass) to route sync progress elsewhere. `*args` are passed
-        # to the logger lazily (stdlib %-style) so formatting is skipped
-        # entirely unless something is actually listening at INFO.
+        # Overridable hook: a subclass overrides `log` to route sync
+        # progress elsewhere (the class has `__slots__`, so an instance
+        # cannot be assigned one). `*args` are passed to the logger lazily
+        # (stdlib %-style) so formatting is skipped entirely unless
+        # something is actually listening at INFO.
         _logger.info(msg, *args)
 
     def hook(
@@ -715,16 +719,22 @@ class PathSyncer(object):
             raise
 
     def _children(
-        self, entry: PathAndStat, windows: bool = False
+        self,
+        entry: PathAndStat,
+        windows: bool = False,
+        listing: "list | None" = None,
+        follow: "bool | None" = None,
     ) -> "list[tuple[str, PathAndStat]]":
-        """`(listed name, child)` for each entry of the directory `entry`.
-        The child is built from the name as listed; one that is not a safe
-        child name for a destination read with `windows` rules gets no
-        stat, and the caller refuses it."""
+        """`(listed name, child)` for each entry of the directory `entry`,
+        from `listing` when the caller has already taken it. The child is
+        built from the name as listed, described by a stat that follows
+        links when `follow` (default: `follow_symlinks`) says so; one that is
+        not a safe child name for a destination read with `windows` rules
+        gets no stat, and the caller refuses it."""
+        if follow is None:
+            follow = self.follow_symlinks
         children: "list[tuple[str, PathAndStat]]" = []
-        for scan_entry in entry.path._scandir():
-            pair = isinstance(scan_entry, tuple) and len(scan_entry) == 2
-            name = scan_entry[0] if pair else scan_entry.name
+        for name, stat in _listing(entry.path) if listing is None else listing:
             child = _glob._child(entry.path, name)
             if not _utils.is_safe_child_name(name, windows=windows):
                 children.append((name, PathAndStat.from_stat(child, None)))
@@ -733,16 +743,15 @@ class PathSyncer(object):
                 # tree: never copied, never a reason to remove anything.
                 # `_sweep()` removes the stale ones.
                 continue
-            elif pair and not self.follow_symlinks:
+            elif not follow:
                 # `None` means "stat unknown" (GitLab blobs, FTP's NLST
                 # fallback), not "missing": ask the path itself before
                 # remove_missing can treat the entry as gone.
-                stat = scan_entry[1]
                 if stat is None:
                     stat = FileStat.from_path(child, follow_symlink=False)
                 children.append((name, PathAndStat.from_stat(child, stat)))
             else:
-                children.append((name, self._followed(scan_entry, child, pair)))
+                children.append((name, self._followed(stat, child)))
         return children
 
     def _sweep(
@@ -752,6 +761,7 @@ class PathSyncer(object):
         dry_run: bool,
         policy: _OnPathSyncerError,
         swept: "set[str]",
+        listings: "dict[str, list]",
     ) -> None:
         """Remove the stale temporary files of earlier syncs from
         `target_dir`, once per call of `sync()`. Only a file whose name is
@@ -764,28 +774,28 @@ class PathSyncer(object):
         if str(target_dir) in swept:
             return
         swept.add(str(target_dir))
-        try:
-            listing = list(target_dir._scandir())
-        except Exception as error:
-            _logger.warning(
-                "could not list %s for stale temporary files: %s", target_dir, error
-            )
-            return
-        for scan_entry in listing:
-            pair = isinstance(scan_entry, tuple) and len(scan_entry) == 2
-            name = scan_entry[0] if pair else scan_entry.name
+        # The directory's own `_sync` listed it already when it is a
+        # target directory being synced; a file's parent is listed here.
+        listing = listings.get(str(target_dir))
+        if listing is None:
+            try:
+                listing = list(_listing(target_dir))
+            except Exception as error:
+                _logger.warning(
+                    "could not list %s for stale temporary files: %s",
+                    target_dir,
+                    error,
+                )
+                return
+        for name, stat in listing:
             if not (_is_leftover(name) and _utils.is_safe_child_name(name)):
                 continue
             child = _glob._child(target_dir, name)
-            try:
-                if pair:
-                    stat = scan_entry[1] or FileStat.from_path(
-                        child, follow_symlink=False
-                    )
-                else:
-                    stat = FileStat.from_stat(scan_entry.stat(follow_symlinks=False))
-            except OSError:
-                continue
+            if stat is None:
+                try:
+                    stat = FileStat.from_path(child, follow_symlink=False)
+                except OSError:
+                    continue
             if (
                 stat is None
                 or stat.is_dir()
@@ -809,23 +819,23 @@ class PathSyncer(object):
                 policy,
             )
 
-    def _followed(self, scan_entry, child: Path, pair: bool) -> PathAndStat:
-        """`child` described by the stat `follow_symlinks` asks for. A listed
-        link that cannot be followed (a loop, an offline volume) gets no
-        stat, like a dangling one, so that `_sync` reports that entry alone
-        instead of the whole listing failing."""
+    def _followed(self, listed: "FileStat | None", child: Path) -> PathAndStat:
+        """`child` described by the stat that following links asks for. The
+        listing's own stat answers for anything that is not a link; `None`
+        (unknown, never "missing") and a link need the stat of what they
+        resolve to. A listed link that cannot be followed (a loop, an offline
+        volume) gets no stat, like a dangling one, so that `_sync` reports
+        that entry alone instead of the whole listing failing."""
         try:
-            if pair:
-                return PathAndStat(child, follow_symlink=True)
-            stat = scan_entry.stat(follow_symlinks=self.follow_symlinks)
-            return PathAndStat.from_stat(child, FileStat.from_stat(stat))
+            if listed is not None:
+                listed = FileStat.from_stat(listed)
+                if not listed.is_symlink():
+                    return PathAndStat.from_stat(child, listed)
+            return PathAndStat(child, follow_symlink=True)
         except FileNotFoundError:
             return PathAndStat.from_stat(child, None)
         except OSError:
-            if (
-                not self.follow_symlinks
-                or FileStat.from_path(child, follow_symlink=False) is None
-            ):
+            if FileStat.from_path(child, follow_symlink=False) is None:
                 raise
             return PathAndStat.from_stat(child, None)
 
@@ -872,7 +882,7 @@ class PathSyncer(object):
             if ignore_error is None
             else _utils.as_error_handler(ignore_error)
         )
-        return self._sync(source, target, dry_run, _ignore_error, True, set())
+        return self._sync(source, target, dry_run, _ignore_error, True, set(), {})
 
     def _sync(
         self,
@@ -882,6 +892,7 @@ class PathSyncer(object):
         _ignore_error: _OnPathSyncerError,
         root: bool,
         swept: "set[str]",
+        listings: "dict[str, list]",
     ):
         checksum = self.checksum
 
@@ -1041,6 +1052,7 @@ class PathSyncer(object):
                         dry_run,
                         _ignore_error,
                         swept,
+                        listings,
                     )
                 if self.hook(
                     source,
@@ -1130,6 +1142,7 @@ class PathSyncer(object):
                         dry_run,
                         _ignore_error,
                         swept,
+                        listings,
                     )
                 if self.hook(
                     source, target, SyncEvent.Copy, dry_run, copy, _ignore_error
@@ -1185,6 +1198,22 @@ class PathSyncer(object):
 
             source_children = None
             windows_target = _utils.is_windows_flavoured(target.path)
+            target_entries_cache = None
+
+            def target_entries():
+                # The existing target directory's children, listed once and
+                # described by their own (non-following) stat: they serve the
+                # removal check, the stat of each child that is synced and the
+                # sweep. A failure is raised to the first caller only.
+                nonlocal target_entries_cache
+                if target_entries_cache is None:
+                    target_entries_cache = ()
+                    listing = list(_listing(target.path))
+                    listings[str(target.path)] = listing
+                    target_entries_cache = self._children(
+                        target, windows_target, listing, follow=False
+                    )
+                return target_entries_cache
 
             def unsafe_name(name, source_entry, target_entry, event):
                 # Names come from a listing the destination does not
@@ -1211,9 +1240,17 @@ class PathSyncer(object):
             if self.remove_missing and not target_absent:
 
                 def checkchildren():
-                    self._sweep(source.path, target.path, dry_run, _ignore_error, swept)
+                    entries = target_entries()
+                    self._sweep(
+                        source.path,
+                        target.path,
+                        dry_run,
+                        _ignore_error,
+                        swept,
+                        listings,
+                    )
                     source_names = {name for name, _ in get_source_children()}
-                    for name, child in self._children(target, windows_target):
+                    for name, child in entries:
 
                         def checkchild():
                             if unsafe_name(
@@ -1257,35 +1294,50 @@ class PathSyncer(object):
                     always_run=True,
                 )
 
+            def target_child(name, listed):
+                # A name the listing did not report is stat'd by `start()`,
+                # not assumed missing: a listing can omit an entry, and a
+                # case-insensitive target answers to another spelling.
+                path = _glob._child(target.path, name)
+                if target_absent:
+                    return PathAndStat.from_stat(path, None)
+                return listed.get(name, path)
+
             def sync_children():
-                for name, child in get_source_children():
-                    if unsafe_name(name, child, target, SyncEvent.SyncChild):
-                        continue
-                    self.hook(
-                        source,
-                        target,
-                        SyncEvent.SyncChild,
-                        dry_run,
-                        # Propagate the resolved policy into the recursive
-                        # call so a per-call override applies to the whole
-                        # subtree, not just this level.
-                        lambda child=child, name=name: self._sync(
-                            child,
-                            (
-                                PathAndStat.from_stat(
-                                    _glob._child(target.path, name), None
-                                )
-                                if target_absent
-                                else _glob._child(target.path, name)
-                            ),
+                try:
+                    listed = {}
+                    if not target_absent:
+                        try:
+                            listed = dict(target_entries())
+                        except Exception as error:
+                            # Each child is stat'd on its own and reports
+                            # its own failure.
+                            _logger.debug("could not list %s: %s", target.path, error)
+                    for name, child in get_source_children():
+                        if unsafe_name(name, child, target, SyncEvent.SyncChild):
+                            continue
+                        self.hook(
+                            source,
+                            target,
+                            SyncEvent.SyncChild,
                             dry_run,
+                            # Propagate the resolved policy into the recursive
+                            # call so a per-call override applies to the whole
+                            # subtree, not just this level.
+                            lambda child=child, name=name: self._sync(
+                                child,
+                                target_child(name, listed),
+                                dry_run,
+                                _ignore_error,
+                                False,
+                                swept,
+                                listings,
+                            ),
                             _ignore_error,
-                            False,
-                            swept,
-                        ),
-                        _ignore_error,
-                        always_run=True,
-                    )
+                            always_run=True,
+                        )
+                finally:
+                    listings.pop(str(target.path), None)
 
             self.hook(
                 source,

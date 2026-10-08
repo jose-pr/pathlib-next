@@ -1174,20 +1174,9 @@ class Path(Pathname, Chmod, Stat, BinaryOpen):
                 declined.append(error)
                 raise error
 
-        def _scan_entries(path):
-            for entry in path._scandir():
-                if isinstance(entry, tuple) and len(entry) == 2:
-                    yield entry
-                    continue
-                try:
-                    stat = FileStat.from_stat(entry.stat(follow_symlinks=False))
-                except OSError:
-                    stat = None
-                yield entry.name, stat
-
         def _remove_tree(path, *, link=False):
             try:
-                entries = list(_scan_entries(path))
+                entries = list(_listing(path))
             except Exception as error:
                 _handle(error, path)
                 return
@@ -1865,6 +1854,21 @@ def _follow_policy(policy, path: "Path") -> str:
 
 class _InvalidPolicy(ValueError):
     """A follow policy that is not `True`, `False` or `None`."""
+
+
+def _listing(path: Path) -> "_ty.Iterator[_ty.Tuple[str, _ty.Optional[FileStat]]]":
+    """`path._scandir()` as `(name, non-following stat or None)` pairs. An
+    entry that has `name` and `stat()`, as `os.scandir()` yields, is adapted;
+    `_scandir()` is documented to yield pairs."""
+    for entry in path._scandir():
+        if isinstance(entry, tuple) and len(entry) == 2:
+            yield entry
+            continue
+        try:
+            stat = FileStat.from_stat(entry.stat(follow_symlinks=False))
+        except OSError:
+            stat = None
+        yield entry.name, stat
 
 
 def _stat_or_none(path: Path, follow_symlinks: bool):
